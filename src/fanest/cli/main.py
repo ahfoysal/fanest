@@ -62,7 +62,7 @@ def info() -> None:
 
 
 @app.command()
-def build(path: str = typer.Argument("src")) -> None:
+def build(path: str = typer.Argument(".")) -> None:
     target = Path(path)
     if not target.exists():
         raise typer.BadParameter(f"Build path not found: {path}")

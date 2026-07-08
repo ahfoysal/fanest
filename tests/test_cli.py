@@ -38,6 +38,19 @@ def test_cli_new_generates_runnable_project_scaffold(tmp_path, monkeypatch):
     assert '"fanest[standard]"' in pyproject
 
 
+def test_cli_build_compiles_fresh_project_scaffold(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    new_result = runner.invoke(app, ["new", "blog_api"])
+    monkeypatch.chdir(tmp_path / "blog_api")
+    build_result = runner.invoke(app, ["build"])
+
+    assert new_result.exit_code == 0
+    assert build_result.exit_code == 0
+    assert "Build OK: ." in build_result.output
+
+
 def test_cli_generates_resource_and_extra_artifacts(tmp_path, monkeypatch):
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
@@ -288,9 +301,12 @@ def test_cli_info_and_build(tmp_path, monkeypatch):
     runner = CliRunner()
 
     info = runner.invoke(app, ["info"])
-    build = runner.invoke(app, ["build", "src"])
+    build = runner.invoke(app, ["build"])
+    build_src = runner.invoke(app, ["build", "src"])
 
     assert info.exit_code == 0
-    assert "FaNest 0.1.3" in info.output
+    assert "FaNest 0.1.4" in info.output
     assert build.exit_code == 0
-    assert "Build OK: src" in build.output
+    assert build_src.exit_code == 0
+    assert "Build OK: ." in build.output
+    assert "Build OK: src" in build_src.output
