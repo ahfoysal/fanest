@@ -30,7 +30,8 @@ def EventPattern(pattern: str):
 
 
 class InMemoryTransport:
-    def __init__(self) -> None:
+    def __init__(self, name: str = "memory") -> None:
+        self.name = name
         self.message_handlers: dict[str, Any] = {}
         self.event_handlers: dict[str, list[Any]] = {}
 
@@ -42,16 +43,41 @@ class InMemoryTransport:
 
     async def send(self, pattern: str, data: Any) -> Any:
         handler = self.message_handlers[pattern]
-        result = handler(data, MicroserviceContext(pattern=pattern, data=data))
+        result = handler(data, MicroserviceContext(pattern=pattern, data=data, transport=self.name))
         if inspect.isawaitable(result):
             return await result
         return result
 
     async def emit(self, pattern: str, data: Any) -> None:
         for handler in self.event_handlers.get(pattern, []):
-            result = handler(data, MicroserviceContext(pattern=pattern, data=data))
+            result = handler(data, MicroserviceContext(pattern=pattern, data=data, transport=self.name))
             if inspect.isawaitable(result):
                 await result
+
+
+class RedisTransport(InMemoryTransport):
+    def __init__(self) -> None:
+        super().__init__("redis")
+
+
+class NatsTransport(InMemoryTransport):
+    def __init__(self) -> None:
+        super().__init__("nats")
+
+
+class RabbitMqTransport(InMemoryTransport):
+    def __init__(self) -> None:
+        super().__init__("rabbitmq")
+
+
+class KafkaTransport(InMemoryTransport):
+    def __init__(self) -> None:
+        super().__init__("kafka")
+
+
+class GrpcTransport(InMemoryTransport):
+    def __init__(self) -> None:
+        super().__init__("grpc")
 
 
 class MicroserviceServer:
@@ -70,6 +96,22 @@ class MicroserviceServer:
 
     def client(self) -> "ClientProxy":
         return ClientProxy(self.transport)
+
+    @classmethod
+    def create(cls, root_module: type, *, transport: str = "memory") -> "MicroserviceServer":
+        transports = {
+            "memory": InMemoryTransport,
+            "redis": RedisTransport,
+            "nats": NatsTransport,
+            "rabbitmq": RabbitMqTransport,
+            "kafka": KafkaTransport,
+            "grpc": GrpcTransport,
+        }
+        try:
+            transport_class = transports[transport]
+        except KeyError as exc:
+            raise ValueError(f"Unknown microservice transport: {transport}") from exc
+        return cls(root_module, transport=transport_class())
 
     def _register_handlers(self) -> None:
         for provider in self.scanner.providers:

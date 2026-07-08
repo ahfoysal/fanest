@@ -14,7 +14,7 @@ from fanest import (
     Serialize,
     UseInterceptors,
 )
-from fanest.microservices import EventPattern, MessagePattern, MicroserviceServer
+from fanest.microservices import EventPattern, MessagePattern, MicroserviceServer, RedisTransport
 
 
 class HeaderMiddleware:
@@ -109,9 +109,11 @@ def test_partial_type_makes_fields_optional():
 
 class MathService:
     events: list[int] = []
+    transports: list[str] = []
 
     @MessagePattern("math.double")
     async def double(self, data, context):
+        self.transports.append(context.transport)
         return data * 2
 
     @EventPattern("math.seen")
@@ -134,3 +136,20 @@ async def test_microservice_message_and_event_patterns():
 
     service = server.container.resolve(MathService)
     assert service.events == [7]
+
+
+@pytest.mark.anyio
+async def test_microservice_named_transports_preserve_context():
+    server = MicroserviceServer(MathModule, transport=RedisTransport()).compile()
+    client = server.client()
+
+    assert await client.send("math.double", 2) == 4
+    assert server.container.resolve(MathService).transports[-1] == "redis"
+
+
+@pytest.mark.anyio
+async def test_microservice_server_create_selects_transport_by_name():
+    server = MicroserviceServer.create(MathModule, transport="kafka").compile()
+
+    assert await server.client().send("math.double", 3) == 6
+    assert server.container.resolve(MathService).transports[-1] == "kafka"
