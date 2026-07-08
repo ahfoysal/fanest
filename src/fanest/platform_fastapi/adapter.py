@@ -136,6 +136,18 @@ class FastApiAdapter:
                     if handler is None:
                         await websocket.send_json({"event": "error", "data": "Unknown event"})
                         continue
+                    context = ExecutionContext(
+                        handler=handler,
+                        controller=instance,
+                        request=websocket,
+                        kwargs={"data": data, "websocket": websocket},
+                    )
+                    try:
+                        await self._run_guards(instance, handler, context)
+                        data = await self._run_websocket_pipes(instance, handler, data, context)
+                    except Exception as exc:
+                        await websocket.send_json({"event": "error", "data": str(exc)})
+                        continue
                     result = handler(data, websocket)
                     if inspect.isawaitable(result):
                         result = await result
@@ -323,6 +335,28 @@ class FastApiAdapter:
                 kwargs[name] = result
         context.kwargs.update(kwargs)
         return kwargs
+
+    async def _run_websocket_pipes(
+        self,
+        gateway: Any,
+        handler: Callable[..., Any],
+        data: Any,
+        context: ExecutionContext,
+    ) -> Any:
+        result = data
+        parameter = inspect.signature(handler).parameters.get("data")
+        annotation = parameter.annotation if parameter is not None else None
+        for pipe in self._collect(gateway, handler, "__fanest_pipes__"):
+            instance = self._resolve_component(pipe)
+            transformed = instance.transform(
+                result,
+                {"name": "data", "handler": handler, "annotation": annotation},
+            )
+            if inspect.isawaitable(transformed):
+                transformed = await transformed
+            result = transformed
+        context.kwargs["data"] = result
+        return result
 
     async def _run_interceptors(
         self,

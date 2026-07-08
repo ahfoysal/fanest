@@ -1,6 +1,14 @@
 from fastapi.testclient import TestClient
 
-from fanest import FaNestFactory, Module, SubscribeMessage, WebSocketGateway, WebSocketManager
+from fanest import (
+    FaNestFactory,
+    Module,
+    SubscribeMessage,
+    UseGuards,
+    UsePipes,
+    WebSocketGateway,
+    WebSocketManager,
+)
 
 
 @WebSocketGateway("/chat")
@@ -50,3 +58,42 @@ def test_websocket_manager_supports_rooms_and_broadcasts():
             sender.send_json({"event": "publish", "data": {"body": "hello"}})
             assert receiver.receive_json() == {"event": "published", "data": {"body": "hello"}}
             assert sender.receive_json() == {"event": "publish", "data": {"sent": True}}
+
+
+class WebSocketTokenGuard:
+    def can_activate(self, context):
+        return context.request.query_params.get("token") == "ok"
+
+
+class UpperMessagePipe:
+    def transform(self, value, metadata):
+        return str(value).upper()
+
+
+@WebSocketGateway("/secure-chat")
+@UseGuards(WebSocketTokenGuard)
+class SecureChatGateway:
+    @SubscribeMessage("shout")
+    @UsePipes(UpperMessagePipe())
+    async def shout(self, data, websocket):
+        return {"message": data}
+
+
+@Module(gateways=[SecureChatGateway])
+class SecureChatModule:
+    pass
+
+
+def test_websocket_gateway_runs_guards_and_pipes():
+    client = TestClient(FaNestFactory.create(SecureChatModule))
+
+    with client.websocket_connect("/secure-chat?token=bad") as websocket:
+        websocket.send_json({"event": "shout", "data": "hello"})
+        assert websocket.receive_json()["event"] == "error"
+
+    with client.websocket_connect("/secure-chat?token=ok") as websocket:
+        websocket.send_json({"event": "shout", "data": "hello"})
+        assert websocket.receive_json() == {
+            "event": "shout",
+            "data": {"message": "HELLO"},
+        }
