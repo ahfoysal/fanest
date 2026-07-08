@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Injectable, Module, UseGuards, UseInterceptors
-from fanest.cache import CacheInterceptor, CacheModule, CacheTTL
+from fanest.cache import CacheInterceptor, CacheModule, CacheService, CacheTTL, MemoryCacheStore
 from fanest.schedule import Cron, Interval, SchedulerRegistry, Timeout
 from fanest.schedule.runner import ScheduleRunner
 from fanest.throttler import Throttle, ThrottlerGuard, ThrottlerModule
@@ -103,6 +103,31 @@ def test_cache_interceptor_reuses_response():
 
     assert client.get("/cached").json() == {"calls": 1}
     assert client.get("/cached").json() == {"calls": 1}
+
+
+def test_cache_service_isolated_per_application_instance():
+    first = FaNestFactory.create(CachedModule)
+    second = FaNestFactory.create(CachedModule)
+
+    first.state.fanest_container.resolve(CacheService).set("shared", "first")
+    second.state.fanest_container.resolve(CacheService).set("shared", "second")
+
+    assert first.state.fanest_container.resolve(CacheService).get("shared") == "first"
+    assert second.state.fanest_container.resolve(CacheService).get("shared") == "second"
+
+
+def test_cache_module_accepts_custom_store():
+    store = MemoryCacheStore()
+
+    @Module(imports=[CacheModule.register(store=store)])
+    class CustomCacheModule:
+        pass
+
+    app = FaNestFactory.create(CustomCacheModule)
+    cache = app.state.fanest_container.resolve(CacheService)
+    cache.set("key", "value")
+
+    assert store.get("key") == "value"
 
 
 @Controller("limited")

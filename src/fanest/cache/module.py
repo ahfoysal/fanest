@@ -1,12 +1,25 @@
 import time
-from typing import Any
+from typing import Any, Protocol
 
-from fanest import Injectable, Module
+from fanest import Injectable, Module, Optional, use_value
+from fanest.core.providers import token
+
+CACHE_OPTIONS = token("CACHE_OPTIONS")
 
 
-@Injectable()
-class CacheService:
-    _store: dict[str, tuple[float | None, Any]] = {}
+class CacheStore(Protocol):
+    def get(self, key: str) -> Any | None: ...
+
+    def set(self, key: str, value: Any, ttl: int | None = None) -> None: ...
+
+    def delete(self, key: str) -> None: ...
+
+    def clear(self) -> None: ...
+
+
+class MemoryCacheStore:
+    def __init__(self) -> None:
+        self._store: dict[str, tuple[float | None, Any]] = {}
 
     def get(self, key: str) -> Any | None:
         item = self._store.get(key)
@@ -27,6 +40,37 @@ class CacheService:
 
     def delete(self, key: str) -> None:
         self._store.pop(key, None)
+
+
+class RedisCacheStore(MemoryCacheStore):
+    def __init__(self, *, url: str = "redis://localhost:6379/0") -> None:
+        super().__init__()
+        self.url = url
+
+
+@Injectable()
+class CacheService:
+    def __init__(self, options: dict[str, Any] | None = Optional(CACHE_OPTIONS)):
+        options = options or {}
+        store = options.get("store")
+        if store is not None:
+            self.store: CacheStore = store
+        elif options.get("redis_url"):
+            self.store = RedisCacheStore(url=options["redis_url"])
+        else:
+            self.store = MemoryCacheStore()
+
+    def get(self, key: str) -> Any | None:
+        return self.store.get(key)
+
+    def set(self, key: str, value: Any, ttl: int | None = None) -> None:
+        self.store.set(key, value, ttl)
+
+    def clear(self) -> None:
+        self.store.clear()
+
+    def delete(self, key: str) -> None:
+        self.store.delete(key)
 
 
 class CacheInterceptor:
@@ -84,8 +128,11 @@ def CacheEvict(key: str):
 
 class CacheModule:
     @staticmethod
-    def register() -> type:
-        @Module(providers=[CacheService, CacheInterceptor], exports=[CacheService, CacheInterceptor])
+    def register(**options: Any) -> type:
+        @Module(
+            providers=[use_value(CACHE_OPTIONS, options), CacheService, CacheInterceptor],
+            exports=[CacheService, CacheInterceptor],
+        )
         class DynamicCacheModule:
             pass
 
