@@ -1,4 +1,5 @@
 import inspect
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -13,6 +14,8 @@ class Job:
     name: str
     data: Any
     attempts: int = 0
+    max_attempts: int = 1
+    delay: float = 0
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -48,6 +51,8 @@ class QueueService:
         *,
         name: str = "default",
         job_id: str | None = None,
+        attempts: int = 1,
+        delay: float = 0,
         metadata: dict[str, Any] | None = None,
     ) -> Job:
         job = Job(
@@ -55,14 +60,39 @@ class QueueService:
             queue=queue,
             name=name,
             data=data,
+            max_attempts=attempts,
+            delay=delay,
             metadata=metadata or {},
         )
         self._jobs.append(job)
+        if delay > 0:
+            await asyncio.sleep(delay)
         for handler in self._handlers.get((queue, name), []):
-            result = handler(job)
-            if inspect.isawaitable(result):
-                await result
+            await self._run_handler(handler, job)
         return job
+
+    async def _run_handler(self, handler: Any, job: Job) -> None:
+        last_error: Exception | None = None
+        for attempt in range(1, job.max_attempts + 1):
+            attempt_job = Job(
+                id=job.id,
+                queue=job.queue,
+                name=job.name,
+                data=job.data,
+                attempts=attempt,
+                max_attempts=job.max_attempts,
+                delay=job.delay,
+                metadata=job.metadata,
+            )
+            try:
+                result = handler(attempt_job)
+                if inspect.isawaitable(result):
+                    await result
+                return
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
 
     def jobs(self, queue: str | None = None) -> list[Job]:
         if queue is None:

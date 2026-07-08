@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import wraps
+from pathlib import Path
 from typing import Any, Callable
 
 from sqlalchemy import select
@@ -89,6 +90,32 @@ def Transactional(service_attr: str = "db"):
         return wrapper
 
     return decorator
+
+
+class MigrationManager:
+    def __init__(self, directory: str | Path = "migrations") -> None:
+        self.directory = Path(directory)
+
+    def create(self, name: str) -> Path:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        slug = name.lower().replace(" ", "_")
+        existing = sorted(self.directory.glob("*.py"))
+        filename = f"{len(existing) + 1:04d}_{slug}.py"
+        path = self.directory / filename
+        path.write_text(self.template(name), encoding="utf-8")
+        return path
+
+    def template(self, name: str) -> str:
+        return f'''"""Migration: {name}."""
+
+
+async def upgrade(connection):
+    pass
+
+
+async def downgrade(connection):
+    pass
+'''
 
 
 class SqlAlchemyModule:

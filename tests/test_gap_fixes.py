@@ -7,7 +7,7 @@ from fanest import Controller, FaNestFactory, Get, Injectable, Module, Post, Use
 from fanest.auth import AuthModule, JwtAuthGuard, Public
 from fanest.cache import CacheEvict, CacheInterceptor, CacheKey, CacheModule, CacheService, CacheTTL
 from fanest.config import ConfigModule, ConfigService
-from fanest.sqlalchemy import SqlAlchemyModule, SqlAlchemyService
+from fanest.sqlalchemy import MigrationManager, SqlAlchemyModule, SqlAlchemyService
 from fanest.testing import TestingModule
 
 
@@ -122,3 +122,10 @@ async def test_sqlalchemy_transaction_context():
 
     async with db.transaction() as session:
         assert session.in_transaction()
+
+
+def test_sqlalchemy_migration_manager_creates_template(tmp_path):
+    path = MigrationManager(tmp_path).create("Create users")
+
+    assert path.name == "0001_create_users.py"
+    assert "async def upgrade" in path.read_text(encoding="utf-8")

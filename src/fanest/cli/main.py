@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import typer
 
@@ -36,12 +37,15 @@ def start(
 def generate_resource(
     name: str,
     dry_run: bool = typer.Option(False, "--dry-run"),
+    module: str | None = typer.Option(None, "--module"),
 ) -> None:
     resource = _resource_dir(name, dry_run, exist_ok=False)
     class_name = _class_name(name)
     _write_file(resource / f"{name}_service.py", _service_template(class_name), dry_run)
     _write_file(resource / f"{name}_controller.py", _controller_template(name, class_name), dry_run)
     _write_file(resource / f"{name}_module.py", _module_template(name, class_name), dry_run)
+    if module:
+        _register_module_import(module, name, class_name, dry_run)
     typer.echo(f"Generated resource {name}")
 
 
@@ -50,11 +54,14 @@ def generate_module(
     name: str,
     dry_run: bool = typer.Option(False, "--dry-run"),
     flat: bool = typer.Option(False, "--flat"),
+    module: str | None = typer.Option(None, "--module"),
 ) -> None:
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
     target = Path("src") / f"{name}_module.py" if flat else resource / f"{name}_module.py"
     _write_file(target, _module_template(name, class_name), dry_run)
+    if module:
+        _register_module_import(module, name, class_name, dry_run)
     typer.echo(f"Generated module {name}")
 
 
@@ -160,6 +167,36 @@ def _write_file(path: Path, content: str, dry_run: bool) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _register_module_import(parent_module: str, child_name: str, child_class: str, dry_run: bool) -> None:
+    target = Path(parent_module)
+    if not target.exists():
+        target = Path("src") / parent_module
+    import_line = f"from .{child_name}.{child_name}_module import {child_class}Module\n"
+    if dry_run:
+        typer.echo(f"Would update {target} with {child_class}Module")
+        return
+    content = target.read_text(encoding="utf-8")
+    if import_line not in content:
+        content = import_line + content
+    module_name = f"{child_class}Module"
+    if "imports=[" in content and f"imports=[{module_name}" not in content:
+        content = content.replace("imports=[", f"imports=[{module_name}, ", 1)
+    elif "@Module(" in content and f"imports=[{module_name}" not in content:
+        content = re.sub(r"@Module\((?P<body>[^)]*)\)", _module_with_import(module_name), content, count=1)
+    target.write_text(content, encoding="utf-8")
+    typer.echo(f"Updated {target} with {module_name}")
+
+
+def _module_with_import(module_name: str):
+    def replace(match: re.Match[str]) -> str:
+        body = match.group("body").strip()
+        if not body:
+            return f"@Module(imports=[{module_name}])"
+        return f"@Module(imports=[{module_name}], {body})"
+
+    return replace
 
 
 def _main_template() -> str:

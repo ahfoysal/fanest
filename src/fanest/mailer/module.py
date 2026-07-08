@@ -1,4 +1,5 @@
 import smtplib
+import re
 from dataclasses import dataclass
 from email.message import EmailMessage
 from typing import Any
@@ -31,8 +32,12 @@ class MailerService:
         subject: str,
         text: str | None = None,
         html: str | None = None,
+        template: str | None = None,
+        context: dict[str, Any] | None = None,
         sender: str | None = None,
     ) -> MailMessage:
+        if template is not None:
+            text = self.render_template(template, context or {})
         message = MailMessage(
             to=to,
             subject=subject,
@@ -44,6 +49,15 @@ class MailerService:
         if self.options.get("smtp"):
             self._send_smtp(message)
         return message
+
+    def render_template(self, template: str, context: dict[str, Any]) -> str:
+        templates = self.options.get("templates", {})
+        source = templates.get(template, template)
+
+        def replace(match: re.Match[str]) -> str:
+            return str(context.get(match.group("key"), ""))
+
+        return re.sub(r"{{\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*}}", replace, source)
 
     def _send_smtp(self, message: MailMessage) -> None:
         smtp_options = self.options["smtp"]

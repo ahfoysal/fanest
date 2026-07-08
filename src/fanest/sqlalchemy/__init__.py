@@ -1,4 +1,5 @@
 from fanest.sqlalchemy.module import (
+    MigrationManager,
     SQLALCHEMY_OPTIONS,
     SqlAlchemyModule,
     SqlAlchemyRepository,
@@ -9,6 +10,7 @@ from fanest.sqlalchemy.module import (
 
 __all__ = [
     "SQLALCHEMY_OPTIONS",
+    "MigrationManager",
     "SqlAlchemyModule",
     "SqlAlchemyRepository",
     "SqlAlchemyService",
