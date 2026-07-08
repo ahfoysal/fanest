@@ -1,7 +1,9 @@
 from fanest.swagger.decorators import (
     ApiBearerAuth,
     ApiBody,
+    ApiBasicAuth,
     ApiConsumes,
+    ApiCookieAuth,
     ApiExcludeEndpoint,
     ApiHeader,
     ApiOperation,
@@ -10,6 +12,7 @@ from fanest.swagger.decorators import (
     ApiProperty,
     ApiQuery,
     ApiResponse,
+    ApiSecurity,
     ApiTags,
 )
 from fanest.swagger.module import DocumentBuilder, SwaggerModule
@@ -17,7 +20,9 @@ from fanest.swagger.module import DocumentBuilder, SwaggerModule
 __all__ = [
     "ApiBearerAuth",
     "ApiBody",
+    "ApiBasicAuth",
     "ApiConsumes",
+    "ApiCookieAuth",
     "ApiExcludeEndpoint",
     "ApiHeader",
     "ApiOperation",
@@ -26,6 +31,7 @@ __all__ = [
     "ApiProperty",
     "ApiQuery",
     "ApiResponse",
+    "ApiSecurity",
     "ApiTags",
     "DocumentBuilder",
     "SwaggerModule",

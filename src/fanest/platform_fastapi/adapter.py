@@ -94,6 +94,14 @@ class FastApiAdapter:
                 extra = dict(route_options.get("openapi_extra", {}))
                 extra["security"] = [*extra.get("security", []), {"bearer": []}]
                 route_options["openapi_extra"] = extra
+            securities = [
+                *getattr(controller, "__fanest_security__", []),
+                *self._metadata(handler, "__fanest_security__", []),
+            ]
+            if securities:
+                extra = dict(route_options.get("openapi_extra", {}))
+                extra["security"] = [*extra.get("security", []), *securities]
+                route_options["openapi_extra"] = extra
             self.app.add_api_route(
                 path,
                 endpoint,

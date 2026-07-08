@@ -126,12 +126,32 @@ def ApiExcludeEndpoint():
     return decorator
 
 
-def ApiBearerAuth() -> Callable[[T], T]:
+def ApiSecurity(name: str, scopes: list[str] | None = None) -> Callable[[T], T]:
     def decorator(target: T) -> T:
-        setattr(target, "__fanest_bearer_auth__", True)
+        securities = list(getattr(target, "__fanest_security__", []))
+        securities.append({name: scopes or []})
+        setattr(target, "__fanest_security__", securities)
         return target
 
     return decorator
+
+
+def ApiBearerAuth(name: str = "bearer") -> Callable[[T], T]:
+    def decorator(target: T) -> T:
+        if name == "bearer":
+            setattr(target, "__fanest_bearer_auth__", True)
+            return target
+        return ApiSecurity(name)(target)
+
+    return decorator
+
+
+def ApiBasicAuth(name: str = "basic") -> Callable[[T], T]:
+    return ApiSecurity(name)
+
+
+def ApiCookieAuth(name: str = "cookie") -> Callable[[T], T]:
+    return ApiSecurity(name)
 
 
 def ApiProperty(

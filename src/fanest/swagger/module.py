@@ -51,6 +51,29 @@ class DocumentBuilder:
         self._config["security"].append({name: []})
         return self
 
+    def add_basic_auth(self, name: str = "basic") -> "DocumentBuilder":
+        self._config["components"]["securitySchemes"][name] = {
+            "type": "http",
+            "scheme": "basic",
+        }
+        self._config["security"].append({name: []})
+        return self
+
+    def add_api_key(
+        self,
+        *,
+        name: str = "api_key",
+        header_name: str = "x-api-key",
+        location: str = "header",
+    ) -> "DocumentBuilder":
+        self._config["components"]["securitySchemes"][name] = {
+            "type": "apiKey",
+            "name": header_name,
+            "in": location,
+        }
+        self._config["security"].append({name: []})
+        return self
+
     def build(self) -> dict[str, Any]:
         return self._config
 

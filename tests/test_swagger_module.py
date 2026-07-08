@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from fanest import Controller, FaNestFactory, Get, Module, Param
 from fanest.swagger import (
     ApiBearerAuth,
+    ApiBasicAuth,
     ApiConsumes,
     ApiExcludeEndpoint,
     ApiHeader,
@@ -12,6 +13,7 @@ from fanest.swagger import (
     ApiProduces,
     ApiProperty,
     ApiQuery,
+    ApiSecurity,
     ApiTags,
     DocumentBuilder,
     SwaggerModule,
@@ -32,6 +34,7 @@ class DocsController:
         return {"hidden": True}
 
     @ApiHeader("x-request-id", "Request id")
+    @ApiSecurity("api_key")
     @ApiConsumes("application/json")
     @ApiProduces("application/json")
     @ApiOperation(summary="Find a document", description="Returns one document")
@@ -40,6 +43,11 @@ class DocsController:
     @Get("/{doc_id}")
     async def find_one(self, doc_id: str = Param()):
         return {"id": doc_id}
+
+    @ApiBasicAuth()
+    @Get("/basic")
+    async def basic(self):
+        return {"ok": True}
 
 
 @Module(controllers=[DocsController])
@@ -54,6 +62,8 @@ def test_swagger_decorators_and_module_setup():
         .set_title("Docs API")
         .set_version("2.0.0")
         .add_bearer_auth()
+        .add_basic_auth()
+        .add_api_key()
         .add_tag("docs", "Documentation")
         .build()
     )
@@ -65,10 +75,14 @@ def test_swagger_decorators_and_module_setup():
 
     assert operation["summary"] == "Find a document"
     assert operation["tags"] == ["docs"]
-    assert operation["security"] == [{"bearer": []}]
+    assert operation["security"] == [{"bearer": []}, {"api_key": []}]
     assert any(parameter["name"] == "x-request-id" for parameter in operation["parameters"])
     assert "application/json" in operation["requestBody"]["content"]
     assert "application/json" in operation["responses"]["200"]["content"]
+    assert document["components"]["securitySchemes"]["basic"]["scheme"] == "basic"
+    assert document["components"]["securitySchemes"]["api_key"]["name"] == "x-api-key"
+    basic_operation = client.get("/api-docs/openapi.json").json()["paths"]["/docs/basic"]["get"]
+    assert {"basic": []} in basic_operation["security"]
     assert "/docs/internal" not in client.get("/api-docs/openapi.json").json()["paths"]
     assert CreateDocDto.model_json_schema()["properties"]["title"]["description"] == "Document title"
     assert client.get("/api-docs").status_code == 200
