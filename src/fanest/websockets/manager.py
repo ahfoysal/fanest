@@ -33,6 +33,18 @@ class WebSocketManager:
             return list(self._rooms.get(room, set()))
         return list(self._socket_rooms)
 
+    async def broadcast_all(
+        self,
+        event: str,
+        data: Any,
+        *,
+        exclude: WebSocket | None = None,
+    ) -> None:
+        for websocket in list(self._socket_rooms):
+            if websocket is exclude:
+                continue
+            await websocket.send_json({"event": event, "data": data})
+
     async def broadcast(
         self,
         room: str,
@@ -69,5 +81,13 @@ class SocketIoServer:
     def to(self, room: str) -> SocketIoRoomEmitter:
         return SocketIoRoomEmitter(self.manager, room)
 
-    async def emit(self, websocket: WebSocket, event: str, data: Any) -> None:
-        await websocket.send_json({"event": event, "data": data})
+    async def emit(self, *args: Any, exclude: WebSocket | None = None) -> None:
+        if len(args) == 3:
+            websocket, event, data = args
+            await websocket.send_json({"event": event, "data": data})
+            return
+        if len(args) == 2:
+            event, data = args
+            await self.manager.broadcast_all(event, data, exclude=exclude)
+            return
+        raise TypeError("emit expects (websocket, event, data) or (event, data)")

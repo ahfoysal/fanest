@@ -30,8 +30,8 @@ class WorkerService:
 
 class WorkerModule:
     @staticmethod
-    def for_root() -> type:
-        @Module(providers=[WorkerService], exports=[WorkerService])
+    def for_root(*, is_global: bool = False) -> type:
+        @Module(providers=[WorkerService], exports=[WorkerService], global_module=is_global)
         class DynamicWorkerModule:
             pass
 

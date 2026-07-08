@@ -3,7 +3,8 @@ from typing import Any, Callable
 
 import jwt
 
-from fanest import ForbiddenException, Inject, Injectable, Module, UnauthorizedException, use_value
+from fanest import ForbiddenException, Inject, Injectable, Module, UnauthorizedException, use_class, use_value
+from fanest.core.enhancers import APP_GUARD
 from fanest.core.metadata import ParameterSource
 from fanest.core.providers import token
 from fanest.core.providers import use_factory as provider_factory
@@ -18,16 +19,30 @@ class JwtService:
         self.algorithm = options.get("algorithm", "HS256")
         self.expires_in_seconds = options.get("expires_in_seconds", 3600)
 
-    def sign(self, payload: dict[str, Any]) -> str:
+    def sign(self, payload: dict[str, Any], **options: Any) -> str:
         token_payload = dict(payload)
-        if self.expires_in_seconds is not None:
+        expires_in_seconds = options.pop("expires_in_seconds", self.expires_in_seconds)
+        if expires_in_seconds is not None:
             token_payload["exp"] = datetime.now(timezone.utc) + timedelta(
-                seconds=self.expires_in_seconds
+                seconds=expires_in_seconds
             )
-        return jwt.encode(token_payload, self.secret, algorithm=self.algorithm)
+        secret = options.pop("secret", self.secret)
+        algorithm = options.pop("algorithm", self.algorithm)
+        return jwt.encode(token_payload, secret, algorithm=algorithm, **options)
 
-    def verify(self, token: str) -> dict[str, Any]:
-        return jwt.decode(token, self.secret, algorithms=[self.algorithm])
+    def verify(self, token: str, **options: Any) -> dict[str, Any]:
+        secret = options.pop("secret", self.secret)
+        algorithms = options.pop("algorithms", [options.pop("algorithm", self.algorithm)])
+        return jwt.decode(token, secret, algorithms=algorithms, **options)
+
+    def decode(self, token: str, **options: Any) -> dict[str, Any]:
+        return jwt.decode(token, options={"verify_signature": False}, **options)
+
+    async def sign_async(self, payload: dict[str, Any], **options: Any) -> str:
+        return self.sign(payload, **options)
+
+    async def verify_async(self, token: str, **options: Any) -> dict[str, Any]:
+        return self.verify(token, **options)
 
 
 class JwtAuthGuard:
@@ -52,7 +67,7 @@ class RolesGuard:
     def can_activate(self, context):
         if is_public(context.handler, context.controller.__class__):
             return True
-        required_roles = getattr(context.handler, "__fanest_roles__", [])
+        required_roles = roles_for(context.handler, context.controller.__class__)
         if not required_roles:
             return True
         user = getattr(context.request.state, "user", None)
@@ -67,6 +82,9 @@ class RolesGuard:
 def Roles(*roles: str):
     def decorator(target):
         setattr(target, "__fanest_roles__", list(roles))
+        metadata = dict(getattr(target, "__fanest_metadata__", {}))
+        metadata["roles"] = list(roles)
+        setattr(target, "__fanest_metadata__", metadata)
         return target
 
     return decorator
@@ -75,18 +93,45 @@ def Roles(*roles: str):
 def Public():
     def decorator(target):
         setattr(target, "__fanest_public__", True)
+        metadata = dict(getattr(target, "__fanest_metadata__", {}))
+        metadata["is_public"] = True
+        setattr(target, "__fanest_metadata__", metadata)
         return target
 
     return decorator
 
 
 def is_public(handler: Any, controller: type | None = None) -> bool:
-    if getattr(handler, "__fanest_public__", False):
+    if _metadata_value(handler, "__fanest_public__", "is_public", None) is True:
         return True
-    func = getattr(handler, "__func__", None)
-    if func is not None and getattr(func, "__fanest_public__", False):
-        return True
-    return bool(controller is not None and getattr(controller, "__fanest_public__", False))
+    return bool(controller is not None and _metadata_value(controller, "__fanest_public__", "is_public", None) is True)
+
+
+def roles_for(handler: Any, controller: type | None = None) -> list[str]:
+    roles = _metadata_value(handler, "__fanest_roles__", "roles", None)
+    if roles is not None:
+        return list(roles)
+    if controller is not None:
+        roles = _metadata_value(controller, "__fanest_roles__", "roles", None)
+        if roles is not None:
+            return list(roles)
+    return []
+
+
+def _metadata_value(target: Any, attr: str, key: str, default: Any) -> Any:
+    if hasattr(target, attr):
+        return getattr(target, attr)
+    metadata = getattr(target, "__fanest_metadata__", {})
+    if key in metadata:
+        return metadata[key]
+    func = getattr(target, "__func__", None)
+    if func is not None:
+        if hasattr(func, attr):
+            return getattr(func, attr)
+        metadata = getattr(func, "__fanest_metadata__", {})
+        if key in metadata:
+            return metadata[key]
+    return default
 
 
 def CurrentUser(default: Any = None) -> ParameterSource:
@@ -100,6 +145,8 @@ class AuthModule:
         secret: str,
         algorithm: str = "HS256",
         expires_in_seconds: int | None = 3600,
+        is_global: bool = False,
+        global_guard: bool = False,
     ) -> type:
         options = {
             "secret": secret,
@@ -107,7 +154,15 @@ class AuthModule:
             "expires_in_seconds": expires_in_seconds,
         }
 
-        @Module(providers=[use_value(JWT_OPTIONS, options), JwtService], exports=[JwtService])
+        providers = [use_value(JWT_OPTIONS, options), JwtService]
+        if global_guard:
+            providers.extend([use_class(APP_GUARD, JwtAuthGuard), RolesGuard])
+
+        @Module(
+            providers=providers,
+            exports=[JwtService],
+            global_module=is_global,
+        )
         class DynamicAuthModule:
             pass
 
@@ -118,12 +173,22 @@ class AuthModule:
         *,
         use_factory: Callable[..., dict[str, Any]],
         inject: list[Any] | None = None,
+        is_global: bool = False,
+        global_guard: bool = False,
     ) -> type:
+        providers = [provider_factory(JWT_OPTIONS, use_factory, inject=inject or []), JwtService]
+        if global_guard:
+            providers.extend([use_class(APP_GUARD, JwtAuthGuard), RolesGuard])
+
         @Module(
-            providers=[provider_factory(JWT_OPTIONS, use_factory, inject=inject or []), JwtService],
+            providers=providers,
             exports=[JwtService],
+            global_module=is_global,
         )
         class DynamicAuthModule:
             pass
 
         return DynamicAuthModule
+
+
+JwtModule = AuthModule

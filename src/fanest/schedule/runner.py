@@ -38,6 +38,9 @@ class ScheduleRunner:
         self.tasks.clear()
 
     def _schedule(self, name: str, metadata: dict[str, Any], coroutine: Any) -> None:
+        if metadata.get("disabled"):
+            coroutine.close()
+            return
         task = asyncio.create_task(coroutine, name=name)
         self.tasks.append(task)
         self.registry.add(name, metadata["type"], task, metadata)

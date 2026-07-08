@@ -62,6 +62,7 @@ class ConfigModule:
         env_file: str | list[str] | None = ".env",
         schema: type[BaseModel] | None = None,
         values: dict[str, Any] | None = None,
+        is_global: bool = False,
     ) -> type:
         config_values: dict[str, Any] = dict(os.environ)
         env_files = [env_file] if isinstance(env_file, str) else env_file or []
@@ -71,7 +72,11 @@ class ConfigModule:
         if schema is not None:
             config_values = schema.model_validate(config_values).model_dump()
 
-        @Module(providers=[use_value(CONFIG_VALUES, config_values), ConfigService], exports=[ConfigService])
+        @Module(
+            providers=[use_value(CONFIG_VALUES, config_values), ConfigService],
+            exports=[ConfigService],
+            global_module=is_global,
+        )
         class DynamicConfigModule:
             pass
 
@@ -84,6 +89,7 @@ class ConfigModule:
         inject: list[Any] | None = None,
         env_file: str | list[str] | None = ".env",
         schema: type[BaseModel] | None = None,
+        is_global: bool = False,
     ) -> type:
         async def load_values(*dependencies: Any) -> dict[str, Any]:
             config_values: dict[str, Any] = dict(os.environ)
@@ -101,6 +107,7 @@ class ConfigModule:
         @Module(
             providers=[provider_factory(CONFIG_VALUES, load_values, inject=inject or []), ConfigService],
             exports=[ConfigService],
+            global_module=is_global,
         )
         class DynamicConfigModule:
             pass

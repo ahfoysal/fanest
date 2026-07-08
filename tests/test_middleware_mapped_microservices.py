@@ -15,6 +15,13 @@ from fanest import (
     UseInterceptors,
 )
 from fanest.microservices import EventPattern, MessagePattern, MicroserviceServer, RedisTransport
+from fanest.microservices import (
+    ClientProxy,
+    ClientsModule,
+    InjectClient,
+    MicroservicePatternError,
+    Transport,
+)
 
 
 class HeaderMiddleware:
@@ -149,7 +156,41 @@ async def test_microservice_named_transports_preserve_context():
 
 @pytest.mark.anyio
 async def test_microservice_server_create_selects_transport_by_name():
-    server = MicroserviceServer.create(MathModule, transport="kafka").compile()
+    server = MicroserviceServer.create(MathModule, transport=Transport.KAFKA).compile()
 
     assert await server.client().send("math.double", 3) == 6
     assert server.container.resolve(MathService).transports[-1] == "kafka"
+
+
+@pytest.mark.anyio
+async def test_microservice_client_proxy_lifecycle_and_missing_pattern_error():
+    server = MicroserviceServer(MathModule).compile()
+    client = server.client()
+
+    assert client.connected is False
+    assert await client.send("math.double", 4) == 8
+    assert client.connected is True
+    await client.close()
+    assert client.connected is False
+    with pytest.raises(MicroservicePatternError):
+        await client.send("missing", None)
+
+
+class ClientConsumer:
+    def __init__(self, client: ClientProxy = InjectClient("math")):
+        self.client = client
+
+
+@Module(
+    imports=[ClientsModule.register({"name": "math", "transport": Transport.MEMORY})],
+    providers=[ClientConsumer],
+)
+class ClientsAppModule:
+    pass
+
+
+def test_clients_module_registers_injectable_client_proxy():
+    app = FaNestFactory.create(ClientsAppModule)
+    consumer = app.state.fanest_container.resolve(ClientConsumer)
+
+    assert isinstance(consumer.client, ClientProxy)

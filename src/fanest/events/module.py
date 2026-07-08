@@ -46,8 +46,8 @@ class EventEmitter:
 
 class EventEmitterModule:
     @staticmethod
-    def for_root() -> type:
-        @Module(providers=[EventEmitter], exports=[EventEmitter])
+    def for_root(*, is_global: bool = False) -> type:
+        @Module(providers=[EventEmitter], exports=[EventEmitter], global_module=is_global)
         class DynamicEventEmitterModule:
             pass
 

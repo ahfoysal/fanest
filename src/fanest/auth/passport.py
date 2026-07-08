@@ -1,7 +1,7 @@
 import inspect
 from typing import Any
 
-from fanest import Injectable, Module
+from fanest import Injectable, Module, UnauthorizedException
 
 
 class PassportStrategy:
@@ -20,6 +20,8 @@ class PassportService:
         self._strategies[strategy.name] = strategy
 
     async def authenticate(self, name: str, context) -> Any:
+        if name not in self._strategies:
+            raise UnauthorizedException(f"Unknown passport strategy: {name}")
         strategy = self._strategies[name]
         result = strategy.authenticate(context)
         if inspect.isawaitable(result):
@@ -35,7 +37,7 @@ def AuthGuard(strategy: str = "default"):
         async def can_activate(self, context):
             user = await self.passport.authenticate(strategy, context)
             if not user:
-                return False
+                raise UnauthorizedException("Unauthorized")
             context.request.state.user = user
             return True
 
@@ -44,8 +46,8 @@ def AuthGuard(strategy: str = "default"):
 
 class PassportModule:
     @staticmethod
-    def register(*strategies: type[PassportStrategy]) -> type:
-        @Module(providers=[PassportService, *strategies], exports=[PassportService])
+    def register(*strategies: type[PassportStrategy], is_global: bool = False) -> type:
+        @Module(providers=[PassportService, *strategies], exports=[PassportService], global_module=is_global)
         class DynamicPassportModule:
             pass
 

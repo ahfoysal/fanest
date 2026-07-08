@@ -31,7 +31,25 @@ class PassportAppModule:
 
 def test_passport_strategy_guard_authenticates_requests():
     with TestClient(FaNestFactory.create(PassportAppModule)) as client:
-        assert client.get("/passport").status_code == 403
+        assert client.get("/passport").status_code == 401
         assert client.get("/passport", headers={"x-api-key": "secret"}).json() == {
             "user": {"sub": "api-user"}
         }
+
+
+@Controller("missing-passport")
+@UseGuards(AuthGuard("missing"))
+class MissingPassportController:
+    @Get("/")
+    async def index(self):
+        return {"ok": True}
+
+
+@Module(imports=[PassportModule.register()], controllers=[MissingPassportController])
+class MissingPassportModule:
+    pass
+
+
+def test_passport_missing_strategy_returns_unauthorized():
+    with TestClient(FaNestFactory.create(MissingPassportModule)) as client:
+        assert client.get("/missing-passport").status_code == 401

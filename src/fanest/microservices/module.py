@@ -1,9 +1,12 @@
 import inspect
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from fanest.core.container import FaNestContainer
+from fanest.core.metadata import ValueProvider
 from fanest.core.scanner import ModuleScanner
+from fanest import Inject, Module, use_value
 
 
 @dataclass(frozen=True)
@@ -11,6 +14,19 @@ class MicroserviceContext:
     pattern: str
     data: Any
     transport: str = "memory"
+
+
+class Transport(str, Enum):
+    MEMORY = "memory"
+    REDIS = "redis"
+    NATS = "nats"
+    RABBITMQ = "rabbitmq"
+    KAFKA = "kafka"
+    GRPC = "grpc"
+
+
+class MicroservicePatternError(KeyError):
+    pass
 
 
 def MessagePattern(pattern: str):
@@ -42,6 +58,8 @@ class InMemoryTransport:
         self.event_handlers.setdefault(pattern, []).append(handler)
 
     async def send(self, pattern: str, data: Any) -> Any:
+        if pattern not in self.message_handlers:
+            raise MicroservicePatternError(f"No message handler registered for pattern: {pattern}")
         handler = self.message_handlers[pattern]
         result = handler(data, MicroserviceContext(pattern=pattern, data=data, transport=self.name))
         if inspect.isawaitable(result):
@@ -98,7 +116,8 @@ class MicroserviceServer:
         return ClientProxy(self.transport)
 
     @classmethod
-    def create(cls, root_module: type, *, transport: str = "memory") -> "MicroserviceServer":
+    def create(cls, root_module: type, *, transport: str | Transport = Transport.MEMORY) -> "MicroserviceServer":
+        transport_name = transport.value if isinstance(transport, Transport) else transport
         transports = {
             "memory": InMemoryTransport,
             "redis": RedisTransport,
@@ -108,9 +127,9 @@ class MicroserviceServer:
             "grpc": GrpcTransport,
         }
         try:
-            transport_class = transports[transport]
+            transport_class = transports[transport_name]
         except KeyError as exc:
-            raise ValueError(f"Unknown microservice transport: {transport}") from exc
+            raise ValueError(f"Unknown microservice transport: {transport_name}") from exc
         return cls(root_module, transport=transport_class())
 
     def _register_handlers(self) -> None:
@@ -128,9 +147,57 @@ class MicroserviceServer:
 class ClientProxy:
     def __init__(self, transport: InMemoryTransport):
         self.transport = transport
+        self.connected = False
+
+    async def connect(self) -> "ClientProxy":
+        self.connected = True
+        return self
+
+    async def close(self) -> None:
+        self.connected = False
 
     async def send(self, pattern: str, data: Any) -> Any:
+        if not self.connected:
+            await self.connect()
         return await self.transport.send(pattern, data)
 
     async def emit(self, pattern: str, data: Any) -> None:
+        if not self.connected:
+            await self.connect()
         await self.transport.emit(pattern, data)
+
+
+class ClientProxyFactory:
+    @staticmethod
+    def create(*, transport: str | Transport = Transport.MEMORY) -> ClientProxy:
+        server = MicroserviceServer.create(_EmptyMicroserviceModule, transport=transport).compile()
+        return server.client()
+
+
+def client_token(name: str):
+    return f"FANEST_CLIENT:{name}"
+
+
+def InjectClient(name: str = "default"):
+    return Inject(client_token(name))
+
+
+class ClientsModule:
+    @staticmethod
+    def register(*clients: dict[str, Any], is_global: bool = False) -> type:
+        providers: list[ValueProvider] = []
+        for client in clients:
+            name = client.get("name", "default")
+            transport = client.get("transport", Transport.MEMORY)
+            providers.append(use_value(client_token(name), ClientProxyFactory.create(transport=transport)))
+
+        @Module(providers=providers, exports=[client.provide for client in providers], global_module=is_global)
+        class DynamicClientsModule:
+            pass
+
+        return DynamicClientsModule
+
+
+@Module()
+class _EmptyMicroserviceModule:
+    pass

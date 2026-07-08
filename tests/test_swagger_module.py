@@ -99,6 +99,7 @@ def test_swagger_decorators_and_module_setup():
     assert "application/json" in operation["responses"]["200"]["content"]
     assert document["components"]["securitySchemes"]["basic"]["scheme"] == "basic"
     assert document["components"]["securitySchemes"]["api_key"]["name"] == "x-api-key"
+    assert client.get("/openapi.json").json()["components"]["securitySchemes"]["bearer"]["scheme"] == "bearer"
     assert "ErrorDto" in document["components"]["schemas"]
     assert "export class ApiClient" in client_source
     assert "fetch(`${this.baseUrl}/docs/{doc_id}`" in client_source

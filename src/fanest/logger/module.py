@@ -28,10 +28,10 @@ class Logger:
 
 class LoggerModule:
     @staticmethod
-    def register(*, level: int = logging.INFO) -> type:
+    def register(*, level: int = logging.INFO, is_global: bool = False) -> type:
         logging.basicConfig(level=level)
 
-        @Module(providers=[Logger], exports=[Logger])
+        @Module(providers=[Logger], exports=[Logger], global_module=is_global)
         class DynamicLoggerModule:
             pass
 

@@ -74,3 +74,10 @@ def test_app_enhancer_provider_tokens_apply_globally():
     assert blocked.status_code == 403
     assert allowed.json() == {"name": "ADA", "intercepted": True}
     assert filtered.json() == {"filtered": "handled globally"}
+
+
+def test_app_enhancer_provider_tokens_do_not_break_lifespan():
+    with TestClient(FaNestFactory.create(EnhancerModule)) as client:
+        response = client.get("/enhancers", params={"name": "ada"}, headers={"x-auth": "ok"})
+
+    assert response.json() == {"name": "ADA", "intercepted": True}

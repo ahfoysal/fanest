@@ -12,6 +12,8 @@ from fanest import (
     Param,
     Post,
     Query,
+    Req,
+    State,
     UseFilters,
     UseGuards,
     UseInterceptors,
@@ -41,6 +43,20 @@ class TrimPipe:
     def transform(self, value, metadata):
         if isinstance(value, CreateUserDto):
             return CreateUserDto(name=value.name.strip())
+        return value
+
+
+class AddOnePipe:
+    def transform(self, value, metadata):
+        assert metadata["source"] == "query"
+        return value + 1
+
+
+class TrackingPipe:
+    seen: list[str] = []
+
+    def transform(self, value, metadata):
+        self.seen.append(metadata["name"])
         return value
 
 
@@ -82,6 +98,16 @@ class UsersController:
     async def blocked(self):
         raise HTTPException(status_code=418, detail="blocked")
 
+    @Get("/param-pipe")
+    async def param_pipe(self, value: int = Query("value", AddOnePipe())):
+        return {"value": value}
+
+    @UsePipes(TrackingPipe())
+    @Get("/framework-params")
+    async def framework_params(self, request=Req(), user: dict = State("user"), value: str = Query()):
+        request.state.user = user or {"sub": "local"}
+        return {"value": value, "user": request.state.user}
+
 
 @Module(controllers=[UsersController], providers=[UsersService])
 class UsersModule:
@@ -95,5 +121,12 @@ def test_param_query_body_pipes_guards_interceptors_and_filters():
         "data": {"id": 7, "verbose": True}
     }
     assert client.post("/users", json={"name": " Ada "}).json() == {"name": "Ada"}
-    assert client.get("/users/7", headers={"x-deny": "1"}).status_code == 403
+    assert client.get("/users/7", headers={"x-deny": "1"}).json() == {"error": "Forbidden"}
     assert client.get("/users/blocked").json() == {"error": "blocked"}
+    assert client.get("/users/param-pipe?value=4").json() == {"value": 5}
+    TrackingPipe.seen = []
+    assert client.get("/users/framework-params?value=ok").json() == {
+        "value": "ok",
+        "user": {"sub": "local"},
+    }
+    assert TrackingPipe.seen == ["value"]

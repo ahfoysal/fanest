@@ -139,7 +139,14 @@ class FastApiAdapter:
                     await result
             try:
                 while True:
-                    payload = await websocket.receive_json()
+                    try:
+                        payload = await websocket.receive_json()
+                    except ValueError as exc:
+                        await websocket.send_json({"event": "error", "data": f"Invalid JSON payload: {exc}"})
+                        continue
+                    if not isinstance(payload, dict):
+                        await websocket.send_json({"event": "error", "data": "Payload must be an object"})
+                        continue
                     event = payload.get("event")
                     data = payload.get("data")
                     handler = handlers.get(event)
@@ -174,6 +181,9 @@ class FastApiAdapter:
                         )
                         continue
                     if result is not None:
+                        if isinstance(result, dict) and set(result) >= {"event", "data"}:
+                            await websocket.send_json({"event": result["event"], "data": result["data"]})
+                            continue
                         await websocket.send_json({"event": event, "data": result})
             except WebSocketDisconnect:
                 pass
@@ -207,53 +217,50 @@ class FastApiAdapter:
             )
             try:
                 await self._run_guards(controller, handler, context)
-                try:
-                    context.kwargs.update(self._bind_request_parameters(handler, request, kwargs))
-                    context.kwargs.update(self._bind_response_parameters(handler, response, kwargs))
-                    context.kwargs.update(
-                        self._bind_background_tasks_parameters(
-                            handler, background_tasks, context.kwargs
-                        )
+                context.kwargs.update(self._bind_request_parameters(handler, request, kwargs))
+                context.kwargs.update(self._bind_response_parameters(handler, response, kwargs))
+                context.kwargs.update(
+                    self._bind_background_tasks_parameters(
+                        handler, background_tasks, context.kwargs
                     )
-                    context.kwargs.update(self._bind_ip_parameters(handler, request, context.kwargs))
-                    context.kwargs.update(
-                        self._bind_session_parameters(handler, request, context.kwargs)
-                    )
-                    context.kwargs.update(self._bind_host_parameters(handler, request, context.kwargs))
-                    context.kwargs.update(self._bind_state_parameters(handler, request, kwargs))
-                    context.kwargs.update(self._bind_custom_parameters(handler, context, kwargs))
-                    kwargs = await self._run_pipes(controller, handler, context)
+                )
+                context.kwargs.update(self._bind_ip_parameters(handler, request, context.kwargs))
+                context.kwargs.update(self._bind_session_parameters(handler, request, context.kwargs))
+                context.kwargs.update(self._bind_host_parameters(handler, request, context.kwargs))
+                context.kwargs.update(self._bind_state_parameters(handler, request, kwargs))
+                context.kwargs.update(self._bind_custom_parameters(handler, context, kwargs))
+                kwargs = await self._run_pipes(controller, handler, context)
 
-                    async def call_handler() -> Any:
-                        result = handler(**kwargs)
-                        if inspect.isawaitable(result):
-                            result = await result
-                        response_headers = dict(self._response_headers(controller, handler))
-                        for name, value in response_headers.items():
-                            response.headers[name] = value
-                        if self._metadata(handler, "__fanest_sse__", False):
-                            return self._sse_response(result, response_headers)
-                        if isinstance(result, StreamableFile):
-                            return result.to_response(response_headers)
-                        render_template = self._metadata(handler, "__fanest_render_template__")
-                        if render_template is not None:
-                            return self._render_response(render_template, result, response_headers)
-                        redirect = self._metadata(handler, "__fanest_redirect__")
-                        if redirect is not None:
-                            if isinstance(result, dict) and result.get("url"):
-                                return RedirectResponse(
-                                    result["url"],
-                                    status_code=result.get("status_code", redirect["status_code"]),
-                                )
-                            return RedirectResponse(redirect["url"], status_code=redirect["status_code"])
-                        return result
+                async def call_handler() -> Any:
+                    result = handler(**kwargs)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    response_headers = dict(self._response_headers(controller, handler))
+                    for name, value in response_headers.items():
+                        response.headers[name] = value
+                    if self._metadata(handler, "__fanest_sse__", False):
+                        return self._sse_response(result, response_headers)
+                    if isinstance(result, StreamableFile):
+                        return result.to_response(response_headers)
+                    render_template = self._metadata(handler, "__fanest_render_template__")
+                    if render_template is not None:
+                        return self._render_response(render_template, result, response_headers)
+                    redirect = self._metadata(handler, "__fanest_redirect__")
+                    if redirect is not None:
+                        if isinstance(result, dict) and result.get("url"):
+                            return RedirectResponse(
+                                result["url"],
+                                status_code=result.get("status_code", redirect["status_code"]),
+                            )
+                        return RedirectResponse(redirect["url"], status_code=redirect["status_code"])
+                    return result
 
-                    return await self._run_interceptors(controller, handler, context, call_handler)
-                except Exception as exc:
-                    handled = await self._run_filters(controller, handler, context, exc)
-                    if handled is not None:
-                        return handled
-                    raise
+                return await self._run_interceptors(controller, handler, context, call_handler)
+            except Exception as exc:
+                handled = await self._run_filters(controller, handler, context, exc)
+                if handled is not None:
+                    return handled
+                raise
             finally:
                 self.container.end_request(request_scope)
 
@@ -292,6 +299,7 @@ class FastApiAdapter:
                     "custom",
                     "ip",
                     "host",
+                    "state",
                     "session",
                     "background_tasks",
                 }:
@@ -354,16 +362,54 @@ class FastApiAdapter:
             instance = self._resolve_component(pipe)
             for name, value in list(kwargs.items()):
                 parameter = inspect.signature(handler).parameters.get(name)
+                if parameter is not None and not self._should_pipe_parameter(parameter):
+                    continue
                 annotation = parameter.annotation if parameter is not None else None
                 result = instance.transform(
                     value,
-                    {"name": name, "handler": handler, "annotation": annotation},
+                    self._pipe_metadata(name, handler, parameter, annotation),
+                )
+                if inspect.isawaitable(result):
+                    result = await result
+                kwargs[name] = result
+        for name, value in list(kwargs.items()):
+            parameter = inspect.signature(handler).parameters.get(name)
+            if parameter is None or not isinstance(parameter.default, ParameterSource):
+                continue
+            annotation = parameter.annotation
+            for pipe in parameter.default.pipes:
+                instance = self._resolve_component(pipe)
+                result = instance.transform(
+                    value,
+                    self._pipe_metadata(name, handler, parameter, annotation),
                 )
                 if inspect.isawaitable(result):
                     result = await result
                 kwargs[name] = result
         context.kwargs.update(kwargs)
         return kwargs
+
+    def _should_pipe_parameter(self, parameter: inspect.Parameter) -> bool:
+        source = parameter.default
+        if not isinstance(source, ParameterSource):
+            return True
+        return source.source in {"body", "path", "query", "header", "cookie", "file", "files", "form"}
+
+    def _pipe_metadata(
+        self,
+        name: str,
+        handler: Callable[..., Any],
+        parameter: inspect.Parameter | None,
+        annotation: Any,
+    ) -> dict[str, Any]:
+        source = parameter.default if parameter is not None else None
+        return {
+            "name": name,
+            "handler": handler,
+            "annotation": annotation,
+            "source": source.source if isinstance(source, ParameterSource) else None,
+            "data": source.name if isinstance(source, ParameterSource) else None,
+        }
 
     async def _run_websocket_pipes(
         self,

@@ -1,3 +1,4 @@
+import asyncio
 import time
 from datetime import datetime, timezone
 
@@ -5,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Injectable, Module, UseGuards, UseInterceptors
 from fanest.cache import CacheInterceptor, CacheModule, CacheService, CacheTTL, MemoryCacheStore
-from fanest.schedule import Cron, Interval, SchedulerRegistry, Timeout
+from fanest.schedule import Cron, CronExpression, CronJob, Interval, SchedulerRegistry, Timeout
 from fanest.schedule.runner import ScheduleRunner
 from fanest.throttler import Throttle, ThrottlerGuard, ThrottlerModule
 
@@ -19,7 +20,7 @@ class JobsService:
     async def interval_job(self):
         type(self).interval_runs += 1
 
-    @Cron("*/1 * * * * *")
+    @Cron(CronExpression.EVERY_SECOND)
     async def cron_job(self):
         type(self).cron_runs += 1
 
@@ -78,6 +79,54 @@ def test_timeout_job_runs_once_and_registry_is_injectable():
         assert client.get("/scheduler").json() == {"jobs": ["warmup"]}
         time.sleep(0.04)
         assert TimeoutJobsService.runs == 1
+
+
+def test_scheduler_registry_exposes_nest_style_typed_methods():
+    async def idle():
+        await asyncio.sleep(0)
+
+    async def run():
+        registry = SchedulerRegistry()
+        cron = asyncio.create_task(idle())
+        interval = asyncio.create_task(idle())
+        timeout = asyncio.create_task(idle())
+        registry.add_cron_job("cron", cron, {"expression": CronExpression.EVERY_SECOND})
+        registry.add_interval("interval", interval)
+        registry.add_timeout("timeout", timeout)
+
+        assert registry.get_cron_job("cron").metadata["expression"] == CronExpression.EVERY_SECOND
+        assert registry.get_intervals() == ["interval"]
+        assert registry.get_timeouts() == ["timeout"]
+        assert list(registry.get_cron_jobs()) == ["cron"]
+        registry.delete_cron_job("cron")
+        registry.delete_interval("interval")
+        registry.delete_timeout("timeout")
+        assert registry.list() == []
+
+    asyncio.run(run())
+
+
+@Injectable()
+class DisabledCronService:
+    runs = 0
+
+    @CronJob(CronExpression.EVERY_SECOND, disabled=True)
+    async def disabled(self):
+        type(self).runs += 1
+
+
+@Module(providers=[DisabledCronService])
+class DisabledCronModule:
+    pass
+
+
+def test_disabled_cron_job_is_not_scheduled():
+    DisabledCronService.runs = 0
+
+    with TestClient(FaNestFactory.create(DisabledCronModule)):
+        time.sleep(0.03)
+
+    assert DisabledCronService.runs == 0
 
 
 @Controller("cached")

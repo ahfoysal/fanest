@@ -128,10 +128,11 @@ def CacheEvict(key: str):
 
 class CacheModule:
     @staticmethod
-    def register(**options: Any) -> type:
+    def register(is_global: bool = False, **options: Any) -> type:
         @Module(
             providers=[use_value(CACHE_OPTIONS, options), CacheService, CacheInterceptor],
             exports=[CacheService, CacheInterceptor],
+            global_module=is_global,
         )
         class DynamicCacheModule:
             pass

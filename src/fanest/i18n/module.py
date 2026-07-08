@@ -48,6 +48,7 @@ class I18nModule:
         *,
         translations: dict[str, dict[str, str]],
         fallback_language: str = "en",
+        is_global: bool = False,
     ) -> type:
         @Module(
             providers=[
@@ -58,6 +59,7 @@ class I18nModule:
                 I18nService,
             ],
             exports=[I18nService],
+            global_module=is_global,
         )
         class DynamicI18nModule:
             pass

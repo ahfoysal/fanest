@@ -35,14 +35,25 @@ class QueueRef:
 
     async def add(
         self,
-        data: Any,
-        *,
+        *args: Any,
         name: str = "default",
         job_id: str | None = None,
         attempts: int = 1,
         delay: float = 0,
         metadata: dict[str, Any] | None = None,
+        **options: Any,
     ) -> Job:
+        if len(args) == 2:
+            name = args[0]
+            data = args[1]
+        elif len(args) == 1:
+            data = args[0]
+        else:
+            raise TypeError("QueueRef.add expects data or name, data")
+        job_id = options.pop("job_id", job_id)
+        attempts = options.pop("attempts", attempts)
+        delay = options.pop("delay", delay)
+        metadata = {**(metadata or {}), **options}
         return await self.queue.add(
             self.name,
             data,
@@ -146,8 +157,8 @@ class QueueService:
 
 class QueueModule:
     @staticmethod
-    def for_root() -> type:
-        @Module(providers=[QueueService], exports=[QueueService])
+    def for_root(*, is_global: bool = False) -> type:
+        @Module(providers=[QueueService], exports=[QueueService], global_module=is_global)
         class DynamicQueueModule:
             pass
 

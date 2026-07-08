@@ -90,6 +90,7 @@ class ParameterSource:
     source: str
     name: str | None = None
     default: Any = ...
+    pipes: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)

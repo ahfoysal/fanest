@@ -92,11 +92,12 @@ class HealthController:
 
 class HealthModule:
     @staticmethod
-    def register(indicators: list[HealthIndicator] | None = None) -> type:
+    def register(indicators: list[HealthIndicator] | None = None, *, is_global: bool = False) -> type:
         @Module(
             controllers=[HealthController],
             providers=[use_value(HEALTH_INDICATORS, indicators or []), HealthService],
             exports=[HealthService],
+            global_module=is_global,
         )
         class DynamicHealthModule:
             pass

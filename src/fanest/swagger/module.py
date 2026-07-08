@@ -109,6 +109,12 @@ class SwaggerModule:
     @staticmethod
     def setup(path: str, app: FastAPI, document: dict[str, Any]) -> None:
         schema_path = f"{path.rstrip('/')}/openapi.json"
+        app.openapi_schema = document
+
+        def fanest_openapi() -> dict[str, Any]:
+            return document
+
+        app.openapi = fanest_openapi  # type: ignore[method-assign]
 
         @app.get(schema_path, include_in_schema=False)
         async def openapi_schema():

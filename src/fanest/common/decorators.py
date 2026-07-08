@@ -173,32 +173,32 @@ def Render(template: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     return decorator
 
 
-def Body(name: str | None = None, default: Any = ...) -> ParameterSource:
-    return ParameterSource(source="body", name=name, default=default)
+def Body(name: str | None = None, *pipes: Any, default: Any = ...) -> ParameterSource:
+    return ParameterSource(source="body", name=name, default=default, pipes=pipes)
 
 
-def Param(name: str | None = None, default: Any = ...) -> ParameterSource:
-    return ParameterSource(source="path", name=name, default=default)
+def Param(name: str | None = None, *pipes: Any, default: Any = ...) -> ParameterSource:
+    return ParameterSource(source="path", name=name, default=default, pipes=pipes)
 
 
-def Query(name: str | None = None, default: Any = ...) -> ParameterSource:
-    return ParameterSource(source="query", name=name, default=default)
+def Query(name: str | None = None, *pipes: Any, default: Any = ...) -> ParameterSource:
+    return ParameterSource(source="query", name=name, default=default, pipes=pipes)
 
 
-def Header(name: str | None = None, default: Any = None) -> ParameterSource:
-    return ParameterSource(source="header", name=name, default=default)
+def Header(name: str | None = None, *pipes: Any, default: Any = None) -> ParameterSource:
+    return ParameterSource(source="header", name=name, default=default, pipes=pipes)
 
 
-def Headers(name: str | None = None, default: Any = None) -> ParameterSource:
-    return Header(name, default)
+def Headers(name: str | None = None, *pipes: Any, default: Any = None) -> ParameterSource:
+    return Header(name, *pipes, default=default)
 
 
-def Cookie(name: str | None = None, default: Any = None) -> ParameterSource:
-    return ParameterSource(source="cookie", name=name, default=default)
+def Cookie(name: str | None = None, *pipes: Any, default: Any = None) -> ParameterSource:
+    return ParameterSource(source="cookie", name=name, default=default, pipes=pipes)
 
 
-def Form(name: str | None = None, default: Any = ...) -> ParameterSource:
-    return ParameterSource(source="form", name=name, default=default)
+def Form(name: str | None = None, *pipes: Any, default: Any = ...) -> ParameterSource:
+    return ParameterSource(source="form", name=name, default=default, pipes=pipes)
 
 
 def UploadedFile(name: str = "file") -> ParameterSource:
@@ -229,12 +229,16 @@ def Session(default: Any = None) -> ParameterSource:
     return ParameterSource(source="session", default=default)
 
 
+def State(name: str | None = None, default: Any = None) -> ParameterSource:
+    return ParameterSource(source="state", name=name, default=default)
+
+
 def BackgroundTasks() -> ParameterSource:
     return ParameterSource(source="background_tasks")
 
 
-def MessageBody(name: str | None = None, default: Any = None) -> ParameterSource:
-    return ParameterSource(source="message_body", name=name, default=default)
+def MessageBody(name: str | None = None, *pipes: Any, default: Any = None) -> ParameterSource:
+    return ParameterSource(source="message_body", name=name, default=default, pipes=pipes)
 
 
 def ConnectedSocket() -> ParameterSource:

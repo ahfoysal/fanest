@@ -48,8 +48,8 @@ class BullController:
 
     @Post("/")
     async def enqueue(self):
-        job = await self.emails.add({"email": "ada@example.com"}, name="welcome")
-        return {"queue": job.queue, "jobs": len(self.emails.jobs())}
+        job = await self.emails.add("welcome", {"email": "ada@example.com"}, priority=1)
+        return {"queue": job.queue, "name": job.name, "priority": job.metadata["priority"], "jobs": len(self.emails.jobs())}
 
 
 @Module(
@@ -63,7 +63,7 @@ class BullAppModule:
 def test_bull_module_alias_injects_named_queue():
     client = TestClient(FaNestFactory.create(BullAppModule))
 
-    assert client.post("/bull").json() == {"queue": "emails", "jobs": 1}
+    assert client.post("/bull").json() == {"queue": "emails", "name": "welcome", "priority": 1, "jobs": 1}
 
 
 def test_queue_ref_works_directly():

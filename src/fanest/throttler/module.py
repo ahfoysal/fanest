@@ -65,12 +65,13 @@ def Throttle(*, limit: int | None = None, ttl: int | None = None):
 
 class ThrottlerModule:
     @staticmethod
-    def for_root(*, limit: int = 10, ttl: int = 60) -> type:
+    def for_root(*, limit: int = 10, ttl: int = 60, is_global: bool = False) -> type:
         ThrottlerService.configure(limit=limit, ttl=ttl)
 
         @Module(
             providers=[use_value(THROTTLER_OPTIONS, {"limit": limit, "ttl": ttl}), ThrottlerService, ThrottlerGuard],
             exports=[ThrottlerService, ThrottlerGuard],
+            global_module=is_global,
         )
         class DynamicThrottlerModule:
             pass
@@ -82,6 +83,7 @@ class ThrottlerModule:
         *,
         use_factory: Callable[..., dict[str, Any]],
         inject: list[Any] | None = None,
+        is_global: bool = False,
     ) -> type:
         @Module(
             providers=[
@@ -90,6 +92,7 @@ class ThrottlerModule:
                 ThrottlerGuard,
             ],
             exports=[ThrottlerService, ThrottlerGuard],
+            global_module=is_global,
         )
         class DynamicThrottlerModule:
             pass

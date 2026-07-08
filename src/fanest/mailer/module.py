@@ -78,8 +78,12 @@ class MailerService:
 
 class MailerModule:
     @staticmethod
-    def for_root(**options: Any) -> type:
-        @Module(providers=[use_value(MAILER_OPTIONS, options), MailerService], exports=[MailerService])
+    def for_root(is_global: bool = False, **options: Any) -> type:
+        @Module(
+            providers=[use_value(MAILER_OPTIONS, options), MailerService],
+            exports=[MailerService],
+            global_module=is_global,
+        )
         class DynamicMailerModule:
             pass
 

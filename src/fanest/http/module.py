@@ -36,8 +36,12 @@ class HttpService:
 
 class HttpModule:
     @staticmethod
-    def register(**options: Any) -> type:
-        @Module(providers=[use_value(HTTP_OPTIONS, options), HttpService], exports=[HttpService])
+    def register(is_global: bool = False, **options: Any) -> type:
+        @Module(
+            providers=[use_value(HTTP_OPTIONS, options), HttpService],
+            exports=[HttpService],
+            global_module=is_global,
+        )
         class DynamicHttpModule:
             pass
 
@@ -48,10 +52,12 @@ class HttpModule:
         *,
         use_factory: Callable[..., dict[str, Any]],
         inject: list[Any] | None = None,
+        is_global: bool = False,
     ) -> type:
         @Module(
             providers=[provider_factory(HTTP_OPTIONS, use_factory, inject=inject or []), HttpService],
             exports=[HttpService],
+            global_module=is_global,
         )
         class DynamicHttpModule:
             pass

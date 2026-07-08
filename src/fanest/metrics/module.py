@@ -48,13 +48,14 @@ class MetricsController:
 
 class MetricsModule:
     @staticmethod
-    def for_root(*, endpoint: bool = True) -> type:
+    def for_root(*, endpoint: bool = True, is_global: bool = False) -> type:
         controllers = [MetricsController] if endpoint else []
 
         @Module(
             controllers=controllers,
             providers=[MetricsRegistry, MetricsInterceptor],
             exports=[MetricsRegistry, MetricsInterceptor],
+            global_module=is_global,
         )
         class DynamicMetricsModule:
             pass

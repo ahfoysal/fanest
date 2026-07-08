@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from fanest.core.container import FaNestContainer
 from fanest.core.discovery import DiscoveryService
-from fanest.core.enhancers import APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE
+from fanest.core.enhancers import APP_ENHANCER_TOKENS, APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE
 from fanest.core.metadata import ProviderDefinition, ValueProvider
 from fanest.core.scanner import ModuleScanner
 from fanest.common.middleware import FaNestMiddlewareAdapter
@@ -106,6 +106,8 @@ class FaNestFactory:
         async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             instances = []
             for provider in providers:
+                if container.provider_token(provider) in APP_ENHANCER_TOKENS:
+                    continue
                 instance = await container.resolve_async(container.provider_token(provider))
                 instances.append(instance)
                 FaNestFactory._register_events(container, instance)

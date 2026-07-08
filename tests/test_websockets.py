@@ -182,3 +182,45 @@ def test_websocket_gateway_supports_message_body_and_connected_socket_decorators
     with client.websocket_connect("/decorated-socket") as websocket:
         websocket.send_json({"event": "rename", "data": {"name": "Ada"}})
         assert websocket.receive_json() == {"event": "rename", "data": {"name": "Ada"}}
+
+
+@WebSocketGateway("/advanced-socket")
+class AdvancedSocketGateway:
+    def __init__(self, server: SocketIoServer):
+        self.server = server
+
+    async def on_connect(self, websocket):
+        self.server.join(websocket, "all")
+
+    @SubscribeMessage("broadcast")
+    async def broadcast(self, data, websocket):
+        await self.server.emit("notice", data)
+
+    @SubscribeMessage("custom")
+    async def custom(self, data, websocket):
+        return {"event": "custom-result", "data": data}
+
+
+@Module(gateways=[AdvancedSocketGateway])
+class AdvancedSocketModule:
+    pass
+
+
+def test_socket_io_server_broadcasts_to_all_connections_and_custom_response_event():
+    client = TestClient(FaNestFactory.create(AdvancedSocketModule))
+
+    with client.websocket_connect("/advanced-socket") as sender:
+        with client.websocket_connect("/advanced-socket") as receiver:
+            sender.send_json({"event": "broadcast", "data": {"text": "hi"}})
+            assert sender.receive_json() == {"event": "notice", "data": {"text": "hi"}}
+            assert receiver.receive_json() == {"event": "notice", "data": {"text": "hi"}}
+            sender.send_json({"event": "custom", "data": {"value": 1}})
+            assert sender.receive_json() == {"event": "custom-result", "data": {"value": 1}}
+
+
+def test_websocket_gateway_reports_malformed_payloads():
+    client = TestClient(FaNestFactory.create(AdvancedSocketModule))
+
+    with client.websocket_connect("/advanced-socket") as websocket:
+        websocket.send_text("{")
+        assert websocket.receive_json()["event"] == "error"
