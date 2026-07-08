@@ -1,0 +1,45 @@
+[project]
+name = "fanest"
+version = "0.1.0"
+description = "NestJS-style backend architecture for Python, powered by FastAPI."
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["python", "fastapi", "nestjs", "backend", "framework", "dependency-injection"]
+license = "MIT"
+dependencies = [
+    "aiosqlite>=0.20.0",
+    "email-validator>=2.2.0",
+    "fastapi>=0.115.0",
+    "pyjwt>=2.8.0",
+    "pydantic>=2.0.0",
+    "sqlalchemy>=2.0.0",
+    "typer>=0.12.0",
+    "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.27.0",
+    "pytest>=8.0.0",
+    "ruff>=0.6.0",
+]
+
+[project.scripts]
+fanest = "fanest.cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/ahfoysal/fanest"
+Repository = "https://github.com/ahfoysal/fanest"
+Issues = "https://github.com/ahfoysal/fanest/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

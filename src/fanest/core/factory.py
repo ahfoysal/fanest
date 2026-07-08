@@ -1,0 +1,97 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from fanest.core.container import FaNestContainer
+from fanest.core.metadata import ProviderDefinition
+from fanest.core.scanner import ModuleScanner
+from fanest.platform_fastapi.adapter import FastApiAdapter
+from fanest.schedule.runner import ScheduleRunner
+
+
+class FaNestFactory:
+    @staticmethod
+    def create(
+        root_module: type,
+        *,
+        title: str = "FaNest Application",
+        version: str = "0.1.0",
+        description: str | None = None,
+        debug: bool = False,
+        overrides: dict[type, object] | None = None,
+        global_prefix: str = "",
+        cors: bool | dict[str, object] = False,
+        global_guards: list[object] | None = None,
+        global_pipes: list[object] | None = None,
+        global_interceptors: list[object] | None = None,
+        global_filters: list[object] | None = None,
+    ) -> FastAPI:
+        scanner = ModuleScanner()
+        scanner.scan(root_module)
+
+        container = FaNestContainer()
+        for provider in scanner.providers:
+            container.register(provider)
+        for token, value in (overrides or {}).items():
+            container.override(token, value)
+
+        lifespan = FaNestFactory._lifespan(scanner.providers, container)
+        app = FastAPI(
+            title=title,
+            version=version,
+            description=description,
+            debug=debug,
+            lifespan=lifespan,
+        )
+        app.state.fanest_container = container
+        app.state.fanest_root_module = root_module
+        if cors:
+            options = cors if isinstance(cors, dict) else {}
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=options.get("allow_origins", ["*"]),
+                allow_credentials=options.get("allow_credentials", False),
+                allow_methods=options.get("allow_methods", ["*"]),
+                allow_headers=options.get("allow_headers", ["*"]),
+            )
+        adapter = FastApiAdapter(
+            app=app,
+            container=container,
+            global_prefix=global_prefix,
+            global_guards=global_guards or [],
+            global_pipes=global_pipes or [],
+            global_interceptors=global_interceptors or [],
+            global_filters=global_filters or [],
+        )
+        adapter.register_controllers(scanner.controllers)
+        adapter.register_gateways(scanner.gateways)
+        return app
+
+    @staticmethod
+    def _lifespan(providers: list[ProviderDefinition], container: FaNestContainer):
+        @asynccontextmanager
+        async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+            instances = []
+            for provider in providers:
+                instance = container.resolve(container.provider_token(provider))
+                instances.append(instance)
+                hook = getattr(instance, "on_module_init", None)
+                if hook is not None:
+                    result = hook()
+                    if hasattr(result, "__await__"):
+                        await result
+            schedule_runner = ScheduleRunner(instances)
+            schedule_runner.start()
+            yield
+            await schedule_runner.stop()
+            for provider in providers:
+                instance = container.resolve(container.provider_token(provider))
+                hook = getattr(instance, "on_application_shutdown", None)
+                if hook is not None:
+                    result = hook()
+                    if hasattr(result, "__await__"):
+                        await result
+
+        return lifespan
