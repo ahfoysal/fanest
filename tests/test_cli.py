@@ -138,3 +138,29 @@ def test_cli_dev_reports_missing_file(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "Application file not found" in result.output
+
+
+def test_cli_check_validates_importable_asgi_target(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Path("main.py").write_text(
+        "async def app(scope, receive, send):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["check", "main.py"])
+
+    assert result.exit_code == 0
+    assert "Application target OK: main:app" in result.output
+
+
+def test_cli_check_reports_invalid_target(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Path("main.py").write_text("app = object()\n", encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["check", "main.py"])
+
+    assert result.exit_code != 0
+    assert "Application target is not callable" in result.output

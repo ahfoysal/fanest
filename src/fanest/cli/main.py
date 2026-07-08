@@ -1,5 +1,8 @@
 from pathlib import Path
+import importlib
+import importlib.util
 import re
+import sys
 from typing import Any
 
 import typer
@@ -79,6 +82,47 @@ def run(
     if workers is not None:
         options["workers"] = workers
     _run_uvicorn(_resolve_app_path(path, app_name), host=host, port=port, reload=False, **options)
+
+
+@app.command()
+def check(
+    path: str = typer.Argument("main.py"),
+    app_name: str = typer.Option("app", "--app"),
+) -> None:
+    app_path = _resolve_app_path(path, app_name)
+    module_name, _, attribute = app_path.partition(":")
+    if not attribute:
+        raise typer.BadParameter("Application target must use module:attribute format.")
+    module = _load_check_module(path, module_name)
+    if not hasattr(module, attribute):
+        raise typer.BadParameter(f"Application attribute not found: {attribute}")
+    application = getattr(module, attribute)
+    if hasattr(application, "build"):
+        application = application.build()
+    if not callable(application):
+        raise typer.BadParameter(f"Application target is not callable: {app_path}")
+    typer.echo(f"Application target OK: {app_path}")
+
+
+def _load_check_module(path: str, module_name: str):
+    source = Path(path)
+    if source.exists() and source.is_file() and source.suffix == ".py":
+        spec = importlib.util.spec_from_file_location(f"_fanest_check_{abs(hash(source.resolve()))}", source)
+        if spec is None or spec.loader is None:
+            raise typer.BadParameter(f"Could not import application file: {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    try:
+        sys.path.insert(0, str(Path.cwd()))
+        return importlib.import_module(module_name)
+    except Exception as exc:
+        raise typer.BadParameter(f"Could not import module {module_name!r}: {exc}") from exc
+    finally:
+        try:
+            sys.path.remove(str(Path.cwd()))
+        except ValueError:
+            pass
 
 
 @generate_app.command("resource")
