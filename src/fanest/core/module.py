@@ -12,6 +12,7 @@ def Module(
     controllers: list[type] | None = None,
     providers: list[ProviderDefinition] | None = None,
     gateways: list[type] | None = None,
+    middlewares: list[type] | None = None,
     exports: list[type] | None = None,
 ) -> Callable[[type[T]], type[T]]:
     def decorator(cls: type[T]) -> type[T]:
@@ -23,6 +24,7 @@ def Module(
                 controllers=controllers or [],
                 providers=providers or [],
                 gateways=gateways or [],
+                middlewares=middlewares or [],
                 exports=exports or [],
             ),
         )

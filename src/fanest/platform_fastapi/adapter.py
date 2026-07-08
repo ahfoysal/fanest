@@ -3,7 +3,8 @@ from collections.abc import Callable
 from typing import Any
 
 from fastapi import Body as FastBody
-from fastapi import FastAPI, Header, HTTPException, Path, Query, Request, WebSocket
+from fastapi import Cookie, FastAPI, File, Header, HTTPException, Path, Query, Request, Response, WebSocket
+from fastapi.responses import RedirectResponse
 from starlette.websockets import WebSocketDisconnect
 
 from fanest.core.container import FaNestContainer
@@ -137,7 +138,7 @@ class FastApiAdapter:
         self.app.add_api_websocket_route(path, websocket_endpoint)
 
     def _endpoint(self, controller: Any, handler: Callable[..., Any]) -> Callable[..., Any]:
-        async def endpoint(request: Request, **kwargs: Any) -> Any:
+        async def endpoint(request: Request, response: Response, **kwargs: Any) -> Any:
             context = ExecutionContext(
                 handler=handler,
                 controller=controller,
@@ -147,13 +148,22 @@ class FastApiAdapter:
             await self._run_guards(controller, handler, context)
             try:
                 context.kwargs.update(self._bind_request_parameters(handler, request, kwargs))
+                context.kwargs.update(self._bind_response_parameters(handler, response, kwargs))
                 context.kwargs.update(self._bind_state_parameters(handler, request, kwargs))
+                context.kwargs.update(self._bind_custom_parameters(handler, context, kwargs))
                 kwargs = await self._run_pipes(controller, handler, context)
 
                 async def call_handler() -> Any:
                     result = handler(**kwargs)
                     if inspect.isawaitable(result):
                         return await result
+                    redirect = getattr(handler, "__fanest_redirect__", None)
+                    if redirect is not None:
+                        if isinstance(result, dict) and result.get("url"):
+                            return RedirectResponse(
+                                result["url"], status_code=result.get("status_code", redirect["status_code"])
+                            )
+                        return RedirectResponse(redirect["url"], status_code=redirect["status_code"])
                     return result
 
                 return await self._run_interceptors(controller, handler, context, call_handler)
@@ -174,7 +184,12 @@ class FastApiAdapter:
                 "request",
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 annotation=Request,
-            )
+            ),
+            inspect.Parameter(
+                "response",
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation=Response,
+            ),
         ]
         for name, parameter in original.parameters.items():
             if name == "self":
@@ -182,7 +197,7 @@ class FastApiAdapter:
             source = parameter.default
             annotation = parameter.annotation
             if isinstance(source, ParameterSource):
-                if source.source == "request":
+                if source.source in {"request", "response", "custom"}:
                     continue
                 default = self._fastapi_default(source, name)
             else:
@@ -207,6 +222,12 @@ class FastApiAdapter:
             return Query(source.default, alias=source.name)
         if source.source == "header":
             return Header(source.default, alias=source.name)
+        if source.source == "cookie":
+            return Cookie(source.default, alias=source.name)
+        if source.source == "file":
+            return File(..., alias=source.name)
+        if source.source == "files":
+            return File(source.default, alias=source.name)
         if source.source == "request":
             return inspect.Parameter.empty
         if source.source == "state":
@@ -273,6 +294,16 @@ class FastApiAdapter:
                 bound[name] = request
         return bound
 
+    def _bind_response_parameters(
+        self, handler: Callable[..., Any], response: Response, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        bound = dict(kwargs)
+        for name, parameter in inspect.signature(handler).parameters.items():
+            source = parameter.default
+            if isinstance(source, ParameterSource) and source.source == "response":
+                bound[name] = response
+        return bound
+
     def _bind_state_parameters(
         self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
@@ -282,6 +313,18 @@ class FastApiAdapter:
             if isinstance(source, ParameterSource) and source.source == "state":
                 state_name = source.name or name
                 bound[name] = getattr(request.state, state_name, source.default)
+        return bound
+
+    def _bind_custom_parameters(
+        self, handler: Callable[..., Any], context: ExecutionContext, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        bound = dict(kwargs)
+        for name, parameter in inspect.signature(handler).parameters.items():
+            source = parameter.default
+            if isinstance(source, ParameterSource) and source.source == "custom":
+                factory = source.default["factory"]
+                data = source.default.get("data")
+                bound[name] = factory(data, context)
         return bound
 
     async def _run_filters(

@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fanest.core.container import FaNestContainer
 from fanest.core.metadata import ProviderDefinition
 from fanest.core.scanner import ModuleScanner
+from fanest.common.middleware import FaNestMiddlewareAdapter
 from fanest.platform_fastapi.adapter import FastApiAdapter
 from fanest.schedule.runner import ScheduleRunner
 
@@ -55,6 +56,12 @@ class FaNestFactory:
                 allow_credentials=options.get("allow_credentials", False),
                 allow_methods=options.get("allow_methods", ["*"]),
                 allow_headers=options.get("allow_headers", ["*"]),
+            )
+        for middleware in reversed(scanner.middlewares):
+            app.add_middleware(
+                FaNestMiddlewareAdapter,
+                middleware=middleware,
+                container=container,
             )
         adapter = FastApiAdapter(
             app=app,

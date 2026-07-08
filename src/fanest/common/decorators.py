@@ -62,6 +62,16 @@ def route(
     return decorator
 
 
+def _set_route_option(handler: Callable[..., Any], key: str, value: Any) -> None:
+    route_metadata: RouteMetadata | None = getattr(handler, "__fanest_route__", None)
+    if route_metadata is not None:
+        route_metadata.options[key] = value
+        return
+    pending = dict(getattr(handler, "__fanest_pending_route_options__", {}))
+    pending[key] = value
+    setattr(handler, "__fanest_pending_route_options__", pending)
+
+
 def Get(path: str = "", **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     return route("GET", path, **options)
 
@@ -82,6 +92,32 @@ def Delete(path: str = "", **options: Any) -> Callable[[Callable[..., Any]], Cal
     return route("DELETE", path, **options)
 
 
+def HttpCode(status_code: int) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
+        _set_route_option(handler, "status_code", status_code)
+        return handler
+
+    return decorator
+
+
+def Redirect(url: str, status_code: int = 302) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
+        setattr(handler, "__fanest_redirect__", {"url": url, "status_code": status_code})
+        return handler
+
+    return decorator
+
+
+def SetMetadata(key: str, value: Any) -> Callable[[T], T]:
+    def decorator(target: T) -> T:
+        metadata = dict(getattr(target, "__fanest_metadata__", {}))
+        metadata[key] = value
+        setattr(target, "__fanest_metadata__", metadata)
+        return target
+
+    return decorator
+
+
 def Body(name: str | None = None, default: Any = ...) -> ParameterSource:
     return ParameterSource(source="body", name=name, default=default)
 
@@ -98,8 +134,31 @@ def Header(name: str | None = None, default: Any = None) -> ParameterSource:
     return ParameterSource(source="header", name=name, default=default)
 
 
+def Cookie(name: str | None = None, default: Any = None) -> ParameterSource:
+    return ParameterSource(source="cookie", name=name, default=default)
+
+
+def UploadedFile(name: str = "file") -> ParameterSource:
+    return ParameterSource(source="file", name=name)
+
+
+def UploadedFiles(name: str = "files") -> ParameterSource:
+    return ParameterSource(source="files", name=name, default=[])
+
+
 def Req() -> ParameterSource:
     return ParameterSource(source="request")
+
+
+def Res() -> ParameterSource:
+    return ParameterSource(source="response")
+
+
+def create_param_decorator(factory: Callable[[Any, Any], Any]):
+    def decorator(data: Any = None) -> ParameterSource:
+        return ParameterSource(source="custom", name=None, default={"factory": factory, "data": data})
+
+    return decorator
 
 
 def UseGuards(*guards: Any) -> Callable[[T], T]:

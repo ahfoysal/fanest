@@ -6,6 +6,7 @@ class ModuleScanner:
         self.controllers: list[type] = []
         self.providers: list[ProviderDefinition] = []
         self.gateways: list[type] = []
+        self.middlewares: list[type] = []
         self._seen_modules: set[type] = set()
 
     def scan(self, root_module: type) -> None:
@@ -27,3 +28,4 @@ class ModuleScanner:
         self.providers.extend(metadata.gateways)
         self.controllers.extend(metadata.controllers)
         self.gateways.extend(metadata.gateways)
+        self.middlewares.extend(metadata.middlewares)
