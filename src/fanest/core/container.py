@@ -1,4 +1,5 @@
 import inspect
+from contextvars import ContextVar
 from typing import Any, get_type_hints
 
 from fanest.core.metadata import (
@@ -8,6 +9,10 @@ from fanest.core.metadata import (
     InjectMarker,
     ProviderDefinition,
     ValueProvider,
+)
+
+_request_instances: ContextVar[dict[Any, Any] | None] = ContextVar(
+    "fanest_request_instances", default=None
 )
 
 
@@ -21,6 +26,12 @@ class FaNestContainer:
         token = self.provider_token(provider)
         self._providers[token] = provider
 
+    def begin_request(self):
+        return _request_instances.set({})
+
+    def end_request(self, token: Any) -> None:
+        _request_instances.reset(token)
+
     def override(self, token: Any, value: Any) -> None:
         if inspect.isclass(value):
             self._providers[token] = ClassProvider(provide=token, use_class=value)
@@ -29,14 +40,20 @@ class FaNestContainer:
         self._instances[token] = value
 
     def resolve(self, token: Any) -> Any:
-        if token in self._instances:
-            return self._instances[token]
-
         provider = self._providers.get(token)
         if provider is None:
             if not inspect.isclass(token):
                 raise KeyError(f"No provider registered for token {token!r}")
             provider = token
+
+        scope = self._provider_scope(provider)
+        request_cache = _request_instances.get()
+
+        if scope == "request" and request_cache is not None and token in request_cache:
+            return request_cache[token]
+        if scope == "singleton" and token in self._instances:
+            return self._instances[token]
+
         if token in self._resolving:
             raise RuntimeError(f"Circular dependency detected while resolving {token!r}")
         self._resolving.add(token)
@@ -44,7 +61,10 @@ class FaNestContainer:
             instance = self._resolve_provider(provider)
         finally:
             self._resolving.remove(token)
-        self._instances[token] = instance
+        if scope == "request" and request_cache is not None:
+            request_cache[token] = instance
+        elif scope == "singleton":
+            self._instances[token] = instance
         return instance
 
     def provider_token(self, provider: ProviderDefinition) -> Any:
@@ -66,6 +86,17 @@ class FaNestContainer:
         if inspect.isclass(provider):
             return self._instantiate(provider)
         return provider
+
+    def _provider_scope(self, provider: ProviderDefinition) -> str:
+        if isinstance(provider, ClassProvider):
+            return self._class_scope(provider.use_class)
+        if inspect.isclass(provider):
+            return self._class_scope(provider)
+        return "singleton"
+
+    def _class_scope(self, provider: type) -> str:
+        metadata = getattr(provider, "__fanest_provider__", None)
+        return getattr(metadata, "scope", "singleton")
 
     def _resolve_injected_token(self, marker: Any) -> Any:
         if isinstance(marker, InjectMarker):

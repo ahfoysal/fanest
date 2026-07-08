@@ -53,9 +53,8 @@ class FastApiAdapter:
         if controller_metadata is None:
             raise TypeError(f"{controller.__name__} is not a FaNest controller.")
 
-        instance = self.container.resolve(controller)
         routes: list[tuple[str, Callable[..., Any], RouteMetadata]] = []
-        for _, handler in inspect.getmembers(instance, predicate=inspect.ismethod):
+        for _, handler in inspect.getmembers(controller, predicate=inspect.isfunction):
             route_metadata: RouteMetadata | None = getattr(handler, "__fanest_route__", None)
             if route_metadata is None:
                 continue
@@ -65,7 +64,7 @@ class FastApiAdapter:
             path = self._join_paths(
                 self.global_prefix, controller_metadata.prefix, route_metadata.path
             )
-            endpoint = self._endpoint(instance, handler)
+            endpoint = self._endpoint(controller, handler.__name__, handler)
             route_options = dict(route_metadata.options)
             tags = getattr(controller, "__fanest_swagger_tags__", None)
             if tags and "tags" not in route_options:
@@ -137,44 +136,53 @@ class FastApiAdapter:
 
         self.app.add_api_websocket_route(path, websocket_endpoint)
 
-    def _endpoint(self, controller: Any, handler: Callable[..., Any]) -> Callable[..., Any]:
+    def _endpoint(
+        self, controller_class: type, handler_name: str, handler_function: Callable[..., Any]
+    ) -> Callable[..., Any]:
         async def endpoint(request: Request, response: Response, **kwargs: Any) -> Any:
+            request_scope = self.container.begin_request()
+            controller = self.container.resolve(controller_class)
+            handler = getattr(controller, handler_name)
             context = ExecutionContext(
                 handler=handler,
                 controller=controller,
                 request=request,
                 kwargs=kwargs,
             )
-            await self._run_guards(controller, handler, context)
             try:
-                context.kwargs.update(self._bind_request_parameters(handler, request, kwargs))
-                context.kwargs.update(self._bind_response_parameters(handler, response, kwargs))
-                context.kwargs.update(self._bind_state_parameters(handler, request, kwargs))
-                context.kwargs.update(self._bind_custom_parameters(handler, context, kwargs))
-                kwargs = await self._run_pipes(controller, handler, context)
+                await self._run_guards(controller, handler, context)
+                try:
+                    context.kwargs.update(self._bind_request_parameters(handler, request, kwargs))
+                    context.kwargs.update(self._bind_response_parameters(handler, response, kwargs))
+                    context.kwargs.update(self._bind_state_parameters(handler, request, kwargs))
+                    context.kwargs.update(self._bind_custom_parameters(handler, context, kwargs))
+                    kwargs = await self._run_pipes(controller, handler, context)
 
-                async def call_handler() -> Any:
-                    result = handler(**kwargs)
-                    if inspect.isawaitable(result):
-                        result = await result
-                    redirect = self._metadata(handler, "__fanest_redirect__")
-                    if redirect is not None:
-                        if isinstance(result, dict) and result.get("url"):
-                            return RedirectResponse(
-                                result["url"], status_code=result.get("status_code", redirect["status_code"])
-                            )
-                        return RedirectResponse(redirect["url"], status_code=redirect["status_code"])
-                    return result
+                    async def call_handler() -> Any:
+                        result = handler(**kwargs)
+                        if inspect.isawaitable(result):
+                            result = await result
+                        redirect = self._metadata(handler, "__fanest_redirect__")
+                        if redirect is not None:
+                            if isinstance(result, dict) and result.get("url"):
+                                return RedirectResponse(
+                                    result["url"],
+                                    status_code=result.get("status_code", redirect["status_code"]),
+                                )
+                            return RedirectResponse(redirect["url"], status_code=redirect["status_code"])
+                        return result
 
-                return await self._run_interceptors(controller, handler, context, call_handler)
-            except Exception as exc:
-                handled = await self._run_filters(controller, handler, context, exc)
-                if handled is not None:
-                    return handled
-                raise
+                    return await self._run_interceptors(controller, handler, context, call_handler)
+                except Exception as exc:
+                    handled = await self._run_filters(controller, handler, context, exc)
+                    if handled is not None:
+                        return handled
+                    raise
+            finally:
+                self.container.end_request(request_scope)
 
-        endpoint.__name__ = handler.__name__
-        endpoint.__signature__ = self._build_signature(handler)  # type: ignore[attr-defined]
+        endpoint.__name__ = handler_name
+        endpoint.__signature__ = self._build_signature(handler_function)  # type: ignore[attr-defined]
         return endpoint
 
     def _build_signature(self, handler: Callable[..., Any]) -> inspect.Signature:

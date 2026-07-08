@@ -13,9 +13,9 @@ from fanest.core.metadata import (
 T = TypeVar("T")
 
 
-def Injectable() -> Callable[[type[T]], type[T]]:
+def Injectable(scope: str = "singleton") -> Callable[[type[T]], type[T]]:
     def decorator(cls: type[T]) -> type[T]:
-        setattr(cls, "__fanest_provider__", ProviderMetadata())
+        setattr(cls, "__fanest_provider__", ProviderMetadata(scope=scope))
         return cls
 
     return decorator
@@ -24,6 +24,7 @@ def Injectable() -> Callable[[type[T]], type[T]]:
 def Controller(prefix: str = "") -> Callable[[type[T]], type[T]]:
     def decorator(cls: type[T]) -> type[T]:
         setattr(cls, "__fanest_controller__", ControllerMetadata(prefix=prefix))
+        setattr(cls, "__fanest_provider__", ProviderMetadata(scope="request"))
         return cls
 
     return decorator
