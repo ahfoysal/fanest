@@ -2,6 +2,7 @@ from pydantic import BaseModel, EmailStr
 
 from fanest import (
     Body,
+    Cookie,
     Controller,
     FaNestFactory,
     Get,
@@ -18,6 +19,7 @@ from fanest import (
     UseGuards,
     UseInterceptors,
     UsePipes,
+    UploadedFile,
     ValidationPipe,
     WebSocketGateway,
     use_value,
@@ -110,6 +112,14 @@ class UsersController:
     @Get("/{user_id}")
     async def find_one(self, user_id: int = Param()):
         return self.users_service.find_one(user_id)
+
+    @Post("/avatar")
+    async def upload_avatar(self, file=UploadedFile()):
+        return {"filename": file.filename}
+
+    @Get("/session")
+    async def session(self, session_id: str | None = Cookie("session_id")):
+        return {"session_id": session_id}
 
     @Post("/login")
     async def login(self):

@@ -105,8 +105,12 @@ It shows:
 
 - REST controllers
 - Pydantic DTOs
+- mapped DTO helpers
 - constructor injection
 - custom provider tokens
+- middleware
+- file uploads
+- custom parameter decorators
 - config module
 - JWT auth
 - role guards
@@ -117,6 +121,7 @@ It shows:
 - SQLAlchemy module wiring
 - interval jobs
 - cron jobs
+- microservice message/event patterns
 - WebSocket gateway
 - global prefix, CORS, and global pipes
 
@@ -164,6 +169,8 @@ FaNest currently includes:
 - `@Injectable`
 - `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`
 - `Body`, `Param`, `Query`, `Header`, `Req`
+- `Cookie`, `Res`, `UploadedFile`, `UploadedFiles`
+- `HttpCode`, `Redirect`, `SetMetadata`, `create_param_decorator`
 - `UseGuards`
 - `UsePipes`
 - `UseInterceptors`
@@ -172,6 +179,8 @@ FaNest currently includes:
 - `SubscribeMessage`
 - `Interval`
 - `Cron`
+- `MessagePattern`
+- `EventPattern`
 - lifecycle hooks: `on_module_init`, `on_application_shutdown`
 
 ## Dependency Injection
@@ -227,6 +236,8 @@ fanest.sqlalchemy        async SQLAlchemy module and repositories
 fanest.cache             cache service and cache interceptor
 fanest.throttler         throttling module and guard
 fanest.schedule          interval and cron jobs
+fanest.microservices     in-memory client/server, message and event patterns
+fanest.mapped_types      PartialType, PickType, OmitType, IntersectionType
 fanest.health            health endpoint module
 fanest.testing           TestingModule and provider overrides
 ```
@@ -267,6 +278,47 @@ document = SwaggerModule.create_document(app, config)
 SwaggerModule.setup("/docs", app, document)
 ```
 
+## Mapped Types
+
+```python
+from fanest import PartialType, PickType
+
+UpdateUserDto = PartialType(CreateUserDto)
+PublicUserDto = PickType(UserDto, ["id", "name"])
+```
+
+## Middleware
+
+```python
+class RequestIdMiddleware:
+    async def use(self, request, call_next):
+        response = await call_next(request)
+        response.headers["x-request-id"] = "local"
+        return response
+
+
+@Module(controllers=[UsersController], middlewares=[RequestIdMiddleware])
+class AppModule:
+    pass
+```
+
+## Microservices
+
+```python
+from fanest.microservices import MessagePattern, MicroserviceServer
+
+
+class MathService:
+    @MessagePattern("math.double")
+    async def double(self, data, context):
+        return data * 2
+
+
+server = MicroserviceServer(AppModule).compile()
+client = server.client()
+result = await client.send("math.double", 21)
+```
+
 ## Testing
 
 ```python
@@ -296,12 +348,18 @@ Current:
 - DI with custom providers
 - REST decorators
 - request binding
+- middleware
+- file upload binding
+- custom param decorators
+- mapped DTO helpers
+- response serialization
 - guards, pipes, interceptors, filters
 - Swagger helpers
 - JWT auth and roles
 - cache and throttling
 - WebSocket gateways
 - cron and interval jobs
+- microservice message/event patterns
 - SQLAlchemy package start
 - health checks
 - testing utilities
@@ -312,12 +370,9 @@ Still to deepen:
 - request-scoped and transient providers
 - `forwardRef` circular dependency handling
 - richer module export enforcement
-- middleware consumer API
-- file upload helpers
-- response serialization decorators
-- full mapped types package
+- middleware consumer API with route exclusions
 - GraphQL module
-- microservice transports
+- more microservice transports
 - queues
 - mailer
 - advanced SQLAlchemy migrations/templates

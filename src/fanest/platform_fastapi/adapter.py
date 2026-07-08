@@ -156,8 +156,8 @@ class FastApiAdapter:
                 async def call_handler() -> Any:
                     result = handler(**kwargs)
                     if inspect.isawaitable(result):
-                        return await result
-                    redirect = getattr(handler, "__fanest_redirect__", None)
+                        result = await result
+                    redirect = self._metadata(handler, "__fanest_redirect__")
                     if redirect is not None:
                         if isinstance(result, dict) and result.get("url"):
                             return RedirectResponse(
@@ -350,13 +350,21 @@ class FastApiAdapter:
             "__fanest_filters__": self.global_filters,
         }.get(key, [])
         controller_values = getattr(controller.__class__, key, [])
-        handler_values = getattr(handler, key, [])
+        handler_values = self._metadata(handler, key, [])
         return [*global_values, *controller_values, *handler_values]
 
     def _resolve_component(self, component: Any) -> Any:
         if inspect.isclass(component):
             return self.container.resolve(component)
         return component
+
+    def _metadata(self, target: Any, key: str, default: Any = None) -> Any:
+        if hasattr(target, key):
+            return getattr(target, key)
+        func = getattr(target, "__func__", None)
+        if func is not None and hasattr(func, key):
+            return getattr(func, key)
+        return default
 
     def _join_paths(self, *parts: str) -> str:
         combined = "/".join(part.strip("/") for part in parts if part.strip("/"))

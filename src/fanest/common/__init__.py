@@ -36,12 +36,14 @@ from fanest.common.exceptions import (
     UnauthorizedException,
 )
 from fanest.common.pipes import DefaultValuePipe, ParseBoolPipe, ParseIntPipe, ValidationPipe
+from fanest.common.serialization import ClassSerializerInterceptor, Serialize
 
 __all__ = [
     "BadRequestException",
     "Body",
     "ConflictException",
     "Controller",
+    "ClassSerializerInterceptor",
     "Cookie",
     "Delete",
     "DefaultValuePipe",
@@ -64,6 +66,7 @@ __all__ = [
     "Redirect",
     "Res",
     "SetMetadata",
+    "Serialize",
     "UploadedFile",
     "UploadedFiles",
     "SubscribeMessage",

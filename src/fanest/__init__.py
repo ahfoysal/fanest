@@ -36,14 +36,17 @@ from fanest.common.exceptions import (
     UnauthorizedException,
 )
 from fanest.common.pipes import DefaultValuePipe, ParseBoolPipe, ParseIntPipe, ValidationPipe
+from fanest.common.serialization import ClassSerializerInterceptor, Serialize
 from fanest.core.factory import FaNestFactory
 from fanest.core.module import Module
 from fanest.core.providers import Inject, Optional, token, use_class, use_existing, use_factory, use_value
+from fanest.mapped_types import IntersectionType, OmitType, PartialType, PickType
 
 __all__ = [
     "BadRequestException",
     "Controller",
     "Cookie",
+    "ClassSerializerInterceptor",
     "ConflictException",
     "Delete",
     "DefaultValuePipe",
@@ -56,11 +59,15 @@ __all__ = [
     "InternalServerErrorException",
     "Injectable",
     "Inject",
+    "IntersectionType",
     "Module",
     "Optional",
+    "OmitType",
     "NotFoundException",
     "Param",
     "Patch",
+    "PartialType",
+    "PickType",
     "ParseBoolPipe",
     "ParseIntPipe",
     "Post",
@@ -70,6 +77,7 @@ __all__ = [
     "Redirect",
     "Res",
     "SetMetadata",
+    "Serialize",
     "UploadedFile",
     "UploadedFiles",
     "SubscribeMessage",
