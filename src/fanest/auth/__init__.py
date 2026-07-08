@@ -8,8 +8,10 @@ from fanest.auth.jwt import (
     Roles,
     RolesGuard,
 )
+from fanest.auth.passport import AuthGuard, PassportModule, PassportService, PassportStrategy
 
 __all__ = [
+    "AuthGuard",
     "AuthModule",
     "CurrentUser",
     "JWT_OPTIONS",
@@ -18,4 +20,7 @@ __all__ = [
     "Public",
     "Roles",
     "RolesGuard",
+    "PassportModule",
+    "PassportService",
+    "PassportStrategy",
 ]

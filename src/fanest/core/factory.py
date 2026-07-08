@@ -111,6 +111,7 @@ class FaNestFactory:
                 FaNestFactory._register_queue_processors(container, instance)
                 FaNestFactory._register_graphql_resolver(container, instance)
                 FaNestFactory._register_cqrs_handlers(container, instance)
+                FaNestFactory._register_passport_strategy(container, instance)
                 hook = getattr(instance, "on_module_init", None)
                 if hook is not None:
                     await FaNestFactory._call_lifecycle_hook(hook)
@@ -211,3 +212,14 @@ class FaNestFactory:
                 container.resolve(EventBus).register(event, instance)
             except Exception:
                 pass
+
+    @staticmethod
+    def _register_passport_strategy(container: FaNestContainer, instance: object) -> None:
+        from fanest.auth.passport import PassportService, PassportStrategy
+
+        if not isinstance(instance, PassportStrategy):
+            return
+        try:
+            container.resolve(PassportService).register(instance)
+        except Exception:
+            pass

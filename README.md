@@ -118,6 +118,7 @@ It shows:
 - config module
 - async module configuration
 - JWT auth
+- Passport-style auth strategies
 - role guards
 - cache interceptor
 - cache stores
@@ -136,6 +137,7 @@ It shows:
 - queue processors
 - mailer service
 - CQRS command/query/event buses
+- event emitter wildcard, once, and off helpers
 - named microservice transports
 - WebSocket gateway with rooms, broadcasting, guards, and pipes
 - global prefix, CORS, and global pipes
@@ -260,7 +262,7 @@ fanest.session           signed cookie sessions
 fanest.security          helmet-style security headers
 fanest.config            ConfigModule and ConfigService
 fanest.swagger           decorators, DocumentBuilder, SwaggerModule
-fanest.auth              JWT service, auth guard, roles guard
+fanest.auth              JWT service, passport strategies, auth guard, roles guard
 fanest.sqlalchemy        async SQLAlchemy module and repositories
 fanest.mongodb           Mongo-style document service and collections
 fanest.cache             cache service, interceptor, and store adapters
@@ -271,6 +273,7 @@ fanest.serve_static      static asset module
 fanest.queues            in-memory queue service, processors, jobs
 fanest.mailer            mail service with outbox and SMTP handoff
 fanest.cqrs              command, query, and event buses
+fanest.events            event emitter and OnEvent decorators
 fanest.graphql           resolvers, queries, mutations, GraphQL endpoint
 fanest.microservices     message/event patterns and named transports
 fanest.mapped_types      PartialType, PickType, OmitType, IntersectionType
@@ -424,6 +427,7 @@ Current:
 - Reflector and DiscoveryService
 - Swagger helpers and security schemes
 - JWT auth and roles
+- Passport-style strategy guards
 - cache and throttling
 - WebSocket gateways, room broadcasting, guards, and pipes
 - cron, interval, timeout jobs, and scheduler registry
@@ -431,6 +435,7 @@ Current:
 - queue retries and delayed jobs
 - mailer package with templates
 - CQRS package
+- event emitter wildcard/once/off helpers
 - microservice message/event patterns and named transports
 - lightweight GraphQL module
 - SQLAlchemy package start
@@ -458,7 +463,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 74 passed
+# 76 passed
 ```
 
 ## License

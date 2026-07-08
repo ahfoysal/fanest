@@ -51,6 +51,26 @@ def test_event_emitter_and_logger_module():
     assert EventsService.seen == ["Ada"]
 
 
+@pytest.mark.anyio
+async def test_event_emitter_supports_once_off_and_wildcard():
+    emitter = EventEmitter()
+    seen: list[str] = []
+
+    def handler(payload):
+        seen.append(payload)
+
+    emitter.on("*", lambda payload: seen.append(f"wild:{payload}"))
+    emitter.once("ready", handler)
+    await emitter.emit("ready", "one")
+    await emitter.emit("ready", "two")
+
+    emitter.on("remove", handler)
+    emitter.off("remove", handler)
+    await emitter.emit("remove", "three")
+
+    assert seen == ["wild:one", "one", "wild:two", "wild:three"]
+
+
 @Module(imports=[HttpModule.register(base_url="https://example.com")])
 class HttpClientModule:
     pass
