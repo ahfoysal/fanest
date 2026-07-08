@@ -58,6 +58,10 @@ class FaNestFactory:
         )
         app.state.fanest_container = container
         app.state.fanest_root_module = root_module
+        for static_asset in scanner.static_assets:
+            from fanest.platform_fastapi.modules import serve_static
+
+            serve_static(app, static_asset["path"], static_asset["directory"], name=static_asset["name"])
         if cors:
             options = cors if isinstance(cors, dict) else {}
             app.add_middleware(

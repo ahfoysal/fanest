@@ -41,6 +41,7 @@ class ModuleScanner:
         self.providers: list[ProviderDefinition] = []
         self.gateways: list[type] = []
         self.middlewares: list[type] = []
+        self.static_assets: list[dict[str, str]] = []
         self.records: dict[type, ModuleRecord] = {}
         self._seen_modules: set[type] = set()
 
@@ -68,6 +69,7 @@ class ModuleScanner:
         self.gateways.extend(metadata.gateways)
         self.middlewares.extend(metadata.middlewares)
         self.middlewares.extend(self._configured_middlewares(module))
+        self.static_assets.extend(getattr(module, "__fanest_static_assets__", []))
 
     def _validate_module_boundaries(self) -> None:
         for record in self.records.values():

@@ -165,6 +165,14 @@ def Sse(path: str = "", **options: Any) -> Callable[[Callable[..., Any]], Callab
     return decorator
 
 
+def Render(template: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
+        setattr(handler, "__fanest_render_template__", template)
+        return handler
+
+    return decorator
+
+
 def Body(name: str | None = None, default: Any = ...) -> ParameterSource:
     return ParameterSource(source="body", name=name, default=default)
 

@@ -1,12 +1,14 @@
 import inspect
 import json
+import re
 from collections.abc import Callable
+from pathlib import Path as FilePath
 from typing import Any
 
 from fastapi import Body as FastBody
 from fastapi import BackgroundTasks as FastBackgroundTasks
 from fastapi import Cookie, FastAPI, File, Form as FastForm, Header, HTTPException, Path, Query, Request, Response, WebSocket
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from starlette.websockets import WebSocketDisconnect
 
 from fanest.common.responses import StreamableFile
@@ -220,6 +222,9 @@ class FastApiAdapter:
                             return self._sse_response(result, response_headers)
                         if isinstance(result, StreamableFile):
                             return result.to_response(response_headers)
+                        render_template = self._metadata(handler, "__fanest_render_template__")
+                        if render_template is not None:
+                            return self._render_response(render_template, result, response_headers)
                         redirect = self._metadata(handler, "__fanest_redirect__")
                         if redirect is not None:
                             if isinstance(result, dict) and result.get("url"):
@@ -513,6 +518,22 @@ class FastApiAdapter:
         payload = json.dumps(data)
         prefix = f"event: {event}\n" if event else ""
         return f"{prefix}data: {payload}\n\n".encode()
+
+    def _render_response(
+        self,
+        template: str,
+        context: dict[str, Any] | None,
+        headers: dict[str, str] | None = None,
+    ) -> HTMLResponse:
+        path = FilePath(template)
+        content = path.read_text(encoding="utf-8") if path.exists() else template
+        values = context or {}
+
+        def replace(match: re.Match[str]) -> str:
+            return str(values.get(match.group("key"), ""))
+
+        rendered = re.sub(r"{{\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*}}", replace, content)
+        return HTMLResponse(rendered, headers=headers)
 
     def _resolve_component(self, component: Any) -> Any:
         if inspect.isclass(component):
