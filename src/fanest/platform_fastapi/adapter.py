@@ -78,6 +78,12 @@ class FastApiAdapter:
             pending_openapi_extra = getattr(handler, "__fanest_pending_openapi_extra__", None)
             if pending_openapi_extra:
                 route_options["openapi_extra"] = pending_openapi_extra
+            if self._metadata(handler, "__fanest_bearer_auth__") or getattr(
+                controller, "__fanest_bearer_auth__", False
+            ):
+                extra = dict(route_options.get("openapi_extra", {}))
+                extra["security"] = [*extra.get("security", []), {"bearer": []}]
+                route_options["openapi_extra"] = extra
             self.app.add_api_route(
                 path,
                 endpoint,

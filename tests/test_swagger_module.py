@@ -1,9 +1,18 @@
 from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Module, Param
-from fanest.swagger import ApiOperation, ApiParam, ApiQuery, ApiTags, DocumentBuilder, SwaggerModule
+from fanest.swagger import (
+    ApiBearerAuth,
+    ApiOperation,
+    ApiParam,
+    ApiQuery,
+    ApiTags,
+    DocumentBuilder,
+    SwaggerModule,
+)
 
 
+@ApiBearerAuth()
 @ApiTags("docs")
 @Controller("docs")
 class DocsController:
@@ -38,4 +47,5 @@ def test_swagger_decorators_and_module_setup():
 
     assert operation["summary"] == "Find a document"
     assert operation["tags"] == ["docs"]
+    assert operation["security"] == [{"bearer": []}]
     assert client.get("/api-docs").status_code == 200

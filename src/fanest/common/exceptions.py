@@ -33,6 +33,31 @@ class ConflictException(FaNestHttpException):
         super().__init__(409, detail)
 
 
+class GoneException(FaNestHttpException):
+    def __init__(self, detail: Any = "Gone"):
+        super().__init__(410, detail)
+
+
+class PayloadTooLargeException(FaNestHttpException):
+    def __init__(self, detail: Any = "Payload Too Large"):
+        super().__init__(413, detail)
+
+
+class UnprocessableEntityException(FaNestHttpException):
+    def __init__(self, detail: Any = "Unprocessable Entity"):
+        super().__init__(422, detail)
+
+
+class TooManyRequestsException(FaNestHttpException):
+    def __init__(self, detail: Any = "Too Many Requests"):
+        super().__init__(429, detail)
+
+
 class InternalServerErrorException(FaNestHttpException):
     def __init__(self, detail: Any = "Internal Server Error"):
         super().__init__(500, detail)
+
+
+class ServiceUnavailableException(FaNestHttpException):
+    def __init__(self, detail: Any = "Service Unavailable"):
+        super().__init__(503, detail)
