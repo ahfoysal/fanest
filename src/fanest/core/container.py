@@ -6,10 +6,12 @@ from fanest.core.metadata import (
     ClassProvider,
     ExistingProvider,
     FactoryProvider,
+    ForwardRef,
     InjectMarker,
     ProviderDefinition,
     ValueProvider,
 )
+from fanest.core.module_ref import ModuleRef
 
 _request_instances: ContextVar[dict[Any, Any] | None] = ContextVar(
     "fanest_request_instances", default=None
@@ -21,6 +23,7 @@ class FaNestContainer:
         self._providers: dict[Any, ProviderDefinition] = {}
         self._instances: dict[Any, Any] = {}
         self._resolving: set[Any] = set()
+        self.register(ValueProvider(provide=ModuleRef, use_value=ModuleRef(self)))
 
     def register(self, provider: ProviderDefinition) -> None:
         token = self.provider_token(provider)
@@ -68,11 +71,15 @@ class FaNestContainer:
         return instance
 
     def provider_token(self, provider: ProviderDefinition) -> Any:
+        if isinstance(provider, ForwardRef):
+            return self.provider_token(provider.factory())
         if isinstance(provider, (ClassProvider, ValueProvider, FactoryProvider, ExistingProvider)):
             return provider.provide
         return provider
 
     def _resolve_provider(self, provider: ProviderDefinition) -> Any:
+        if isinstance(provider, ForwardRef):
+            return self._resolve_provider(provider.factory())
         if isinstance(provider, ClassProvider):
             return self._instantiate(provider.use_class)
         if isinstance(provider, ValueProvider):
@@ -101,12 +108,20 @@ class FaNestContainer:
     def _resolve_injected_token(self, marker: Any) -> Any:
         if isinstance(marker, InjectMarker):
             try:
-                return self.resolve(marker.token)
+                return self.resolve(self._unwrap_token(marker.token))
             except Exception:
                 if marker.optional:
                     return marker.default
                 raise
-        return self.resolve(marker)
+        return self.resolve(self._unwrap_token(marker))
+
+    def _unwrap_token(self, token: Any) -> Any:
+        if isinstance(token, ForwardRef):
+            return token.factory()
+        return token
+
+    def instantiate(self, provider: type) -> Any:
+        return self._instantiate(provider)
 
     def _instantiate(self, provider: type) -> Any:
         signature = inspect.signature(provider.__init__)

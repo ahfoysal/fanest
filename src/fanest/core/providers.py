@@ -3,6 +3,7 @@ from typing import Any
 from fanest.core.metadata import (
     ClassProvider,
     ExistingProvider,
+    ForwardRef,
     FactoryProvider,
     InjectMarker,
     InjectionToken,
@@ -20,6 +21,10 @@ def Inject(token: Any, *, optional: bool = False, default: Any = None) -> Inject
 
 def Optional(token: Any, default: Any = None) -> InjectMarker:
     return Inject(token, optional=True, default=default)
+
+
+def forward_ref(factory: Any) -> ForwardRef:
+    return ForwardRef(factory=factory)
 
 
 def use_class(provide: Any, use_class: type) -> ClassProvider:

@@ -93,6 +93,18 @@ def Delete(path: str = "", **options: Any) -> Callable[[Callable[..., Any]], Cal
     return route("DELETE", path, **options)
 
 
+def Options(path: str = "", **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    return route("OPTIONS", path, **options)
+
+
+def Head(path: str = "", **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    return route("HEAD", path, **options)
+
+
+def All(path: str = "", **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    return route("ALL", path, **options)
+
+
 def HttpCode(status_code: int) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
         _set_route_option(handler, "status_code", status_code)
@@ -119,6 +131,24 @@ def SetMetadata(key: str, value: Any) -> Callable[[T], T]:
     return decorator
 
 
+def Version(version: str | int) -> Callable[[T], T]:
+    def decorator(target: T) -> T:
+        setattr(target, "__fanest_version__", str(version))
+        return target
+
+    return decorator
+
+
+def ResponseModel(model: Any, **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
+        _set_route_option(handler, "response_model", model)
+        for key, value in options.items():
+            _set_route_option(handler, key, value)
+        return handler
+
+    return decorator
+
+
 def Body(name: str | None = None, default: Any = ...) -> ParameterSource:
     return ParameterSource(source="body", name=name, default=default)
 
@@ -139,6 +169,10 @@ def Cookie(name: str | None = None, default: Any = None) -> ParameterSource:
     return ParameterSource(source="cookie", name=name, default=default)
 
 
+def Form(name: str | None = None, default: Any = ...) -> ParameterSource:
+    return ParameterSource(source="form", name=name, default=default)
+
+
 def UploadedFile(name: str = "file") -> ParameterSource:
     return ParameterSource(source="file", name=name)
 
@@ -153,6 +187,18 @@ def Req() -> ParameterSource:
 
 def Res() -> ParameterSource:
     return ParameterSource(source="response")
+
+
+def Ip() -> ParameterSource:
+    return ParameterSource(source="ip")
+
+
+def Session(default: Any = None) -> ParameterSource:
+    return ParameterSource(source="session", default=default)
+
+
+def BackgroundTasks() -> ParameterSource:
+    return ParameterSource(source="background_tasks")
 
 
 def create_param_decorator(factory: Callable[[Any, Any], Any]):

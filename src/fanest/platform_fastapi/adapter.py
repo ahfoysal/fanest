@@ -3,7 +3,8 @@ from collections.abc import Callable
 from typing import Any
 
 from fastapi import Body as FastBody
-from fastapi import Cookie, FastAPI, File, Header, HTTPException, Path, Query, Request, Response, WebSocket
+from fastapi import BackgroundTasks as FastBackgroundTasks
+from fastapi import Cookie, FastAPI, File, Form as FastForm, Header, HTTPException, Path, Query, Request, Response, WebSocket
 from fastapi.responses import RedirectResponse
 from starlette.websockets import WebSocketDisconnect
 
@@ -61,8 +62,14 @@ class FastApiAdapter:
             routes.append((route_metadata.path, handler, route_metadata))
 
         for _, handler, route_metadata in sorted(routes, key=self._route_sort_key):
+            version = self._metadata(handler, "__fanest_version__") or getattr(
+                controller, "__fanest_version__", None
+            )
             path = self._join_paths(
-                self.global_prefix, controller_metadata.prefix, route_metadata.path
+                self.global_prefix,
+                f"v{version}" if version else "",
+                controller_metadata.prefix,
+                route_metadata.path,
             )
             endpoint = self._endpoint(controller, handler.__name__, handler)
             route_options = dict(route_metadata.options)
@@ -87,7 +94,7 @@ class FastApiAdapter:
             self.app.add_api_route(
                 path,
                 endpoint,
-                methods=[route_metadata.method],
+                methods=self._route_methods(route_metadata.method),
                 **route_options,
             )
 
@@ -145,7 +152,12 @@ class FastApiAdapter:
     def _endpoint(
         self, controller_class: type, handler_name: str, handler_function: Callable[..., Any]
     ) -> Callable[..., Any]:
-        async def endpoint(request: Request, response: Response, **kwargs: Any) -> Any:
+        async def endpoint(
+            request: Request,
+            response: Response,
+            background_tasks: FastBackgroundTasks,
+            **kwargs: Any,
+        ) -> Any:
             request_scope = self.container.begin_request()
             controller = self.container.resolve(controller_class)
             handler = getattr(controller, handler_name)
@@ -160,6 +172,15 @@ class FastApiAdapter:
                 try:
                     context.kwargs.update(self._bind_request_parameters(handler, request, kwargs))
                     context.kwargs.update(self._bind_response_parameters(handler, response, kwargs))
+                    context.kwargs.update(
+                        self._bind_background_tasks_parameters(
+                            handler, background_tasks, context.kwargs
+                        )
+                    )
+                    context.kwargs.update(self._bind_ip_parameters(handler, request, context.kwargs))
+                    context.kwargs.update(
+                        self._bind_session_parameters(handler, request, context.kwargs)
+                    )
                     context.kwargs.update(self._bind_state_parameters(handler, request, kwargs))
                     context.kwargs.update(self._bind_custom_parameters(handler, context, kwargs))
                     kwargs = await self._run_pipes(controller, handler, context)
@@ -204,6 +225,11 @@ class FastApiAdapter:
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 annotation=Response,
             ),
+            inspect.Parameter(
+                "background_tasks",
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation=FastBackgroundTasks,
+            ),
         ]
         for name, parameter in original.parameters.items():
             if name == "self":
@@ -211,7 +237,14 @@ class FastApiAdapter:
             source = parameter.default
             annotation = parameter.annotation
             if isinstance(source, ParameterSource):
-                if source.source in {"request", "response", "custom"}:
+                if source.source in {
+                    "request",
+                    "response",
+                    "custom",
+                    "ip",
+                    "session",
+                    "background_tasks",
+                }:
                     continue
                 default = self._fastapi_default(source, name)
             else:
@@ -242,6 +275,8 @@ class FastApiAdapter:
             return File(..., alias=source.name)
         if source.source == "files":
             return File(source.default, alias=source.name)
+        if source.source == "form":
+            return FastForm(source.default, alias=source.name)
         if source.source == "request":
             return inspect.Parameter.empty
         if source.source == "state":
@@ -318,6 +353,39 @@ class FastApiAdapter:
                 bound[name] = response
         return bound
 
+    def _bind_background_tasks_parameters(
+        self,
+        handler: Callable[..., Any],
+        background_tasks: FastBackgroundTasks,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        bound = dict(kwargs)
+        for name, parameter in inspect.signature(handler).parameters.items():
+            source = parameter.default
+            if isinstance(source, ParameterSource) and source.source == "background_tasks":
+                bound[name] = background_tasks
+        return bound
+
+    def _bind_ip_parameters(
+        self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        bound = dict(kwargs)
+        for name, parameter in inspect.signature(handler).parameters.items():
+            source = parameter.default
+            if isinstance(source, ParameterSource) and source.source == "ip":
+                bound[name] = request.client.host if request.client else None
+        return bound
+
+    def _bind_session_parameters(
+        self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        bound = dict(kwargs)
+        for name, parameter in inspect.signature(handler).parameters.items():
+            source = parameter.default
+            if isinstance(source, ParameterSource) and source.source == "session":
+                bound[name] = request.scope.get("session", source.default)
+        return bound
+
     def _bind_state_parameters(
         self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
@@ -383,3 +451,8 @@ class FastApiAdapter:
     def _join_paths(self, *parts: str) -> str:
         combined = "/".join(part.strip("/") for part in parts if part.strip("/"))
         return f"/{combined}" if combined else "/"
+
+    def _route_methods(self, method: str) -> list[str]:
+        if method == "ALL":
+            return ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+        return [method]

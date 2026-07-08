@@ -42,6 +42,11 @@ class InjectMarker:
 
 
 @dataclass(frozen=True)
+class ForwardRef:
+    factory: Any
+
+
+@dataclass(frozen=True)
 class ClassProvider:
     provide: Any
     use_class: type
@@ -66,7 +71,7 @@ class ExistingProvider:
     use_existing: Any
 
 
-ProviderDefinition = type | ClassProvider | ValueProvider | FactoryProvider | ExistingProvider
+ProviderDefinition = type | ClassProvider | ValueProvider | FactoryProvider | ExistingProvider | ForwardRef
 
 
 @dataclass(frozen=True)
