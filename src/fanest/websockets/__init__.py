@@ -1,3 +1,3 @@
-from fanest.websockets.manager import WebSocketManager
+from fanest.websockets.manager import SocketIoRoomEmitter, SocketIoServer, WebSocketManager
 
-__all__ = ["WebSocketManager"]
+__all__ = ["SocketIoRoomEmitter", "SocketIoServer", "WebSocketManager"]

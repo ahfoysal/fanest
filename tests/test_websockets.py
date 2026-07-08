@@ -4,10 +4,13 @@ from fanest import (
     FaNestFactory,
     Module,
     SubscribeMessage,
+    Catch,
     UseGuards,
+    UseFilters,
     UsePipes,
     WebSocketGateway,
     WebSocketManager,
+    SocketIoServer,
 )
 
 
@@ -96,4 +99,63 @@ def test_websocket_gateway_runs_guards_and_pipes():
         assert websocket.receive_json() == {
             "event": "shout",
             "data": {"message": "HELLO"},
+        }
+
+
+@WebSocketGateway("/socketio")
+class SocketIoGateway:
+    def __init__(self, server: SocketIoServer):
+        self.server = server
+
+    async def on_connect(self, websocket):
+        self.server.join(websocket, "lobby")
+
+    @SubscribeMessage("announce")
+    async def announce(self, data, websocket):
+        await self.server.to("lobby").emit("announcement", data, exclude=websocket)
+        return {"sent": True}
+
+
+@Module(gateways=[SocketIoGateway])
+class SocketIoModule:
+    pass
+
+
+def test_socket_io_style_room_emitter():
+    client = TestClient(FaNestFactory.create(SocketIoModule))
+
+    with client.websocket_connect("/socketio") as sender:
+        with client.websocket_connect("/socketio") as receiver:
+            sender.send_json({"event": "announce", "data": {"text": "hi"}})
+            assert receiver.receive_json() == {"event": "announcement", "data": {"text": "hi"}}
+            assert sender.receive_json() == {"event": "announce", "data": {"sent": True}}
+
+
+@Catch(ValueError)
+class WebSocketValueErrorFilter:
+    def catch(self, exc, context):
+        return {"kind": "value", "message": str(exc)}
+
+
+@WebSocketGateway("/filtered-ws")
+@UseFilters(WebSocketValueErrorFilter)
+class FilteredGateway:
+    @SubscribeMessage("fail")
+    async def fail(self, data, websocket):
+        raise ValueError("bad socket")
+
+
+@Module(gateways=[FilteredGateway])
+class FilteredWsModule:
+    pass
+
+
+def test_websocket_gateway_uses_exception_filters():
+    client = TestClient(FaNestFactory.create(FilteredWsModule))
+
+    with client.websocket_connect("/filtered-ws") as websocket:
+        websocket.send_json({"event": "fail", "data": None})
+        assert websocket.receive_json() == {
+            "event": "error",
+            "data": {"kind": "value", "message": "bad socket"},
         }

@@ -88,7 +88,7 @@ from fanest.core.providers import (
     use_value,
 )
 from fanest.mapped_types import IntersectionType, OmitType, PartialType, PickType
-from fanest.websockets import WebSocketManager
+from fanest.websockets import SocketIoServer, WebSocketManager
 
 __all__ = [
     "BadRequestException",
@@ -155,6 +155,7 @@ __all__ = [
     "SetMetadata",
     "Serialize",
     "ServiceUnavailableException",
+    "SocketIoServer",
     "Sse",
     "StreamableFile",
     "UploadedFile",

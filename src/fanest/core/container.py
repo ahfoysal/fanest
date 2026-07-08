@@ -13,6 +13,7 @@ from fanest.core.metadata import (
 )
 from fanest.core.module_ref import ModuleRef
 from fanest.core.reflector import Reflector
+from fanest.websockets import SocketIoServer, WebSocketManager
 
 _request_instances: ContextVar[dict[Any, Any] | None] = ContextVar(
     "fanest_request_instances", default=None
@@ -26,6 +27,9 @@ class FaNestContainer:
         self._resolving: set[Any] = set()
         self.register(ValueProvider(provide=ModuleRef, use_value=ModuleRef(self)))
         self.register(ValueProvider(provide=Reflector, use_value=Reflector()))
+        websocket_manager = WebSocketManager()
+        self.register(ValueProvider(provide=WebSocketManager, use_value=websocket_manager))
+        self.register(ValueProvider(provide=SocketIoServer, use_value=SocketIoServer(websocket_manager)))
 
     def register(self, provider: ProviderDefinition) -> None:
         token = self.provider_token(provider)

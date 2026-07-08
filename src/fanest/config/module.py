@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from fanest import Inject, Injectable, Module, use_value
 from fanest.core.providers import token
@@ -47,6 +47,12 @@ class ConfigService:
         if cast is not None:
             return self.get(key, cast=cast)
         return value
+
+    def get_or_throw(self, key: str, *, cast: type[T] | None = None) -> Any:
+        return self.get_required(key, cast=cast)
+
+    def validate(self, schema: type[T]) -> T:
+        return TypeAdapter(schema).validate_python(self._values)
 
 
 class ConfigModule:

@@ -72,6 +72,7 @@ def test_swagger_decorators_and_module_setup():
         .build()
     )
     document = SwaggerModule.create_document(app, config)
+    client_source = SwaggerModule.generate_typescript_client(document)
     SwaggerModule.setup("/api-docs", app, document)
 
     client = TestClient(app)
@@ -85,6 +86,8 @@ def test_swagger_decorators_and_module_setup():
     assert "application/json" in operation["responses"]["200"]["content"]
     assert document["components"]["securitySchemes"]["basic"]["scheme"] == "basic"
     assert document["components"]["securitySchemes"]["api_key"]["name"] == "x-api-key"
+    assert "export class ApiClient" in client_source
+    assert "fetch(`${this.baseUrl}/docs/{doc_id}`" in client_source
     basic_operation = client.get("/api-docs/openapi.json").json()["paths"]["/docs/basic"]["get"]
     assert {"basic": []} in basic_operation["security"]
     assert basic_operation["responses"]["201"]["description"] == "Created"

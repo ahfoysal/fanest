@@ -45,3 +45,29 @@ class WebSocketManager:
             if websocket is exclude:
                 continue
             await websocket.send_json({"event": event, "data": data})
+
+
+class SocketIoRoomEmitter:
+    def __init__(self, manager: WebSocketManager, room: str):
+        self.manager = manager
+        self.room = room
+
+    async def emit(self, event: str, data: Any, *, exclude: WebSocket | None = None) -> None:
+        await self.manager.broadcast(self.room, event, data, exclude=exclude)
+
+
+class SocketIoServer:
+    def __init__(self, manager: WebSocketManager):
+        self.manager = manager
+
+    def join(self, websocket: WebSocket, room: str) -> None:
+        self.manager.join(room, websocket)
+
+    def leave(self, websocket: WebSocket, room: str) -> None:
+        self.manager.leave(room, websocket)
+
+    def to(self, room: str) -> SocketIoRoomEmitter:
+        return SocketIoRoomEmitter(self.manager, room)
+
+    async def emit(self, websocket: WebSocket, event: str, data: Any) -> None:
+        await websocket.send_json({"event": event, "data": data})

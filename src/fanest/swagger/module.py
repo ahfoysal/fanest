@@ -114,3 +114,29 @@ class SwaggerModule:
         @app.get(path, include_in_schema=False)
         async def swagger_ui():
             return get_swagger_ui_html(openapi_url=schema_path, title=document["info"]["title"])
+
+    @staticmethod
+    def generate_typescript_client(document: dict[str, Any], *, client_name: str = "ApiClient") -> str:
+        lines = [
+            f"export class {client_name} {{",
+            "  constructor(private readonly baseUrl = '') {}",
+            "",
+        ]
+        for path, methods in document.get("paths", {}).items():
+            for method, operation in methods.items():
+                operation_id = operation.get("operationId") or SwaggerModule._operation_name(method, path)
+                lines.extend(
+                    [
+                        f"  async {operation_id}(options: RequestInit = {{}}): Promise<Response> {{",
+                        f"    return fetch(`${{this.baseUrl}}{path}`, {{ ...options, method: '{method.upper()}' }});",
+                        "  }",
+                        "",
+                    ]
+                )
+        lines.append("}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _operation_name(method: str, path: str) -> str:
+        suffix = "".join(part.title() for part in path.strip("/").replace("{", "").replace("}", "").split("/"))
+        return f"{method.lower()}{suffix or 'Root'}"

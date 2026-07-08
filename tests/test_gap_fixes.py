@@ -73,6 +73,8 @@ def test_config_schema_and_typed_get():
 
     assert config.get("APP_PORT", cast=int) == 8080
     assert config.get("DEBUG", cast=bool) is True
+    assert config.get_or_throw("APP_PORT", cast=int) == 8080
+    assert config.validate(AppSettings).APP_PORT == 8080
 
 
 @Controller("cache-gap")

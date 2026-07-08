@@ -156,11 +156,21 @@ class FastApiAdapter:
                         await self._run_guards(instance, handler, context)
                         data = await self._run_websocket_pipes(instance, handler, data, context)
                     except Exception as exc:
-                        await websocket.send_json({"event": "error", "data": str(exc)})
+                        handled = await self._run_filters(instance, handler, context, exc)
+                        await websocket.send_json(
+                            {"event": "error", "data": handled if handled is not None else str(exc)}
+                        )
                         continue
-                    result = handler(data, websocket)
-                    if inspect.isawaitable(result):
-                        result = await result
+                    try:
+                        result = handler(data, websocket)
+                        if inspect.isawaitable(result):
+                            result = await result
+                    except Exception as exc:
+                        handled = await self._run_filters(instance, handler, context, exc)
+                        await websocket.send_json(
+                            {"event": "error", "data": handled if handled is not None else str(exc)}
+                        )
+                        continue
                     if result is not None:
                         await websocket.send_json({"event": event, "data": result})
             except WebSocketDisconnect:

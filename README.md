@@ -116,6 +116,7 @@ It shows:
 - session cookies and security headers
 - custom parameter decorators
 - config module
+- config validation helpers
 - async module configuration
 - i18n translations and locale extraction
 - JWT auth
@@ -124,7 +125,7 @@ It shows:
 - cache interceptor
 - cache stores
 - throttling guard
-- Swagger document setup and security schemes
+- Swagger document setup, security schemes, and TypeScript client generation
 - typed exception filters
 - Reflector and discovery services
 - health indicators
@@ -144,7 +145,7 @@ It shows:
 - CQRS command/query/event buses
 - event emitter wildcard, once, and off helpers
 - named microservice transports
-- WebSocket gateway with rooms, broadcasting, guards, and pipes
+- WebSocket gateway with rooms, broadcasting, guards, pipes, filters, and Socket.IO-style emitters
 - global prefix, CORS, and global pipes
 
 Run it:
@@ -342,6 +343,8 @@ Swagger decorators include `ApiTags`, `ApiOperation`, `ApiParam`, `ApiQuery`, `A
 `ApiBody`, `ApiResponse`, `ApiConsumes`, `ApiProduces`, `ApiBearerAuth`, `ApiBasicAuth`,
 `ApiCookieAuth`, `ApiSecurity`, response shortcuts such as `ApiOkResponse`,
 `ApiCreatedResponse`, `ApiNotFoundResponse`, `ApiExcludeEndpoint`, and `ApiProperty`.
+`SwaggerModule.generate_typescript_client(document)` can emit a small fetch client from the
+generated OpenAPI document.
 
 ## Mapped Types
 
@@ -440,7 +443,7 @@ Current:
 - JWT auth and roles
 - Passport-style strategy guards
 - cache and throttling
-- WebSocket gateways, room broadcasting, guards, and pipes
+- WebSocket gateways, Socket.IO-style room emitters, guards, pipes, and filters
 - cron, interval, timeout jobs, and scheduler registry
 - in-memory queue processors
 - queue retries and delayed jobs
@@ -480,7 +483,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 83 passed
+# 85 passed
 ```
 
 ## License
