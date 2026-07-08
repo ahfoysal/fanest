@@ -131,6 +131,7 @@ It shows:
 - health endpoint
 - SQLAlchemy module wiring
 - Mongo-style document collections
+- Mongoose-style module aliases
 - interval jobs
 - cron jobs
 - timeout jobs and scheduler registry
@@ -264,7 +265,7 @@ fanest.config            ConfigModule and ConfigService
 fanest.swagger           decorators, DocumentBuilder, SwaggerModule
 fanest.auth              JWT service, passport strategies, auth guard, roles guard
 fanest.sqlalchemy        async SQLAlchemy module and repositories
-fanest.mongodb           Mongo-style document service and collections
+fanest.mongodb           Mongo/Mongoose-style document service and collections
 fanest.cache             cache service, interceptor, and store adapters
 fanest.throttler         throttling module and guard
 fanest.schedule          interval, cron, timeout jobs, scheduler registry
@@ -441,6 +442,7 @@ Current:
 - SQLAlchemy package start
 - migration template helper
 - Mongo-style package start
+- MongooseModule and InjectModel aliases
 - cache store adapters
 - health checks
 - health indicators
@@ -463,7 +465,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 76 passed
+# 77 passed
 ```
 
 ## License

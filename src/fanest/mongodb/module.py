@@ -12,6 +12,10 @@ def collection_token(name: str):
     return token(f"MONGO_COLLECTION:{name}")
 
 
+def InjectModel(name: str):
+    return Inject(collection_token(name))
+
+
 class MongoCollection:
     def __init__(self, name: str):
         self.name = name
@@ -91,3 +95,6 @@ class MongoModule:
             pass
 
         return DynamicMongoFeatureModule
+
+
+MongooseModule = MongoModule

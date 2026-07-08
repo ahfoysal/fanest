@@ -1,3 +1,17 @@
-from fanest.mongodb.module import MongoCollection, MongoModule, MongoService, collection_token
+from fanest.mongodb.module import (
+    InjectModel,
+    MongoCollection,
+    MongoModule,
+    MongoService,
+    MongooseModule,
+    collection_token,
+)
 
-__all__ = ["MongoCollection", "MongoModule", "MongoService", "collection_token"]
+__all__ = [
+    "InjectModel",
+    "MongoCollection",
+    "MongoModule",
+    "MongoService",
+    "MongooseModule",
+    "collection_token",
+]
