@@ -226,7 +226,7 @@ class FastApiAdapter:
 
     async def _run_connection_guards(self, gateway: Any, context: ExecutionContext) -> None:
         for guard in getattr(gateway.__class__, "__fanest_guards__", []):
-            instance = self._resolve_component(guard, owner=gateway)
+            instance = await self._resolve_component_async(guard, owner=gateway)
             result = instance.can_activate(context)
             if inspect.isawaitable(result):
                 result = await result
@@ -248,7 +248,7 @@ class FastApiAdapter:
         ) -> Any:
             request_scope = self.container.begin_request()
             end_request_on_return = True
-            controller = self.container.resolve(controller_class, module_key=module_key)
+            controller = await self.container.resolve_async(controller_class, module_key=module_key)
             handler = getattr(controller, handler_name)
             context = ExecutionContext(
                 handler=handler,
@@ -413,7 +413,7 @@ class FastApiAdapter:
         self, controller: Any, handler: Callable[..., Any], context: ExecutionContext
     ) -> None:
         for guard in self._collect(controller, handler, "__fanest_guards__"):
-            instance = self._resolve_component(guard, owner=controller)
+            instance = await self._resolve_component_async(guard, owner=controller)
             result = instance.can_activate(context)
             if inspect.isawaitable(result):
                 result = await result
@@ -425,7 +425,7 @@ class FastApiAdapter:
     ) -> dict[str, Any]:
         kwargs = dict(context.kwargs)
         for pipe in self._collect(controller, handler, "__fanest_pipes__"):
-            instance = self._resolve_component(pipe, owner=controller)
+            instance = await self._resolve_component_async(pipe, owner=controller)
             for name, value in list(kwargs.items()):
                 parameter = self._parameters(handler).get(name)
                 if parameter is not None and not self._should_pipe_parameter(parameter):
@@ -444,7 +444,7 @@ class FastApiAdapter:
                 continue
             annotation = parameter.annotation
             for pipe in parameter.default.pipes:
-                instance = self._resolve_component(pipe, owner=controller)
+                instance = await self._resolve_component_async(pipe, owner=controller)
                 result = instance.transform(
                     value,
                     self._pipe_metadata(name, handler, parameter, annotation),
@@ -488,7 +488,7 @@ class FastApiAdapter:
         parameter = self._parameters(handler).get("data")
         annotation = parameter.annotation if parameter is not None else None
         for pipe in self._collect(gateway, handler, "__fanest_pipes__"):
-            instance = self._resolve_component(pipe, owner=gateway)
+            instance = await self._resolve_component_async(pipe, owner=gateway)
             transformed = instance.transform(
                 result,
                 {"name": "data", "handler": handler, "annotation": annotation},
@@ -520,7 +520,7 @@ class FastApiAdapter:
         async def dispatch(index: int) -> Any:
             if index >= len(interceptors):
                 return await call_handler()
-            instance = self._resolve_component(interceptors[index], owner=controller)
+            instance = await self._resolve_component_async(interceptors[index], owner=controller)
             result = instance.intercept(context, lambda: dispatch(index + 1))
             if inspect.isawaitable(result):
                 return await result
@@ -708,7 +708,7 @@ class FastApiAdapter:
         exc: Exception,
     ) -> Any:
         for exception_filter in self._collect(controller, handler, "__fanest_filters__"):
-            instance = self._resolve_component(exception_filter, owner=controller)
+            instance = await self._resolve_component_async(exception_filter, owner=controller)
             catch_types = getattr(instance.__class__, "__fanest_catch_exceptions__", (Exception,))
             if not isinstance(exc, catch_types):
                 continue
@@ -740,7 +740,7 @@ class FastApiAdapter:
             return None
         request_scope = self.container.begin_request()
         try:
-            controller = self.container.resolve(controller_class, module_key=module_key)
+            controller = await self.container.resolve_async(controller_class, module_key=module_key)
             handler = getattr(controller, handler_name)
             context = ExecutionContext(handler=handler, controller=controller, request=request, kwargs={})
             return await self._run_filters(controller, handler, context, exc)
@@ -827,6 +827,16 @@ class FastApiAdapter:
                     owner.__class__
                 )
             return self.container.resolve(component, module_key=module_key)
+        return component
+
+    async def _resolve_component_async(self, component: Any, *, owner: Any | None = None) -> Any:
+        if inspect.isclass(component):
+            module_key = None
+            if owner is not None:
+                module_key = self.controller_modules.get(owner.__class__) or self.gateway_modules.get(
+                    owner.__class__
+                )
+            return await self.container.resolve_async(component, module_key=module_key)
         return component
 
     def _parameters(self, handler: Callable[..., Any]) -> dict[str, inspect.Parameter]:

@@ -245,6 +245,7 @@ def test_nest_style_dynamic_module_dict_can_be_global():
 
 
 ASYNC_DYNAMIC_MESSAGE = token("ASYNC_DYNAMIC_MESSAGE")
+ASYNC_REQUEST_MESSAGE = token("ASYNC_REQUEST_MESSAGE")
 
 
 @Module()
@@ -290,4 +291,35 @@ def test_create_async_supports_awaitable_dynamic_module_imports():
 
     assert TestClient(app).get("/async-dynamic-module").json() == {
         "message": "async-dynamic-ready"
+    }
+
+
+async def async_request_message_factory():
+    await asyncio.sleep(0)
+    return {"message": "async-request-ready"}
+
+
+@Controller("async-request-factory")
+class AsyncRequestFactoryController:
+    def __init__(self, value: dict = Inject(ASYNC_REQUEST_MESSAGE)):
+        self.value = value
+
+    @Get("/")
+    async def index(self):
+        return self.value
+
+
+@Module(
+    controllers=[AsyncRequestFactoryController],
+    providers=[use_factory(ASYNC_REQUEST_MESSAGE, async_request_message_factory)],
+)
+class AsyncRequestFactoryModule:
+    pass
+
+
+def test_http_request_resolution_awaits_async_factory_dependencies():
+    client = TestClient(FaNestFactory.create(AsyncRequestFactoryModule))
+
+    assert client.get("/async-request-factory").json() == {
+        "message": "async-request-ready"
     }
