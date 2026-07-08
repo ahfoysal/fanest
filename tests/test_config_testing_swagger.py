@@ -1,9 +1,10 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from fanest import Controller, FaNestFactory, Get, Injectable, Module
 from fanest.config import ConfigModule, ConfigService
 from fanest.swagger import ApiTags
-from fanest.testing import TestingModule
+from fanest.testing import TestingModule, create_testing_module
 
 
 @Injectable()
@@ -53,6 +54,23 @@ def test_testing_module_override_builder():
     app = TestingModule.create(MessageModule).override(MessageService).use_value(MockMessageService()).compile()
 
     assert TestClient(app).get("/messages").json() == {"message": "mock"}
+
+
+def test_testing_module_helpers():
+    module = create_testing_module(MessageModule).override(MessageService).use_value(MockMessageService())
+    client = module.create_test_client()
+
+    assert client.get("/messages").json() == {"message": "mock"}
+    assert module.get(MessageService).message() == "mock"
+    module.close()
+    assert module._app is None
+
+
+@pytest.mark.anyio
+async def test_testing_module_compile_async():
+    app = await TestingModule.create(MessageModule).compile_async()
+
+    assert TestClient(app).get("/messages").json()["message"] == "real"
 
 
 def test_swagger_tags_are_registered():

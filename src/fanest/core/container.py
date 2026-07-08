@@ -72,7 +72,7 @@ class FaNestContainer:
                 raise KeyError(f"No provider registered for token {token!r}")
             provider = token
 
-        scope = self._provider_scope(provider)
+        scope = self._effective_scope(token, provider)
         request_cache = _request_instances.get()
 
         if scope == "request" and request_cache is not None and token in request_cache:
@@ -100,7 +100,7 @@ class FaNestContainer:
                 raise KeyError(f"No provider registered for token {token!r}")
             provider = token
 
-        scope = self._provider_scope(provider)
+        scope = self._effective_scope(token, provider)
         request_cache = _request_instances.get()
 
         if scope == "request" and request_cache is not None and token in request_cache:
@@ -170,6 +170,61 @@ class FaNestContainer:
         if inspect.isclass(provider):
             return self._class_scope(provider)
         return "singleton"
+
+    def _effective_scope(
+        self,
+        token: Any,
+        provider: ProviderDefinition,
+        seen: set[Any] | None = None,
+    ) -> str:
+        own_scope = self._provider_scope(provider)
+        if own_scope != "singleton":
+            return own_scope
+        seen = seen or set()
+        if token in seen:
+            return own_scope
+        seen.add(token)
+        for dependency in self._provider_dependencies(provider):
+            dependency = self._unwrap_token(dependency)
+            dependency_provider = self._providers.get(dependency)
+            if dependency_provider is None:
+                if not inspect.isclass(dependency):
+                    continue
+                dependency_provider = dependency
+            if self._effective_scope(dependency, dependency_provider, seen) == "request":
+                return "request"
+        return own_scope
+
+    def _provider_dependencies(self, provider: ProviderDefinition) -> list[Any]:
+        if isinstance(provider, ExistingProvider):
+            return [provider.use_existing]
+        if isinstance(provider, FactoryProvider):
+            return list(provider.inject)
+        if isinstance(provider, ClassProvider):
+            return self._class_dependencies(provider.use_class)
+        if inspect.isclass(provider):
+            return self._class_dependencies(provider)
+        return []
+
+    def _class_dependencies(self, provider: type) -> list[Any]:
+        signature = inspect.signature(provider.__init__)
+        type_hints = get_type_hints(provider.__init__)
+        dependencies: list[Any] = []
+        for name, parameter in signature.parameters.items():
+            if name == "self" or parameter.kind in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
+                continue
+            if isinstance(parameter.default, InjectMarker):
+                dependencies.append(parameter.default.token)
+                continue
+            if parameter.default is not inspect.Parameter.empty:
+                continue
+            annotation = type_hints.get(name, parameter.annotation)
+            if annotation is not inspect.Parameter.empty:
+                dependencies.append(annotation)
+        return dependencies
 
     def _class_scope(self, provider: type) -> str:
         metadata = getattr(provider, "__fanest_provider__", None)

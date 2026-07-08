@@ -78,3 +78,46 @@ def test_singleton_request_and_transient_provider_scopes():
     assert second["singleton_created"] == 1
     assert second["request_created"] == 2
     assert second["transient_created"] == 2
+
+
+@Injectable()
+class SingletonWithRequestDependency:
+    created = 0
+
+    def __init__(self, request: RequestCounter):
+        type(self).created += 1
+        self.request = request
+
+
+@Controller("scope-bubbling")
+class ScopeBubblingController:
+    def __init__(self, service: SingletonWithRequestDependency, request: RequestCounter):
+        self.service = service
+        self.request = request
+
+    @Get("/")
+    async def index(self):
+        return {
+            "same_request": self.service.request is self.request,
+            "service_created": SingletonWithRequestDependency.created,
+            "request_created": RequestCounter.created,
+        }
+
+
+@Module(controllers=[ScopeBubblingController], providers=[RequestCounter, SingletonWithRequestDependency])
+class ScopeBubblingModule:
+    pass
+
+
+def test_request_scope_bubbles_to_singletons_that_depend_on_request_providers():
+    RequestCounter.created = 0
+    SingletonWithRequestDependency.created = 0
+    client = TestClient(FaNestFactory.create(ScopeBubblingModule))
+
+    first = client.get("/scope-bubbling").json()
+    second = client.get("/scope-bubbling").json()
+
+    assert first["same_request"] is True
+    assert second["same_request"] is True
+    assert second["service_created"] == 2
+    assert second["request_created"] == 2

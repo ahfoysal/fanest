@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from fanest.core.container import FaNestContainer
 from fanest.core.factory import FaNestFactory
@@ -49,6 +50,12 @@ class TestingModule:
         self._app = FaNestFactory.create(self.root_module, overrides=self.overrides)
         return self._app
 
+    async def compile_async(self) -> FastAPI:
+        return self.compile()
+
+    def create_test_client(self) -> TestClient:
+        return TestClient(self.compile())
+
     def get(self, token: Any) -> Any:
         return self._container().resolve(token)
 
@@ -60,8 +67,15 @@ class TestingModule:
         finally:
             container.end_request(request_scope)
 
+    def close(self) -> None:
+        self._app = None
+
     def _container(self) -> FaNestContainer:
         if self._app is None:
             self.compile()
         assert self._app is not None
         return self._app.state.fanest_container
+
+
+def create_testing_module(root_module: type) -> TestingModule:
+    return TestingModule.create(root_module)
