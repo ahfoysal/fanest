@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
+from fastapi.responses import JSONResponse
 
-from fanest import Catch, Controller, FaNestFactory, Get, Module, Req, Session, UseFilters
+from fanest import BackgroundTasks, Catch, Controller, FaNestFactory, Get, Module, Req, Session, UseFilters
 from fanest.health import HealthIndicator, HealthModule
 from fanest.security import HelmetModule
 from fanest.session import SessionModule
@@ -35,6 +36,39 @@ def test_catch_decorator_limits_exception_filter_scope():
     response = TestClient(FaNestFactory.create(FilterModule)).get("/filters")
 
     assert response.json() == {"error": "typed"}
+
+
+@Catch(RuntimeError)
+class BackgroundTaskFilter:
+    def catch(self, exc, context):
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@Controller("filtered-background")
+@UseFilters(BackgroundTaskFilter)
+class FilteredBackgroundController:
+    tasks: list[str] = []
+
+    @Get("/")
+    async def index(self, background_tasks=BackgroundTasks()):
+        background_tasks.add_task(self.tasks.append, "queued-before-error")
+        raise RuntimeError("filtered")
+
+
+@Module(controllers=[FilteredBackgroundController])
+class FilteredBackgroundModule:
+    pass
+
+
+def test_background_tasks_survive_exception_filter_responses():
+    FilteredBackgroundController.tasks = []
+    client = TestClient(FaNestFactory.create(FilteredBackgroundModule))
+
+    response = client.get("/filtered-background")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "filtered"}
+    assert FilteredBackgroundController.tasks == ["queued-before-error"]
 
 
 @Controller("session")

@@ -1,6 +1,6 @@
 import pytest
 
-from fanest import Inject, Injectable, Module, ModuleRef, forward_ref, use_factory
+from fanest import FaNestFactory, Inject, Injectable, Module, ModuleRef, forward_ref, use_factory
 from fanest.core.container import FaNestContainer, ForwardRefProxy
 from fanest.core.module_ref import StrictLookupError, UnknownProviderError
 
@@ -88,6 +88,33 @@ def test_module_ref_get_strict_false_introspection_and_errors():
         module_ref.get("missing")
     with pytest.raises(StrictLookupError, match="Strict module-local lookup"):
         module_ref.get(ValueService, strict=True)
+
+
+@Injectable()
+class AppVisibleService:
+    value = "visible"
+
+
+@Module(providers=[AppVisibleService])
+class AppVisibleModule:
+    pass
+
+
+def test_module_ref_introspection_sees_root_visible_module_providers():
+    app = FaNestFactory.create(AppVisibleModule)
+    module_ref = app.state.fanest_container.resolve(ModuleRef)
+
+    assert module_ref.has(AppVisibleService) is True
+    assert AppVisibleService in module_ref.provider_tokens()
+
+    before = module_ref.introspect(AppVisibleService)
+    instance = module_ref.get(AppVisibleService)
+    after = module_ref.introspect(AppVisibleService)
+
+    assert before["token"] is AppVisibleService
+    assert before["resolved"] is False
+    assert instance.value == "visible"
+    assert after["resolved"] is True
 
 
 @pytest.mark.anyio

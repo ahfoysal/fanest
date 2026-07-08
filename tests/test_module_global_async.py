@@ -11,6 +11,7 @@ ASYNC_MESSAGE = token("ASYNC_MESSAGE")
 GLOBAL_MESSAGE = token("GLOBAL_MESSAGE")
 DYNAMIC_MESSAGE = token("DYNAMIC_MESSAGE")
 DICT_DYNAMIC_MESSAGE = token("DICT_DYNAMIC_MESSAGE")
+SHARED_DYNAMIC_CONNECTION = token("SHARED_DYNAMIC_CONNECTION")
 
 
 async def async_message_factory():
@@ -196,6 +197,82 @@ def test_dynamic_module_helper_merges_runtime_metadata():
     client = TestClient(FaNestFactory.create(DynamicModuleRoot))
 
     assert client.get("/dynamic-module").json() == {"message": "dynamic-ready"}
+
+
+class SharedDynamicConnection:
+    created = 0
+
+    def __init__(self):
+        type(self).created += 1
+        self.id = type(self).created
+
+
+@Module()
+class SharedDynamicDatabaseModule:
+    @staticmethod
+    def for_root():
+        return dynamic_module(
+            SharedDynamicDatabaseModule,
+            providers=[use_factory(SHARED_DYNAMIC_CONNECTION, SharedDynamicConnection)],
+            exports=[SHARED_DYNAMIC_CONNECTION],
+        )
+
+
+class UsesSharedDynamicConnection:
+    def __init__(self, connection: SharedDynamicConnection = Inject(SHARED_DYNAMIC_CONNECTION)):
+        self.connection = connection
+
+
+@Controller("dynamic-a")
+class DynamicAController:
+    def __init__(self, service: UsesSharedDynamicConnection):
+        self.service = service
+
+    @Get("/")
+    async def index(self):
+        return {"id": self.service.connection.id}
+
+
+@Controller("dynamic-b")
+class DynamicBController:
+    def __init__(self, service: UsesSharedDynamicConnection):
+        self.service = service
+
+    @Get("/")
+    async def index(self):
+        return {"id": self.service.connection.id}
+
+
+@Module(
+    imports=[SharedDynamicDatabaseModule.for_root()],
+    controllers=[DynamicAController],
+    providers=[UsesSharedDynamicConnection],
+)
+class DynamicFeatureAModule:
+    pass
+
+
+@Module(
+    imports=[SharedDynamicDatabaseModule.for_root()],
+    controllers=[DynamicBController],
+    providers=[UsesSharedDynamicConnection],
+)
+class DynamicFeatureBModule:
+    pass
+
+
+@Module(imports=[DynamicFeatureAModule, DynamicFeatureBModule])
+class DuplicateDynamicRootModule:
+    pass
+
+
+def test_identical_dynamic_module_imports_share_singleton_providers():
+    SharedDynamicConnection.created = 0
+    client = TestClient(FaNestFactory.create(DuplicateDynamicRootModule))
+
+    assert client.get("/dynamic-a").json() == {"id": 1}
+    assert client.get("/dynamic-b").json() == {"id": 1}
+    assert SharedDynamicConnection.created == 1
 
 
 @Module()

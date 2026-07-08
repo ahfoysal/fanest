@@ -6,6 +6,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from fanest import __version__
 from fanest.cli import main as cli_main
 from fanest.cli.main import app
 
@@ -305,7 +306,7 @@ def test_cli_info_and_build(tmp_path, monkeypatch):
     build_src = runner.invoke(app, ["build", "src"])
 
     assert info.exit_code == 0
-    assert "FaNest 0.1.6" in info.output
+    assert f"FaNest {__version__}" in info.output
     assert build.exit_code == 0
     assert build_src.exit_code == 0
     assert "Build OK: ." in build.output

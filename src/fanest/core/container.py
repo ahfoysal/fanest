@@ -143,17 +143,19 @@ class FaNestContainer:
 
     def has_provider(self, token: Any) -> bool:
         token = self._unwrap_token(token)
-        return token in self._providers or token in self._multi_providers
+        token = self._resolve_named_token(token)
+        if token in self._multi_providers:
+            return True
+        _, provider = self._locate_provider(token)
+        return provider is not None
 
     def provider_tokens(self) -> tuple[Any, ...]:
-        return tuple([*self._providers.keys(), *self._multi_providers.keys()])
+        return tuple(dict.fromkeys(self._visible_provider_tokens()))
 
     def describe_provider(self, token: Any) -> dict[str, Any]:
         token = self._unwrap_token(token)
-        provider = self._providers.get(token)
+        token = self._resolve_named_token(token)
         multi = self._multi_providers.get(token)
-        if provider is None and multi is None:
-            raise KeyError(token)
         if multi is not None:
             return {
                 "token": token,
@@ -162,14 +164,18 @@ class FaNestContainer:
                 "multi": True,
                 "count": len(multi),
             }
+        owner_key, provider = self._locate_provider(token)
+        if provider is None:
+            raise KeyError(token)
         assert provider is not None
+        cache_key = self._cache_key(owner_key, token)
         return {
             "token": token,
-            "scope": self._effective_scope(token, provider),
+            "scope": self._effective_scope(token, provider, module_key=owner_key),
             "type": self._provider_kind(provider),
             "multi": False,
             "dependencies": tuple(self._unwrap_token(dependency) for dependency in self._provider_dependencies(provider)),
-            "resolved": token in self._instances,
+            "resolved": cache_key in self._instances,
         }
 
     def resolve(self, token: Any, module_key: Any | None = None) -> Any:

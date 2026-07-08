@@ -10,6 +10,7 @@ from fastapi import BackgroundTasks as FastBackgroundTasks
 from fastapi import Cookie, FastAPI, File, Form as FastForm, Header, HTTPException, Path, Query, Request, Response, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from starlette.background import BackgroundTasks as StarletteBackgroundTasks
 from starlette.responses import Response as StarletteResponse
 from starlette.websockets import WebSocketDisconnect
 
@@ -326,6 +327,7 @@ class FastApiAdapter:
             except Exception as exc:
                 handled = await self._run_filters(controller, handler, context, exc)
                 if handled is not None:
+                    self._attach_background_tasks(handled, background_tasks)
                     return handled
                 raise
             finally:
@@ -724,6 +726,22 @@ class FastApiAdapter:
                 result = await result
             return result
         return None
+
+    def _attach_background_tasks(self, response: Any, background_tasks: FastBackgroundTasks) -> None:
+        if not isinstance(response, StarletteResponse):
+            return
+        if not background_tasks.tasks:
+            return
+        if response.background is None:
+            response.background = background_tasks
+            return
+        if hasattr(response.background, "tasks"):
+            response.background.tasks.extend(background_tasks.tasks)
+            return
+        combined = StarletteBackgroundTasks()
+        combined.tasks.append(response.background)
+        combined.tasks.extend(background_tasks.tasks)
+        response.background = combined
 
     async def _run_filters_safe(
         self,

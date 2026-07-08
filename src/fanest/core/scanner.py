@@ -1,4 +1,5 @@
 import inspect
+import types
 from dataclasses import dataclass
 from typing import Any, get_type_hints
 
@@ -289,7 +290,7 @@ class ModuleScanner:
     def _module_key(self, module: Any, normalized: Any | None = None) -> Any:
         normalized = self._normalize_module_ref(module) if normalized is None else normalized
         if isinstance(module, dict | DynamicModule) or isinstance(normalized, DynamicModule):
-            return ("dynamic", id(module if not isinstance(module, ForwardRef) else normalized))
+            return ("dynamic", self._dynamic_module_fingerprint(normalized))
         return normalized
 
     def _module_type(self, module: Any) -> type:
@@ -318,6 +319,104 @@ class ModuleScanner:
         if isinstance(token, ForwardRef):
             return token.factory()
         return token
+
+    def _dynamic_module_fingerprint(self, module: DynamicModule) -> tuple[Any, ...]:
+        metadata = self._module_metadata(module)
+        if metadata is None:
+            return ("unknown", id(module))
+        return (
+            self._object_fingerprint(module.module),
+            tuple(self._import_fingerprint(imported) for imported in metadata.imports),
+            tuple(self._object_fingerprint(controller) for controller in metadata.controllers),
+            tuple(self._provider_fingerprint(provider) for provider in metadata.providers),
+            tuple(self._object_fingerprint(gateway) for gateway in metadata.gateways),
+            tuple(self._object_fingerprint(middleware) for middleware in metadata.middlewares),
+            tuple(self._object_fingerprint(export) for export in metadata.exports),
+            metadata.global_module,
+        )
+
+    def _import_fingerprint(self, imported: Any) -> Any:
+        imported = self._normalize_module_ref(imported)
+        if isinstance(imported, DynamicModule):
+            return ("dynamic", self._dynamic_module_fingerprint(imported))
+        return self._object_fingerprint(imported)
+
+    def _provider_fingerprint(self, provider: ProviderDefinition) -> Any:
+        if isinstance(provider, ForwardRef):
+            return ("forward_ref", self._object_fingerprint(provider.factory()))
+        if isinstance(provider, FactoryProvider):
+            return (
+                "factory",
+                self._object_fingerprint(provider.provide),
+                self._object_fingerprint(provider.use_factory),
+                tuple(self._object_fingerprint(token) for token in provider.inject),
+            )
+        if isinstance(provider, ExistingProvider):
+            return (
+                "existing",
+                self._object_fingerprint(provider.provide),
+                self._object_fingerprint(provider.use_existing),
+            )
+        use_class = getattr(provider, "use_class", None)
+        if use_class is not None:
+            return (
+                "class_provider",
+                self._object_fingerprint(provider.provide),
+                self._object_fingerprint(use_class),
+            )
+        use_value = getattr(provider, "use_value", None)
+        if hasattr(provider, "use_value"):
+            return (
+                "value",
+                self._object_fingerprint(provider.provide),
+                self._object_fingerprint(use_value),
+            )
+        return ("class", self._object_fingerprint(provider))
+
+    def _object_fingerprint(self, value: Any) -> Any:
+        if isinstance(value, ForwardRef):
+            return ("forward_ref", self._object_fingerprint(value.factory()))
+        if isinstance(value, DynamicModule):
+            return ("dynamic", self._dynamic_module_fingerprint(value))
+        if inspect.isclass(value):
+            return ("class", value.__module__, value.__qualname__)
+        if isinstance(value, (str, int, float, bool, type(None))):
+            return ("literal", value)
+        if isinstance(value, tuple):
+            return ("tuple", tuple(self._object_fingerprint(item) for item in value))
+        if isinstance(value, list):
+            return ("list", tuple(self._object_fingerprint(item) for item in value))
+        if isinstance(value, set):
+            return ("set", tuple(sorted(repr(self._object_fingerprint(item)) for item in value)))
+        if isinstance(value, dict):
+            return (
+                "dict",
+                tuple(
+                    sorted(
+                        (
+                            repr(self._object_fingerprint(key)),
+                            self._object_fingerprint(item),
+                        )
+                        for key, item in value.items()
+                    )
+                ),
+            )
+        if isinstance(value, types.FunctionType):
+            closure = tuple(
+                self._object_fingerprint(cell.cell_contents)
+                for cell in (value.__closure__ or ())
+            )
+            return (
+                "function",
+                value.__module__,
+                value.__qualname__,
+                value.__code__.co_code,
+                value.__code__.co_consts,
+                self._object_fingerprint(value.__defaults__),
+                self._object_fingerprint(value.__kwdefaults__),
+                closure,
+            )
+        return ("repr", type(value).__module__, type(value).__qualname__, repr(value))
 
     def _resolve_named_token(self, token: Any, candidates: set[Any]) -> Any:
         if not isinstance(token, str):
