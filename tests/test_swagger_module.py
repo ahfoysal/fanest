@@ -111,3 +111,6 @@ def test_swagger_decorators_and_module_setup():
     assert CreateDocDto.model_json_schema()["properties"]["title"]["description"] == "Document title"
     assert CreateDocDto.model_json_schema()["properties"]["draft"]["description"] == "Draft flag"
     assert client.get("/api-docs").status_code == 200
+    default_docs = client.get("/docs").text
+    assert "/openapi.json" in default_docs
+    assert client.get("/openapi.json").json() == client.get("/api-docs/openapi.json").json()

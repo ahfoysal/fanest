@@ -2,6 +2,7 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.openapi.docs import get_swagger_ui_html
+from starlette.routing import BaseRoute
 
 from fanest.swagger.decorators import _FANEST_EXTRA_MODELS
 
@@ -108,21 +109,38 @@ class SwaggerModule:
 
     @staticmethod
     def setup(path: str, app: FastAPI, document: dict[str, Any]) -> None:
-        schema_path = f"{path.rstrip('/')}/openapi.json"
+        docs_path = path.rstrip("/") or "/"
+        schema_path = f"{docs_path}/openapi.json" if docs_path != "/" else "/openapi.json"
         app.openapi_schema = document
 
         def fanest_openapi() -> dict[str, Any]:
             return document
 
         app.openapi = fanest_openapi  # type: ignore[method-assign]
+        SwaggerModule._remove_route(app, schema_path)
+        SwaggerModule._remove_route(app, docs_path)
+        SwaggerModule._remove_route(app, "/openapi.json")
+        SwaggerModule._remove_route(app, "/docs")
 
         @app.get(schema_path, include_in_schema=False)
         async def openapi_schema():
             return document
 
-        @app.get(path, include_in_schema=False)
+        @app.get(docs_path, include_in_schema=False)
         async def swagger_ui():
             return get_swagger_ui_html(openapi_url=schema_path, title=document["info"]["title"])
+
+        if schema_path != "/openapi.json":
+
+            @app.get("/openapi.json", include_in_schema=False)
+            async def default_openapi_schema():
+                return document
+
+        if docs_path != "/docs":
+
+            @app.get("/docs", include_in_schema=False)
+            async def default_swagger_ui():
+                return get_swagger_ui_html(openapi_url="/openapi.json", title=document["info"]["title"])
 
     @staticmethod
     def generate_typescript_client(document: dict[str, Any], *, client_name: str = "ApiClient") -> str:
@@ -158,3 +176,13 @@ class SwaggerModule:
         for model in _FANEST_EXTRA_MODELS:
             if hasattr(model, "model_json_schema"):
                 schemas[model.__name__] = model.model_json_schema()
+
+    @staticmethod
+    def _remove_route(app: FastAPI, path: str) -> None:
+        app.router.routes = [
+            route for route in app.router.routes if not SwaggerModule._route_matches_path(route, path)
+        ]
+
+    @staticmethod
+    def _route_matches_path(route: BaseRoute, path: str) -> bool:
+        return getattr(route, "path", None) == path
