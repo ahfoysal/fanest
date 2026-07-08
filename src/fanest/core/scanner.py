@@ -111,6 +111,11 @@ class ModuleScanner:
         for implicit_provider in self._module_implicit_providers(metadata, module_type):
             if implicit_provider not in metadata.providers:
                 metadata.providers.append(implicit_provider)
+        for provider in metadata.providers:
+            provider_type = self._target_type(provider)
+            if provider_type is not None and getattr(provider_type, "__fanest_gateway__", None) is not None:
+                if provider_type not in metadata.gateways:
+                    metadata.gateways.append(provider_type)
 
         self.providers.extend(metadata.providers)
         self.providers.extend(metadata.gateways)
@@ -154,6 +159,11 @@ class ModuleScanner:
         for implicit_provider in self._module_implicit_providers(metadata, module_type):
             if implicit_provider not in metadata.providers:
                 metadata.providers.append(implicit_provider)
+        for provider in metadata.providers:
+            provider_type = self._target_type(provider)
+            if provider_type is not None and getattr(provider_type, "__fanest_gateway__", None) is not None:
+                if provider_type not in metadata.gateways:
+                    metadata.gateways.append(provider_type)
 
         self.providers.extend(metadata.providers)
         self.providers.extend(metadata.gateways)
@@ -208,13 +218,16 @@ class ModuleScanner:
             default = parameter.default
             explicit_inject = isinstance(default, InjectMarker)
             dependency = default.token if explicit_inject else None
+            explicit_forward_ref = isinstance(default, ForwardRef)
+            if explicit_forward_ref:
+                dependency = default
             if dependency is None:
                 dependency = type_hints.get(name, parameter.annotation)
             if dependency is inspect.Parameter.empty:
                 continue
             if getattr(default, "optional", False):
                 continue
-            if default is not inspect.Parameter.empty and not explicit_inject:
+            if default is not inspect.Parameter.empty and not explicit_inject and not explicit_forward_ref:
                 continue
             self._validate_dependency(record, dependency, visible_tokens, target_type.__name__)
 
@@ -308,6 +321,8 @@ class ModuleScanner:
 
     def _resolve_named_token(self, token: Any, candidates: set[Any]) -> Any:
         if not isinstance(token, str):
+            return token
+        if token in candidates:
             return token
         for candidate in candidates:
             if not inspect.isclass(candidate):

@@ -118,7 +118,10 @@ class ForwardImportAppModule:
 def test_module_imports_can_use_forward_ref():
     app = FaNestFactory.create(ForwardImportAppModule)
 
-    assert app.state.fanest_container.resolve(ForwardImportedService).message() == "ok"
+    assert app.state.fanest_container.resolve(
+        ForwardImportedService,
+        module_key=ForwardImportedModule,
+    ).message() == "ok"
 
 
 @Injectable()
@@ -172,11 +175,66 @@ def test_circular_modules_support_string_forward_ref_dependencies():
     app = FaNestFactory.create(StringForwardRefAppModule)
     container = app.state.fanest_container
 
-    service_a = container.resolve(StringForwardRefServiceA)
-    service_b = container.resolve(StringForwardRefServiceB)
+    service_a = container.resolve(StringForwardRefServiceA, module_key=StringForwardRefModuleA)
+    service_b = container.resolve(StringForwardRefServiceB, module_key=StringForwardRefModuleB)
 
     assert service_a.peer_name() == "b"
     assert service_b.peer_name() == "a"
+
+
+@Injectable()
+class AnnotationForwardRefAuthService:
+    def __init__(self, user_service: forward_ref(lambda: "AnnotationForwardRefUserService")):
+        self.user_service = user_service
+
+    def validate(self):
+        return self.user_service.name()
+
+
+@Injectable()
+class AnnotationForwardRefUserService:
+    def __init__(self, auth_service: AnnotationForwardRefAuthService):
+        self.auth_service = auth_service
+
+    def name(self):
+        return "user"
+
+
+@Module(providers=[AnnotationForwardRefAuthService, AnnotationForwardRefUserService])
+class AnnotationForwardRefModule:
+    pass
+
+
+def test_forward_ref_annotations_create_lazy_proxy_for_constructor_cycles():
+    app = FaNestFactory.create(AnnotationForwardRefModule)
+    service = app.state.fanest_container.resolve(
+        AnnotationForwardRefAuthService,
+        module_key=AnnotationForwardRefModule,
+    )
+
+    assert service.validate() == "user"
+
+
+@Injectable()
+class PrivateGlobalLookupService:
+    pass
+
+
+@Module(providers=[PrivateGlobalLookupService], exports=[])
+class PrivateGlobalLookupModule:
+    pass
+
+
+@Module(imports=[PrivateGlobalLookupModule])
+class PrivateGlobalLookupRootModule:
+    pass
+
+
+def test_private_module_providers_do_not_resolve_from_global_container_lookup():
+    app = FaNestFactory.create(PrivateGlobalLookupRootModule)
+
+    with pytest.raises(KeyError):
+        app.state.fanest_container.resolve(PrivateGlobalLookupService)
 
 
 SCOPED_MESSAGE = token("SCOPED_MESSAGE")

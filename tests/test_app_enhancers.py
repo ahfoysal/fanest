@@ -81,3 +81,44 @@ def test_app_enhancer_provider_tokens_do_not_break_lifespan():
         response = client.get("/enhancers", params={"name": "ada"}, headers={"x-auth": "ok"})
 
     assert response.json() == {"name": "ADA", "intercepted": True}
+
+
+@Catch(KeyError)
+class FirstGlobalFilter:
+    def catch(self, exc, context):
+        return {"first": str(exc)}
+
+
+@Catch(RuntimeError)
+class SecondGlobalFilter:
+    def catch(self, exc, context):
+        return {"second": str(exc)}
+
+
+@Controller("multi-filters")
+class MultiFilterController:
+    @Get("/key")
+    async def key_error(self):
+        raise KeyError("missing")
+
+    @Get("/runtime")
+    async def runtime_error(self):
+        raise RuntimeError("boom")
+
+
+@Module(
+    controllers=[MultiFilterController],
+    providers=[
+        use_class(APP_FILTER, FirstGlobalFilter),
+        use_class(APP_FILTER, SecondGlobalFilter),
+    ],
+)
+class MultiFilterModule:
+    pass
+
+
+def test_multiple_app_enhancer_providers_in_module_are_not_overwritten():
+    client = TestClient(FaNestFactory.create(MultiFilterModule))
+
+    assert client.get("/multi-filters/key").json() == {"first": "'missing'"}
+    assert client.get("/multi-filters/runtime").json() == {"second": "boom"}

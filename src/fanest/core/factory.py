@@ -115,6 +115,8 @@ class FaNestFactory:
     ) -> FastAPI:
 
         container = FaNestContainer()
+        if scanner.records:
+            container.set_root_module(next(iter(scanner.records)))
         module_import_keys: dict[Any, list[Any]] = {}
         for module_key, record in scanner.records.items():
             imports = [scanner._module_key(imported_module) for imported_module in record.metadata.imports]
@@ -130,8 +132,6 @@ class FaNestFactory:
                 exports=set(record.metadata.exports),
                 global_module=record.metadata.global_module,
             )
-        for provider in scanner.providers:
-            container.register(provider)
         container.register(
             ValueProvider(
                 provide=DiscoveryService,

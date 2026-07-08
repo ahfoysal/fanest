@@ -10,6 +10,7 @@ from fastapi import BackgroundTasks as FastBackgroundTasks
 from fastapi import Cookie, FastAPI, File, Form as FastForm, Header, HTTPException, Path, Query, Request, Response, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from starlette.responses import Response as StarletteResponse
 from starlette.websockets import WebSocketDisconnect
 
 from fanest.common.responses import StreamableFile
@@ -133,16 +134,17 @@ class FastApiAdapter:
             raise TypeError(f"{gateway.__name__} is not a FaNest gateway.")
 
         module_key = self.gateway_modules.get(gateway)
-        instance = self.container.resolve(gateway, module_key=module_key)
-        handlers: dict[str, Callable[..., Any]] = {}
-        for _, handler in inspect.getmembers(instance, predicate=inspect.ismethod):
+        handlers_meta: dict[str, str] = {}
+        for name, handler in inspect.getmembers(gateway, predicate=inspect.isfunction):
             message_metadata: MessageMetadata | None = getattr(handler, "__fanest_message__", None)
             if message_metadata is not None:
-                handlers[message_metadata.event] = handler
+                handlers_meta[message_metadata.event] = name
 
         path = self._join_paths(self.global_prefix, gateway_metadata.path)
 
         async def websocket_endpoint(websocket: WebSocket) -> None:
+            instance = await self.container.resolve_async(gateway, module_key=module_key)
+            handlers = {event: getattr(instance, name) for event, name in handlers_meta.items()}
             connection_context = ExecutionContext(
                 handler=getattr(instance, "on_connect", instance),
                 controller=instance,
@@ -225,7 +227,12 @@ class FastApiAdapter:
         self.app.add_api_websocket_route(path, websocket_endpoint)
 
     async def _run_connection_guards(self, gateway: Any, context: ExecutionContext) -> None:
-        for guard in getattr(gateway.__class__, "__fanest_guards__", []):
+        handler = context.handler if callable(context.handler) else None
+        guards = self._collect(gateway, handler, "__fanest_guards__") if handler is not None else [
+            *self.global_guards,
+            *getattr(gateway.__class__, "__fanest_guards__", []),
+        ]
+        for guard in guards:
             instance = await self._resolve_component_async(guard, owner=gateway)
             result = instance.can_activate(context)
             if inspect.isawaitable(result):
@@ -726,9 +733,28 @@ class FastApiAdapter:
         exc: Exception,
     ) -> Any:
         try:
-            return await self._run_filters(controller, handler, context, exc)
+            handled = await self._run_filters(controller, handler, context, exc)
+            return self._websocket_filter_payload(handled)
         except Exception as filter_exc:
             return str(filter_exc)
+
+    def _websocket_filter_payload(self, handled: Any) -> Any:
+        if not isinstance(handled, StarletteResponse):
+            return handled
+        body = getattr(handled, "body", b"")
+        if isinstance(body, memoryview):
+            body = body.tobytes()
+        if isinstance(body, bytes):
+            text = body.decode(getattr(handled, "charset", "utf-8") or "utf-8")
+        else:
+            text = str(body)
+        content_type = handled.headers.get("content-type", "")
+        if "application/json" in content_type:
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return text
+        return text
 
     async def handle_validation_error(self, request: Request, exc: RequestValidationError) -> Any:
         route = request.scope.get("route")

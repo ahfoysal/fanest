@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,11 +23,15 @@ def main() -> None:
     if tag and tag.startswith("v") and tag[1:] != version:
         raise SystemExit(f"Release tag {tag!r} does not match pyproject version {version!r}.")
 
+    dist_dir = ROOT / "dist"
+    shutil.rmtree(dist_dir, ignore_errors=True)
     _run("uv", "build")
-    distributions = [*sorted((ROOT / "dist").glob("*.whl")), *sorted((ROOT / "dist").glob("*.tar.gz"))]
+    (dist_dir / ".gitignore").unlink(missing_ok=True)
+    distributions = [*sorted(dist_dir.glob("*.whl")), *sorted(dist_dir.glob("*.tar.gz"))]
+    _assert_distributions(dist_dir, distributions, version)
     _run("uv", "run", "twine", "check", *map(str, distributions))
-    wheel = next((ROOT / "dist").glob("fanest-*.whl"))
-    sdist = next((ROOT / "dist").glob("fanest-*.tar.gz"))
+    wheel = next(dist_dir.glob("fanest-*.whl"))
+    sdist = next(dist_dir.glob("fanest-*.tar.gz"))
     _assert_wheel_metadata(wheel)
     _smoke_install(wheel)
     _smoke_install(sdist)
@@ -36,6 +41,18 @@ def main() -> None:
 def _project_version() -> str:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     return pyproject["project"]["version"]
+
+
+def _assert_distributions(dist_dir: Path, distributions: list[Path], version: str) -> None:
+    expected = {
+        f"fanest-{version}-py3-none-any.whl",
+        f"fanest-{version}.tar.gz",
+    }
+    actual = {path.name for path in dist_dir.iterdir()}
+    if actual != expected:
+        raise SystemExit(f"Unexpected release files in dist: {sorted(actual)!r}; expected {sorted(expected)!r}.")
+    if {path.name for path in distributions} != expected:
+        raise SystemExit("Release distributions did not include exactly the current wheel and sdist.")
 
 
 def _assert_wheel_metadata(wheel: Path) -> None:

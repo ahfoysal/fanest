@@ -37,6 +37,7 @@ def test_module_ref_get_and_forward_ref_token():
 
     assert container.resolve(RefService).get_value() == "ok"
     assert container.resolve(LateService).value.value == "ok"
+    assert isinstance(container.resolve(LateService).value, ForwardRefProxy)
 
 
 @Injectable(scope="request")

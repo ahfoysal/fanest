@@ -51,7 +51,8 @@ class FaNestContainer:
         self._module_imports: dict[Any, list[Any]] = {}
         self._module_exports: dict[Any, set[Any]] = {}
         self._global_modules: set[Any] = set()
-        self._multi_providers: dict[Any, list[ProviderDefinition]] = {}
+        self._multi_providers: dict[Any, list[tuple[Any | None, ProviderDefinition]]] = {}
+        self._root_module_key: Any | None = None
         self._instances: dict[Any, Any] = {}
         self._dependency_cache: dict[type, tuple[dict[str, inspect.Parameter], dict[str, Any]]] = {}
         self._provider_dependency_cache: dict[Any, list[Any]] = {}
@@ -64,11 +65,14 @@ class FaNestContainer:
         self.register(ValueProvider(provide=WebSocketManager, use_value=websocket_manager))
         self.register(ValueProvider(provide=SocketIoServer, use_value=SocketIoServer(websocket_manager)))
 
+    def set_root_module(self, module_key: Any) -> None:
+        self._root_module_key = module_key
+
     def register(self, provider: ProviderDefinition) -> None:
         token = self.provider_token(provider)
         self._invalidate_provider_cache(token)
         if token in APP_ENHANCER_TOKENS:
-            self._multi_providers.setdefault(token, []).append(provider)
+            self._multi_providers.setdefault(token, []).append((None, provider))
             return
         self._providers[token] = provider
 
@@ -84,6 +88,9 @@ class FaNestContainer:
         module_providers = self._module_providers.setdefault(module_key, {})
         for provider in providers:
             token = self.provider_token(provider)
+            if token in APP_ENHANCER_TOKENS:
+                self._multi_providers.setdefault(token, []).append((module_key, provider))
+                continue
             module_providers[token] = provider
         self._module_imports[module_key] = list(imports)
         self._module_exports[module_key] = set(exports)
@@ -105,7 +112,7 @@ class FaNestContainer:
     def override(self, token: Any, value: Any) -> None:
         provider = self._override_provider(token, value)
         if token in APP_ENHANCER_TOKENS:
-            self._multi_providers[token] = [provider]
+            self._multi_providers[token] = [(None, provider)]
             self._scope_cache.clear()
             return
         replaced_module_provider = False
@@ -129,7 +136,10 @@ class FaNestContainer:
         return ValueProvider(provide=token, use_value=value)
 
     def resolve_all(self, token: Any) -> list[Any]:
-        return [self._resolve_provider(provider) for provider in self._multi_providers.get(token, [])]
+        return [
+            self._resolve_provider(provider, module_key=module_key)
+            for module_key, provider in self._multi_providers.get(token, [])
+        ]
 
     def has_provider(self, token: Any) -> bool:
         token = self._unwrap_token(token)
@@ -163,6 +173,7 @@ class FaNestContainer:
         }
 
     def resolve(self, token: Any, module_key: Any | None = None) -> Any:
+        lazy_forward_ref = isinstance(token, ForwardRef)
         token = self._unwrap_token(token)
         token = self._resolve_named_token(token, module_key)
         owner_key, provider = self._locate_provider(token, module_key)
@@ -178,6 +189,8 @@ class FaNestContainer:
         if scope == "singleton" and cache_key in self._instances:
             return self._instances[cache_key]
 
+        if cache_key in self._resolving and lazy_forward_ref:
+            return ForwardRefProxy(self, token, module_key=owner_key)
         if cache_key in self._resolving:
             raise RuntimeError(f"Circular dependency detected while resolving {token!r}")
         self._resolving.add(cache_key)
@@ -192,6 +205,7 @@ class FaNestContainer:
         return instance
 
     async def resolve_async(self, token: Any, module_key: Any | None = None) -> Any:
+        lazy_forward_ref = isinstance(token, ForwardRef)
         token = self._unwrap_token(token)
         token = self._resolve_named_token(token, module_key)
         owner_key, provider = self._locate_provider(token, module_key)
@@ -207,6 +221,8 @@ class FaNestContainer:
         if scope == "singleton" and cache_key in self._instances:
             return self._instances[cache_key]
 
+        if cache_key in self._resolving and lazy_forward_ref:
+            return ForwardRefProxy(self, token, module_key=owner_key)
         if cache_key in self._resolving:
             raise RuntimeError(f"Circular dependency detected while resolving {token!r}")
         self._resolving.add(cache_key)
@@ -354,6 +370,9 @@ class FaNestContainer:
             if isinstance(parameter.default, InjectMarker):
                 dependencies.append(parameter.default.token)
                 continue
+            if isinstance(parameter.default, ForwardRef):
+                dependencies.append(parameter.default)
+                continue
             if parameter.default is not inspect.Parameter.empty:
                 continue
             annotation = type_hints.get(name, parameter.annotation)
@@ -368,6 +387,8 @@ class FaNestContainer:
     def _resolve_injected_token(self, marker: Any, module_key: Any | None = None) -> Any:
         if isinstance(marker, InjectMarker):
             try:
+                if isinstance(marker.token, ForwardRef):
+                    return self._resolve_forward_ref(marker.token, module_key)
                 token = self._unwrap_token(marker.token)
                 token = self._resolve_named_token(token, module_key)
                 owner_key, _ = self._locate_provider(token, module_key)
@@ -383,6 +404,8 @@ class FaNestContainer:
     async def _resolve_injected_token_async(self, marker: Any, module_key: Any | None = None) -> Any:
         if isinstance(marker, InjectMarker):
             try:
+                if isinstance(marker.token, ForwardRef):
+                    return await self._resolve_forward_ref_async(marker.token, module_key)
                 token = self._unwrap_token(marker.token)
                 token = self._resolve_named_token(token, module_key)
                 owner_key, _ = self._locate_provider(token, module_key)
@@ -421,6 +444,9 @@ class FaNestContainer:
             if isinstance(parameter.default, InjectMarker):
                 kwargs[name] = self._resolve_injected_token(parameter.default, module_key=module_key)
                 continue
+            if isinstance(parameter.default, ForwardRef):
+                kwargs[name] = self._resolve_forward_ref(parameter.default, module_key)
+                continue
             if parameter.default is not inspect.Parameter.empty:
                 kwargs[name] = parameter.default
                 continue
@@ -430,6 +456,9 @@ class FaNestContainer:
                     f"Cannot resolve dependency '{name}' for {provider.__name__}. "
                     "Add a type annotation or register an explicit provider."
                 )
+            if isinstance(annotation, ForwardRef):
+                kwargs[name] = self._resolve_forward_ref(annotation, module_key)
+                continue
             kwargs[name] = self.resolve(annotation, module_key=module_key)
 
         return provider(**kwargs)
@@ -452,6 +481,9 @@ class FaNestContainer:
                     module_key=module_key,
                 )
                 continue
+            if isinstance(parameter.default, ForwardRef):
+                kwargs[name] = await self._resolve_forward_ref_async(parameter.default, module_key)
+                continue
             if parameter.default is not inspect.Parameter.empty:
                 kwargs[name] = parameter.default
                 continue
@@ -461,6 +493,9 @@ class FaNestContainer:
                     f"Cannot resolve dependency '{name}' for {provider.__name__}. "
                     "Add a type annotation or register an explicit provider."
                 )
+            if isinstance(annotation, ForwardRef):
+                kwargs[name] = await self._resolve_forward_ref_async(annotation, module_key)
+                continue
             kwargs[name] = await self.resolve_async(annotation, module_key=module_key)
 
         return provider(**kwargs)
@@ -489,21 +524,10 @@ class FaNestContainer:
     ) -> tuple[Any | None, ProviderDefinition | None]:
         token = self._resolve_named_token(token, module_key)
         if module_key is None:
-            module_matches = [
-                (candidate_key, providers[token])
-                for candidate_key, providers in self._module_providers.items()
-                if token in providers
-            ]
-            if len(module_matches) == 1:
-                return module_matches[0]
-            global_matches = [
-                (candidate_key, self._module_providers[candidate_key][token])
-                for candidate_key in self._global_modules
-                if token in self._module_exports.get(candidate_key, set())
-                and token in self._module_providers.get(candidate_key, {})
-            ]
-            if len(global_matches) == 1:
-                return global_matches[0]
+            if self._root_module_key is not None:
+                owner_key, provider = self._locate_provider(token, self._root_module_key, seen)
+                if provider is not None:
+                    return owner_key, provider
             return None, self._providers.get(token)
         module_provider = self._module_providers.get(module_key, {}).get(token)
         if module_provider is not None:
@@ -531,6 +555,25 @@ class FaNestContainer:
             return token
         return (module_key, token)
 
+    def _forward_ref_proxy(self, ref: ForwardRef, module_key: Any | None = None) -> ForwardRefProxy:
+        token = self._resolve_named_token(self._unwrap_token(ref), module_key)
+        owner_key, provider = self._locate_provider(token, module_key)
+        if provider is None:
+            raise KeyError(token)
+        return ForwardRefProxy(self, token, module_key=owner_key)
+
+    def _resolve_forward_ref(self, ref: ForwardRef, module_key: Any | None = None) -> Any:
+        token = self._resolve_named_token(self._unwrap_token(ref), module_key)
+        if inspect.isclass(token):
+            return self._forward_ref_proxy(ref, module_key)
+        return self.resolve(token, module_key=module_key)
+
+    async def _resolve_forward_ref_async(self, ref: ForwardRef, module_key: Any | None = None) -> Any:
+        token = self._resolve_named_token(self._unwrap_token(ref), module_key)
+        if inspect.isclass(token):
+            return self._forward_ref_proxy(ref, module_key)
+        return await self.resolve_async(token, module_key=module_key)
+
     def _resolve_named_token(self, token: Any, module_key: Any | None = None) -> Any:
         if not isinstance(token, str):
             return token
@@ -556,8 +599,8 @@ class FaNestContainer:
     def _visible_provider_tokens(self, module_key: Any | None = None, seen: set[Any] | None = None) -> list[Any]:
         if module_key is None:
             tokens: list[Any] = [*self._providers.keys(), *self._multi_providers.keys()]
-            for providers in self._module_providers.values():
-                tokens.extend(providers.keys())
+            if self._root_module_key is not None:
+                tokens.extend(self._visible_provider_tokens(self._root_module_key, seen))
             return tokens
 
         seen = seen or set()

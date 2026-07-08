@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from fastapi.responses import JSONResponse
 import pytest
 
 from fanest import (
@@ -14,6 +15,8 @@ from fanest import (
     WebSocketGateway,
     WebSocketManager,
     SocketIoServer,
+    forward_ref,
+    use_factory,
 )
 
 
@@ -134,6 +137,35 @@ def test_websocket_gateway_guard_runs_before_on_connect():
     assert PreAuthGateway.connected == 0
 
 
+def test_websocket_gateway_on_connect_method_guard_runs_before_accept():
+    class RejectConnectGuard:
+        def can_activate(self, context):
+            return False
+
+    @WebSocketGateway("/method-preauth")
+    class MethodPreAuthGateway:
+        connected = 0
+
+        @UseGuards(RejectConnectGuard)
+        async def on_connect(self, websocket):
+            type(self).connected += 1
+
+        @SubscribeMessage("echo")
+        async def echo(self, data, websocket):
+            return data
+
+    @Module(providers=[RejectConnectGuard, MethodPreAuthGateway])
+    class MethodPreAuthModule:
+        pass
+
+    client = TestClient(FaNestFactory.create(MethodPreAuthModule))
+
+    with pytest.raises(Exception):
+        with client.websocket_connect("/method-preauth"):
+            pass
+    assert MethodPreAuthGateway.connected == 0
+
+
 @WebSocketGateway("/socketio")
 class SocketIoGateway:
     def __init__(self, server: SocketIoServer):
@@ -193,6 +225,36 @@ def test_websocket_gateway_uses_exception_filters():
         }
 
 
+@Catch(ValueError)
+class WebSocketJsonResponseFilter:
+    def catch(self, exc, context):
+        return JSONResponse(status_code=418, content={"kind": "json-response", "message": str(exc)})
+
+
+@WebSocketGateway("/response-filter-ws")
+@UseFilters(WebSocketJsonResponseFilter)
+class ResponseFilterGateway:
+    @SubscribeMessage("fail")
+    async def fail(self, data, websocket):
+        raise ValueError("response object")
+
+
+@Module(gateways=[ResponseFilterGateway])
+class ResponseFilterWsModule:
+    pass
+
+
+def test_websocket_exception_filter_can_return_json_response():
+    client = TestClient(FaNestFactory.create(ResponseFilterWsModule))
+
+    with client.websocket_connect("/response-filter-ws") as websocket:
+        websocket.send_json({"event": "fail", "data": None})
+        assert websocket.receive_json() == {
+            "event": "error",
+            "data": {"kind": "json-response", "message": "response object"},
+        }
+
+
 @WebSocketGateway("/decorated-socket")
 class DecoratedSocketGateway:
     @SubscribeMessage("rename")
@@ -212,6 +274,59 @@ def test_websocket_gateway_supports_message_body_and_connected_socket_decorators
     with client.websocket_connect("/decorated-socket") as websocket:
         websocket.send_json({"event": "rename", "data": {"name": "Ada"}})
         assert websocket.receive_json() == {"event": "rename", "data": {"name": "Ada"}}
+
+
+async def async_socket_dependency_factory():
+    return "socket-ready"
+
+
+@WebSocketGateway("/async-factory-socket")
+class AsyncFactorySocketGateway:
+    def __init__(self, dependency: str = forward_ref(lambda: "SOCKET_DEPENDENCY")):
+        self.dependency = dependency
+
+    @SubscribeMessage("ping")
+    async def ping(self, data):
+        return {"dependency": self.dependency, "data": data}
+
+
+@Module(
+    gateways=[AsyncFactorySocketGateway],
+    providers=[use_factory("SOCKET_DEPENDENCY", async_socket_dependency_factory)],
+)
+class AsyncFactorySocketModule:
+    pass
+
+
+def test_websocket_gateway_awaits_async_factory_dependencies():
+    client = TestClient(FaNestFactory.create(AsyncFactorySocketModule))
+
+    with client.websocket_connect("/async-factory-socket") as websocket:
+        websocket.send_json({"event": "ping", "data": "hello"})
+        assert websocket.receive_json() == {
+            "event": "ping",
+            "data": {"dependency": "socket-ready", "data": "hello"},
+        }
+
+
+@WebSocketGateway("/provider-listed-socket")
+class ProviderListedSocketGateway:
+    @SubscribeMessage("ping")
+    async def ping(self, data):
+        return {"ok": data}
+
+
+@Module(providers=[ProviderListedSocketGateway])
+class ProviderListedSocketModule:
+    pass
+
+
+def test_websocket_gateway_registered_as_provider_is_routable():
+    client = TestClient(FaNestFactory.create(ProviderListedSocketModule))
+
+    with client.websocket_connect("/provider-listed-socket") as websocket:
+        websocket.send_json({"event": "ping", "data": True})
+        assert websocket.receive_json() == {"event": "ping", "data": {"ok": True}}
 
 
 @WebSocketGateway("/advanced-socket")
