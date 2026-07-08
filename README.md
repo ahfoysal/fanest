@@ -117,6 +117,7 @@ It shows:
 - custom parameter decorators
 - config module
 - async module configuration
+- i18n translations and locale extraction
 - JWT auth
 - Passport-style auth strategies
 - role guards
@@ -136,6 +137,7 @@ It shows:
 - cron jobs
 - timeout jobs and scheduler registry
 - queue processors
+- Bull-style queue aliases
 - mailer service
 - CQRS command/query/event buses
 - event emitter wildcard, once, and off helpers
@@ -261,6 +263,7 @@ fanest.common            decorators, exceptions, pipes
 fanest.platform_fastapi  FastAPI adapter
 fanest.session           signed cookie sessions
 fanest.security          helmet-style security headers
+fanest.i18n              translations and I18nLang helper
 fanest.config            ConfigModule and ConfigService
 fanest.swagger           decorators, DocumentBuilder, SwaggerModule
 fanest.auth              JWT service, passport strategies, auth guard, roles guard
@@ -271,7 +274,7 @@ fanest.throttler         throttling module and guard
 fanest.schedule          interval, cron, timeout jobs, scheduler registry
 fanest.websockets        connection manager, rooms, broadcasting
 fanest.serve_static      static asset module
-fanest.queues            in-memory queue service, processors, jobs
+fanest.queues            QueueModule/BullModule, processors, jobs
 fanest.mailer            mail service with outbox and SMTP handoff
 fanest.cqrs              command, query, and event buses
 fanest.events            event emitter and OnEvent decorators
@@ -434,6 +437,7 @@ Current:
 - cron, interval, timeout jobs, and scheduler registry
 - in-memory queue processors
 - queue retries and delayed jobs
+- BullModule and InjectQueue aliases
 - mailer package with templates
 - CQRS package
 - event emitter wildcard/once/off helpers
@@ -443,6 +447,7 @@ Current:
 - migration template helper
 - Mongo-style package start
 - MongooseModule and InjectModel aliases
+- i18n package
 - cache store adapters
 - health checks
 - health indicators
@@ -465,7 +470,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 77 passed
+# 80 passed
 ```
 
 ## License

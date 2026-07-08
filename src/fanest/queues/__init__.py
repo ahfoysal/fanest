@@ -1,3 +1,23 @@
-from fanest.queues.module import Job, Process, Processor, QueueModule, QueueService
+from fanest.queues.module import (
+    BullModule,
+    InjectQueue,
+    Job,
+    Process,
+    Processor,
+    QueueModule,
+    QueueRef,
+    QueueService,
+    queue_token,
+)
 
-__all__ = ["Job", "Process", "Processor", "QueueModule", "QueueService"]
+__all__ = [
+    "BullModule",
+    "InjectQueue",
+    "Job",
+    "Process",
+    "Processor",
+    "QueueModule",
+    "QueueRef",
+    "QueueService",
+    "queue_token",
+]

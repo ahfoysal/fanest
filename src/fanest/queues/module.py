@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from fanest import Injectable, Module
+from fanest import Inject, Injectable, Module
+from fanest.core.providers import token, use_factory
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,43 @@ class Job:
     max_attempts: int = 1
     delay: float = 0
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def queue_token(name: str):
+    return token(f"QUEUE:{name}")
+
+
+def InjectQueue(name: str):
+    return Inject(queue_token(name))
+
+
+class QueueRef:
+    def __init__(self, queue: "QueueService", name: str):
+        self.queue = queue
+        self.name = name
+
+    async def add(
+        self,
+        data: Any,
+        *,
+        name: str = "default",
+        job_id: str | None = None,
+        attempts: int = 1,
+        delay: float = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> Job:
+        return await self.queue.add(
+            self.name,
+            data,
+            name=name,
+            job_id=job_id,
+            attempts=attempts,
+            delay=delay,
+            metadata=metadata,
+        )
+
+    def jobs(self) -> list[Job]:
+        return self.queue.jobs(self.name)
 
 
 def Processor(queue: str):
@@ -102,6 +140,9 @@ class QueueService:
     def clear(self) -> None:
         self._jobs.clear()
 
+    def queue(self, name: str) -> QueueRef:
+        return QueueRef(self, name)
+
 
 class QueueModule:
     @staticmethod
@@ -111,3 +152,19 @@ class QueueModule:
             pass
 
         return DynamicQueueModule
+
+    @staticmethod
+    def register_queue(name: str) -> type:
+        @Module(
+            providers=[
+                use_factory(queue_token(name), lambda service: service.queue(name), inject=[QueueService])
+            ],
+            exports=[queue_token(name)],
+        )
+        class DynamicQueueFeatureModule:
+            pass
+
+        return DynamicQueueFeatureModule
+
+
+BullModule = QueueModule
