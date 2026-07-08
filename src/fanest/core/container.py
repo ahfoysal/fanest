@@ -22,13 +22,15 @@ _request_instances: ContextVar[dict[Any, Any] | None] = ContextVar(
 
 
 class ForwardRefProxy:
-    def __init__(self, container: "FaNestContainer", token: Any) -> None:
+    def __init__(self, container: "FaNestContainer", token: Any, module_key: Any | None = None) -> None:
         object.__setattr__(self, "_fanest_container", container)
         object.__setattr__(self, "_fanest_token", token)
+        object.__setattr__(self, "_fanest_module_key", module_key)
 
     def _target(self) -> Any:
         return object.__getattribute__(self, "_fanest_container").resolve(
-            object.__getattribute__(self, "_fanest_token")
+            object.__getattribute__(self, "_fanest_token"),
+            module_key=object.__getattribute__(self, "_fanest_module_key"),
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -44,6 +46,10 @@ class ForwardRefProxy:
 class FaNestContainer:
     def __init__(self) -> None:
         self._providers: dict[Any, ProviderDefinition] = {}
+        self._module_providers: dict[Any, dict[Any, ProviderDefinition]] = {}
+        self._module_imports: dict[Any, list[Any]] = {}
+        self._module_exports: dict[Any, set[Any]] = {}
+        self._global_modules: set[Any] = set()
         self._multi_providers: dict[Any, list[ProviderDefinition]] = {}
         self._instances: dict[Any, Any] = {}
         self._dependency_cache: dict[type, tuple[dict[str, inspect.Parameter], dict[str, Any]]] = {}
@@ -63,6 +69,24 @@ class FaNestContainer:
             self._multi_providers.setdefault(token, []).append(provider)
             return
         self._providers[token] = provider
+
+    def register_module(
+        self,
+        module_key: Any,
+        *,
+        providers: list[ProviderDefinition],
+        imports: list[Any],
+        exports: set[Any],
+        global_module: bool = False,
+    ) -> None:
+        module_providers = self._module_providers.setdefault(module_key, {})
+        for provider in providers:
+            token = self.provider_token(provider)
+            module_providers[token] = provider
+        self._module_imports[module_key] = list(imports)
+        self._module_exports[module_key] = set(exports)
+        if global_module:
+            self._global_modules.add(module_key)
 
     def begin_request(self):
         return _request_instances.set({})
@@ -124,62 +148,66 @@ class FaNestContainer:
             "resolved": token in self._instances,
         }
 
-    def resolve(self, token: Any) -> Any:
+    def resolve(self, token: Any, module_key: Any | None = None) -> Any:
         token = self._unwrap_token(token)
-        provider = self._providers.get(token)
+        owner_key, provider = self._locate_provider(token, module_key)
         if provider is None:
             if not inspect.isclass(token):
                 raise KeyError(token)
             provider = token
+            owner_key = module_key
 
-        scope = self._effective_scope(token, provider)
+        scope = self._effective_scope(token, provider, module_key=owner_key)
         request_cache = _request_instances.get()
+        cache_key = self._cache_key(owner_key, token)
 
-        if scope == "request" and request_cache is not None and token in request_cache:
-            return request_cache[token]
-        if scope == "singleton" and token in self._instances:
-            return self._instances[token]
+        if scope == "request" and request_cache is not None and cache_key in request_cache:
+            return request_cache[cache_key]
+        if scope == "singleton" and cache_key in self._instances:
+            return self._instances[cache_key]
 
-        if token in self._resolving:
+        if cache_key in self._resolving:
             raise RuntimeError(f"Circular dependency detected while resolving {token!r}")
-        self._resolving.add(token)
+        self._resolving.add(cache_key)
         try:
-            instance = self._resolve_provider(provider)
+            instance = self._resolve_provider(provider, module_key=owner_key)
         finally:
-            self._resolving.remove(token)
+            self._resolving.remove(cache_key)
         if scope == "request" and request_cache is not None:
-            request_cache[token] = instance
+            request_cache[cache_key] = instance
         elif scope == "singleton":
-            self._instances[token] = instance
+            self._instances[cache_key] = instance
         return instance
 
-    async def resolve_async(self, token: Any) -> Any:
+    async def resolve_async(self, token: Any, module_key: Any | None = None) -> Any:
         token = self._unwrap_token(token)
-        provider = self._providers.get(token)
+        owner_key, provider = self._locate_provider(token, module_key)
         if provider is None:
             if not inspect.isclass(token):
                 raise KeyError(token)
             provider = token
+            owner_key = module_key
 
-        scope = self._effective_scope(token, provider)
+        scope = self._effective_scope(token, provider, module_key=owner_key)
         request_cache = _request_instances.get()
+        cache_key = self._cache_key(owner_key, token)
 
-        if scope == "request" and request_cache is not None and token in request_cache:
-            return request_cache[token]
-        if scope == "singleton" and token in self._instances:
-            return self._instances[token]
+        if scope == "request" and request_cache is not None and cache_key in request_cache:
+            return request_cache[cache_key]
+        if scope == "singleton" and cache_key in self._instances:
+            return self._instances[cache_key]
 
-        if token in self._resolving:
+        if cache_key in self._resolving:
             raise RuntimeError(f"Circular dependency detected while resolving {token!r}")
-        self._resolving.add(token)
+        self._resolving.add(cache_key)
         try:
-            instance = await self._resolve_provider_async(provider)
+            instance = await self._resolve_provider_async(provider, module_key=owner_key)
         finally:
-            self._resolving.remove(token)
+            self._resolving.remove(cache_key)
         if scope == "request" and request_cache is not None:
-            request_cache[token] = instance
+            request_cache[cache_key] = instance
         elif scope == "singleton":
-            self._instances[token] = instance
+            self._instances[cache_key] = instance
         return instance
 
     def provider_token(self, provider: ProviderDefinition) -> Any:
@@ -189,40 +217,43 @@ class FaNestContainer:
             return provider.provide
         return provider
 
-    def _resolve_provider(self, provider: ProviderDefinition) -> Any:
+    def _resolve_provider(self, provider: ProviderDefinition, module_key: Any | None = None) -> Any:
         if isinstance(provider, ForwardRef):
-            return self._resolve_provider(provider.factory())
+            return self._resolve_provider(provider.factory(), module_key=module_key)
         if isinstance(provider, ClassProvider):
-            return self._instantiate(provider.use_class)
+            return self._instantiate(provider.use_class, module_key=module_key)
         if isinstance(provider, ValueProvider):
             return provider.use_value
         if isinstance(provider, ExistingProvider):
-            return self.resolve(provider.use_existing)
+            return self.resolve(provider.use_existing, module_key=module_key)
         if isinstance(provider, FactoryProvider):
-            dependencies = [self._resolve_injected_token(token) for token in provider.inject]
+            dependencies = [self._resolve_injected_token(token, module_key=module_key) for token in provider.inject]
             result = provider.use_factory(*dependencies)
             return result
         if inspect.isclass(provider):
-            return self._instantiate(provider)
+            return self._instantiate(provider, module_key=module_key)
         return provider
 
-    async def _resolve_provider_async(self, provider: ProviderDefinition) -> Any:
+    async def _resolve_provider_async(self, provider: ProviderDefinition, module_key: Any | None = None) -> Any:
         if isinstance(provider, ForwardRef):
-            return await self._resolve_provider_async(provider.factory())
+            return await self._resolve_provider_async(provider.factory(), module_key=module_key)
         if isinstance(provider, ClassProvider):
-            return await self._instantiate_async(provider.use_class)
+            return await self._instantiate_async(provider.use_class, module_key=module_key)
         if isinstance(provider, ValueProvider):
             return provider.use_value
         if isinstance(provider, ExistingProvider):
-            return await self.resolve_async(provider.use_existing)
+            return await self.resolve_async(provider.use_existing, module_key=module_key)
         if isinstance(provider, FactoryProvider):
-            dependencies = [await self._resolve_injected_token_async(token) for token in provider.inject]
+            dependencies = [
+                await self._resolve_injected_token_async(token, module_key=module_key)
+                for token in provider.inject
+            ]
             result = provider.use_factory(*dependencies)
             if inspect.isawaitable(result):
                 return await result
             return result
         if inspect.isclass(provider):
-            return await self._instantiate_async(provider)
+            return await self._instantiate_async(provider, module_key=module_key)
         return provider
 
     def _provider_scope(self, provider: ProviderDefinition) -> str:
@@ -252,31 +283,38 @@ class FaNestContainer:
         token: Any,
         provider: ProviderDefinition,
         seen: set[Any] | None = None,
+        module_key: Any | None = None,
     ) -> str:
-        if seen is None and token in self._scope_cache:
-            return self._scope_cache[token]
+        scope_key = self._cache_key(module_key, token)
+        if seen is None and scope_key in self._scope_cache:
+            return self._scope_cache[scope_key]
         own_scope = self._provider_scope(provider)
         if own_scope != "singleton":
             if seen is None:
-                self._scope_cache[token] = own_scope
+                self._scope_cache[scope_key] = own_scope
             return own_scope
         seen = seen or set()
-        if token in seen:
+        if scope_key in seen:
             return own_scope
-        seen.add(token)
+        seen.add(scope_key)
         for dependency in self._provider_dependencies(provider):
             dependency = self._unwrap_token(dependency)
-            dependency_provider = self._providers.get(dependency)
+            dependency_module_key, dependency_provider = self._locate_provider(dependency, module_key)
             if dependency_provider is None:
                 if not inspect.isclass(dependency):
                     continue
                 dependency_provider = dependency
-            if self._effective_scope(dependency, dependency_provider, seen) == "request":
+            if self._effective_scope(
+                dependency,
+                dependency_provider,
+                seen,
+                module_key=dependency_module_key,
+            ) == "request":
                 if len(seen) == 1:
-                    self._scope_cache[token] = "request"
+                    self._scope_cache[scope_key] = "request"
                 return "request"
         if len(seen) == 1:
-            self._scope_cache[token] = own_scope
+            self._scope_cache[scope_key] = own_scope
         return own_scope
 
     def _provider_dependencies(self, provider: ProviderDefinition) -> list[Any]:
@@ -319,31 +357,33 @@ class FaNestContainer:
         metadata = getattr(provider, "__fanest_provider__", None)
         return getattr(metadata, "scope", "singleton")
 
-    def _resolve_injected_token(self, marker: Any) -> Any:
+    def _resolve_injected_token(self, marker: Any, module_key: Any | None = None) -> Any:
         if isinstance(marker, InjectMarker):
             try:
                 token = self._unwrap_token(marker.token)
-                if token in self._resolving:
-                    return ForwardRefProxy(self, token)
-                return self.resolve(token)
+                owner_key, _ = self._locate_provider(token, module_key)
+                if self._cache_key(owner_key, token) in self._resolving:
+                    return ForwardRefProxy(self, token, module_key=owner_key)
+                return self.resolve(token, module_key=module_key)
             except Exception:
                 if marker.optional:
                     return marker.default
                 raise
-        return self.resolve(self._unwrap_token(marker))
+        return self.resolve(self._unwrap_token(marker), module_key=module_key)
 
-    async def _resolve_injected_token_async(self, marker: Any) -> Any:
+    async def _resolve_injected_token_async(self, marker: Any, module_key: Any | None = None) -> Any:
         if isinstance(marker, InjectMarker):
             try:
                 token = self._unwrap_token(marker.token)
-                if token in self._resolving:
-                    return ForwardRefProxy(self, token)
-                return await self.resolve_async(token)
+                owner_key, _ = self._locate_provider(token, module_key)
+                if self._cache_key(owner_key, token) in self._resolving:
+                    return ForwardRefProxy(self, token, module_key=owner_key)
+                return await self.resolve_async(token, module_key=module_key)
             except Exception:
                 if marker.optional:
                     return marker.default
                 raise
-        return await self.resolve_async(self._unwrap_token(marker))
+        return await self.resolve_async(self._unwrap_token(marker), module_key=module_key)
 
     def _unwrap_token(self, token: Any) -> Any:
         if isinstance(token, ForwardRef):
@@ -356,7 +396,7 @@ class FaNestContainer:
     async def instantiate_async(self, provider: type) -> Any:
         return await self._instantiate_async(provider)
 
-    def _instantiate(self, provider: type) -> Any:
+    def _instantiate(self, provider: type, module_key: Any | None = None) -> Any:
         parameters, type_hints = self._constructor_metadata(provider)
         kwargs: dict[str, Any] = {}
 
@@ -369,7 +409,7 @@ class FaNestContainer:
             ):
                 continue
             if isinstance(parameter.default, InjectMarker):
-                kwargs[name] = self._resolve_injected_token(parameter.default)
+                kwargs[name] = self._resolve_injected_token(parameter.default, module_key=module_key)
                 continue
             if parameter.default is not inspect.Parameter.empty:
                 kwargs[name] = parameter.default
@@ -380,11 +420,11 @@ class FaNestContainer:
                     f"Cannot resolve dependency '{name}' for {provider.__name__}. "
                     "Add a type annotation or register an explicit provider."
                 )
-            kwargs[name] = self.resolve(annotation)
+            kwargs[name] = self.resolve(annotation, module_key=module_key)
 
         return provider(**kwargs)
 
-    async def _instantiate_async(self, provider: type) -> Any:
+    async def _instantiate_async(self, provider: type, module_key: Any | None = None) -> Any:
         parameters, type_hints = self._constructor_metadata(provider)
         kwargs: dict[str, Any] = {}
 
@@ -397,7 +437,10 @@ class FaNestContainer:
             ):
                 continue
             if isinstance(parameter.default, InjectMarker):
-                kwargs[name] = await self._resolve_injected_token_async(parameter.default)
+                kwargs[name] = await self._resolve_injected_token_async(
+                    parameter.default,
+                    module_key=module_key,
+                )
                 continue
             if parameter.default is not inspect.Parameter.empty:
                 kwargs[name] = parameter.default
@@ -408,7 +451,7 @@ class FaNestContainer:
                     f"Cannot resolve dependency '{name}' for {provider.__name__}. "
                     "Add a type annotation or register an explicit provider."
                 )
-            kwargs[name] = await self.resolve_async(annotation)
+            kwargs[name] = await self.resolve_async(annotation, module_key=module_key)
 
         return provider(**kwargs)
 
@@ -427,3 +470,52 @@ class FaNestContainer:
         token = self._unwrap_token(token)
         self._provider_dependency_cache.pop(token, None)
         self._scope_cache.clear()
+
+    def _locate_provider(
+        self,
+        token: Any,
+        module_key: Any | None = None,
+        seen: set[Any] | None = None,
+    ) -> tuple[Any | None, ProviderDefinition | None]:
+        if module_key is None:
+            module_matches = [
+                (candidate_key, providers[token])
+                for candidate_key, providers in self._module_providers.items()
+                if token in providers
+            ]
+            if len(module_matches) == 1:
+                return module_matches[0]
+            global_matches = [
+                (candidate_key, self._module_providers[candidate_key][token])
+                for candidate_key in self._global_modules
+                if token in self._module_exports.get(candidate_key, set())
+                and token in self._module_providers.get(candidate_key, {})
+            ]
+            if len(global_matches) == 1:
+                return global_matches[0]
+            return None, self._providers.get(token)
+        module_provider = self._module_providers.get(module_key, {}).get(token)
+        if module_provider is not None:
+            return module_key, module_provider
+        seen = seen or set()
+        if module_key in seen:
+            return None, None
+        seen.add(module_key)
+        for imported_module in self._module_imports.get(module_key, []):
+            if token not in self._module_exports.get(imported_module, set()):
+                continue
+            owner_key, provider = self._locate_provider(token, imported_module, seen)
+            if provider is not None:
+                return owner_key, provider
+        for global_module in self._global_modules:
+            if global_module == module_key or token not in self._module_exports.get(global_module, set()):
+                continue
+            owner_key, provider = self._locate_provider(token, global_module, seen)
+            if provider is not None:
+                return owner_key, provider
+        return None, self._providers.get(token)
+
+    def _cache_key(self, module_key: Any | None, token: Any) -> Any:
+        if module_key is None:
+            return token
+        return (module_key, token)

@@ -1,6 +1,18 @@
 import pytest
 
-from fanest import Controller, FaNestFactory, Get, Inject, Injectable, Module, forward_ref, token, use_existing, use_factory
+from fanest import (
+    Controller,
+    FaNestFactory,
+    Get,
+    Inject,
+    Injectable,
+    Module,
+    forward_ref,
+    token,
+    use_existing,
+    use_factory,
+    use_value,
+)
 
 
 @Injectable()
@@ -105,3 +117,104 @@ def test_module_imports_can_use_forward_ref():
     app = FaNestFactory.create(ForwardImportAppModule)
 
     assert app.state.fanest_container.resolve(ForwardImportedService).message() == "ok"
+
+
+SCOPED_MESSAGE = token("SCOPED_MESSAGE")
+
+
+class ScopedMessageService:
+    def __init__(self, message: str = Inject(SCOPED_MESSAGE)):
+        self.message = message
+
+
+@Controller("first-scope")
+class FirstScopedController:
+    def __init__(self, service: ScopedMessageService):
+        self.service = service
+
+    @Get("/")
+    async def index(self):
+        return {"message": self.service.message}
+
+
+@Controller("second-scope")
+class SecondScopedController:
+    def __init__(self, service: ScopedMessageService):
+        self.service = service
+
+    @Get("/")
+    async def index(self):
+        return {"message": self.service.message}
+
+
+@Module(
+    controllers=[FirstScopedController],
+    providers=[use_value(SCOPED_MESSAGE, "first"), ScopedMessageService],
+)
+class FirstScopedModule:
+    pass
+
+
+@Module(
+    controllers=[SecondScopedController],
+    providers=[use_value(SCOPED_MESSAGE, "second"), ScopedMessageService],
+)
+class SecondScopedModule:
+    pass
+
+
+@Module(imports=[FirstScopedModule, SecondScopedModule])
+class ScopedRootModule:
+    pass
+
+
+def test_sibling_modules_can_use_same_provider_token_without_clobbering():
+    from fastapi.testclient import TestClient
+
+    client = TestClient(FaNestFactory.create(ScopedRootModule))
+
+    assert client.get("/first-scope").json() == {"message": "first"}
+    assert client.get("/second-scope").json() == {"message": "second"}
+
+
+EXPORTED_SCOPED_MESSAGE = token("EXPORTED_SCOPED_MESSAGE")
+
+
+class ExportedScopedService:
+    def __init__(self, message: str = Inject(SCOPED_MESSAGE)):
+        self.message = message
+
+
+@Module(
+    providers=[use_value(SCOPED_MESSAGE, "export-owner"), ExportedScopedService],
+    exports=[ExportedScopedService],
+)
+class ExportOwnerModule:
+    pass
+
+
+@Controller("exported-scope")
+class ExportConsumerController:
+    def __init__(self, service: ExportedScopedService):
+        self.service = service
+
+    @Get("/")
+    async def index(self):
+        return {"message": self.service.message}
+
+
+@Module(
+    imports=[ExportOwnerModule],
+    controllers=[ExportConsumerController],
+    providers=[use_value(SCOPED_MESSAGE, "consumer-local")],
+)
+class ExportConsumerModule:
+    pass
+
+
+def test_exported_provider_resolves_its_own_module_local_dependencies():
+    from fastapi.testclient import TestClient
+
+    client = TestClient(FaNestFactory.create(ExportConsumerModule))
+
+    assert client.get("/exported-scope").json() == {"message": "export-owner"}

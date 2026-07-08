@@ -17,6 +17,7 @@ from fanest.core.metadata import (
 @dataclass
 class ModuleRecord:
     module: Any
+    key: Any
     module_type: type
     metadata: ModuleMetadata
 
@@ -53,6 +54,8 @@ class ModuleScanner:
         self.app_middlewares: list[dict[str, Any]] = []
         self.static_assets: list[dict[str, str]] = []
         self.records: dict[Any, ModuleRecord] = {}
+        self.controller_modules: dict[type, Any] = {}
+        self.gateway_modules: dict[type, Any] = {}
         self._seen_modules: set[Any] = set()
 
     def scan(self, root_module: type) -> None:
@@ -71,7 +74,12 @@ class ModuleScanner:
         if metadata is None:
             raise TypeError(f"{module_type.__name__} is not a FaNest module. Add @Module(...).")
 
-        self.records[module_key] = ModuleRecord(module=module_ref, module_type=module_type, metadata=metadata)
+        self.records[module_key] = ModuleRecord(
+            module=module_ref,
+            key=module_key,
+            module_type=module_type,
+            metadata=metadata,
+        )
 
         for imported_module in metadata.imports:
             self._scan_module(imported_module)
@@ -80,6 +88,10 @@ class ModuleScanner:
         self.providers.extend(metadata.gateways)
         self.controllers.extend(metadata.controllers)
         self.gateways.extend(metadata.gateways)
+        for controller in metadata.controllers:
+            self.controller_modules[controller] = module_key
+        for gateway in metadata.gateways:
+            self.gateway_modules[gateway] = module_key
         self.middlewares.extend(metadata.middlewares)
         self.middlewares.extend(self._configured_middlewares(module_type))
         self.app_middlewares.extend(getattr(module_type, "__fanest_app_middlewares__", []))
