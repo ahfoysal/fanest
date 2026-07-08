@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Global, Inject, Module, UseGuards, dynamic_module, token, use_factory
@@ -240,3 +242,52 @@ def test_nest_style_dynamic_module_dict_can_be_global():
     client = TestClient(FaNestFactory.create(DictDynamicModuleRoot))
 
     assert client.get("/dict-dynamic-module").json() == {"message": "dict-dynamic-ready"}
+
+
+ASYNC_DYNAMIC_MESSAGE = token("ASYNC_DYNAMIC_MESSAGE")
+
+
+@Module()
+class AsyncDynamicFeatureModule:
+    pass
+
+
+async def async_dynamic_import():
+    await asyncio.sleep(0)
+    return {
+        "module": AsyncDynamicFeatureModule,
+        "providers": [use_factory(ASYNC_DYNAMIC_MESSAGE, lambda: "async-dynamic-ready")],
+        "exports": [ASYNC_DYNAMIC_MESSAGE],
+    }
+
+
+class UsesAsyncDynamicMessage:
+    def __init__(self, message: str = Inject(ASYNC_DYNAMIC_MESSAGE)):
+        self.message = message
+
+
+@Controller("async-dynamic-module")
+class AsyncDynamicController:
+    def __init__(self, service: UsesAsyncDynamicMessage):
+        self.service = service
+
+    @Get("/")
+    async def index(self):
+        return {"message": self.service.message}
+
+
+@Module(
+    imports=[async_dynamic_import()],
+    controllers=[AsyncDynamicController],
+    providers=[UsesAsyncDynamicMessage],
+)
+class AsyncDynamicRoot:
+    pass
+
+
+def test_create_async_supports_awaitable_dynamic_module_imports():
+    app = asyncio.run(FaNestFactory.create_async(AsyncDynamicRoot))
+
+    assert TestClient(app).get("/async-dynamic-module").json() == {
+        "message": "async-dynamic-ready"
+    }

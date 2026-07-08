@@ -63,4 +63,23 @@ def test_cors_middleware_can_be_enabled():
         },
     )
 
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_cors_middleware_allows_explicit_permissive_options():
+    client = TestClient(
+        FaNestFactory.create(
+            ItemsModule,
+            cors={"allow_origins": ["*"], "allow_methods": ["*"], "allow_headers": ["*"]},
+        )
+    )
+
+    response = client.options(
+        "/items/42",
+        headers={
+            "origin": "https://example.com",
+            "access-control-request-method": "GET",
+        },
+    )
+
     assert response.headers["access-control-allow-origin"] == "*"

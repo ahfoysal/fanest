@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import logging
+import time
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
@@ -53,9 +54,11 @@ class ScheduleRunner:
 
     async def _run_interval(self, metadata: dict[str, Any], handler: Any) -> None:
         delay = float(metadata["seconds"])
+        next_run = time.monotonic() + delay
         while True:
-            await asyncio.sleep(delay)
-            await self._safe_call(handler)
+            await asyncio.sleep(max(next_run - time.monotonic(), 0.0))
+            asyncio.create_task(self._safe_call(handler))
+            next_run += delay
 
     async def _run_timeout(self, metadata: dict[str, Any], handler: Any) -> None:
         await asyncio.sleep(float(metadata["seconds"]))

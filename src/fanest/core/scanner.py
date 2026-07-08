@@ -2,7 +2,7 @@ import inspect
 from dataclasses import dataclass
 from typing import Any, get_type_hints
 
-from fanest.common.middleware import MiddlewareConsumer
+from fanest.common.middleware import MiddlewareConsumer, MiddlewareRoute
 from fanest.core.metadata import (
     DynamicModule,
     ExistingProvider,
@@ -10,8 +10,24 @@ from fanest.core.metadata import (
     ForwardRef,
     InjectMarker,
     ModuleMetadata,
+    ParameterSource,
     ProviderDefinition,
 )
+from fanest.core.module_ref import ModuleRef
+from fanest.core.discovery import DiscoveryService
+from fanest.core.reflector import Reflector
+from fanest.schedule.registry import SchedulerRegistry
+from fanest.websockets import SocketIoServer, WebSocketManager
+
+
+FRAMEWORK_PROVIDER_TOKENS = {
+    ModuleRef,
+    DiscoveryService,
+    Reflector,
+    SchedulerRegistry,
+    SocketIoServer,
+    WebSocketManager,
+}
 
 
 @dataclass
@@ -30,12 +46,16 @@ class ModuleRecord:
         return set(self.metadata.gateways)
 
     @property
+    def controller_tokens(self) -> set[Any]:
+        return set(self.metadata.controllers)
+
+    @property
     def export_tokens(self) -> set[Any]:
         return set(self.metadata.exports)
 
     @property
     def local_tokens(self) -> set[Any]:
-        return self.provider_tokens | self.gateway_tokens
+        return self.provider_tokens | self.gateway_tokens | self.controller_tokens
 
 
 def provider_token(provider: ProviderDefinition) -> Any:
@@ -62,6 +82,10 @@ class ModuleScanner:
         self._scan_module(root_module)
         self._validate_module_boundaries()
 
+    async def scan_async(self, root_module: Any) -> None:
+        await self._scan_module_async(root_module)
+        self._validate_module_boundaries()
+
     def _scan_module(self, module: type) -> None:
         module_ref = self._normalize_module_ref(module)
         module_key = self._module_key(module, module_ref)
@@ -84,6 +108,53 @@ class ModuleScanner:
         for imported_module in metadata.imports:
             self._scan_module(imported_module)
 
+        for implicit_provider in self._module_implicit_providers(metadata, module_type):
+            if implicit_provider not in metadata.providers:
+                metadata.providers.append(implicit_provider)
+
+        self.providers.extend(metadata.providers)
+        self.providers.extend(metadata.gateways)
+        self.controllers.extend(metadata.controllers)
+        self.gateways.extend(metadata.gateways)
+        for controller in metadata.controllers:
+            self.controller_modules[controller] = module_key
+        for gateway in metadata.gateways:
+            self.gateway_modules[gateway] = module_key
+        self.middlewares.extend(metadata.middlewares)
+        self.middlewares.extend(self._configured_middlewares(module_type))
+        self.app_middlewares.extend(getattr(module_type, "__fanest_app_middlewares__", []))
+        self.static_assets.extend(getattr(module_type, "__fanest_static_assets__", []))
+
+    async def _scan_module_async(self, module: Any) -> None:
+        module_ref = await self._normalize_module_ref_async(module)
+        module_key = self._module_key(module_ref, module_ref)
+        if module_key in self._seen_modules:
+            return
+        self._seen_modules.add(module_key)
+
+        module_type = self._module_type(module_ref)
+        metadata = self._module_metadata(module_ref)
+        if metadata is None:
+            raise TypeError(f"{module_type.__name__} is not a FaNest module. Add @Module(...).")
+
+        self.records[module_key] = ModuleRecord(
+            module=module_ref,
+            key=module_key,
+            module_type=module_type,
+            metadata=metadata,
+        )
+
+        normalized_imports = []
+        for imported_module in metadata.imports:
+            imported_ref = await self._normalize_module_ref_async(imported_module)
+            normalized_imports.append(imported_ref)
+            await self._scan_module_async(imported_ref)
+        metadata.imports[:] = normalized_imports
+
+        for implicit_provider in self._module_implicit_providers(metadata, module_type):
+            if implicit_provider not in metadata.providers:
+                metadata.providers.append(implicit_provider)
+
         self.providers.extend(metadata.providers)
         self.providers.extend(metadata.gateways)
         self.controllers.extend(metadata.controllers)
@@ -104,7 +175,7 @@ class ModuleScanner:
                 self._validate_target_dependencies(record, target, visible_tokens)
 
     def _visible_tokens(self, record: ModuleRecord) -> set[Any]:
-        visible = set(record.local_tokens)
+        visible = set(record.local_tokens) | FRAMEWORK_PROVIDER_TOKENS
         for imported_module in record.metadata.imports:
             imported_record = self.records[self._module_key(imported_module)]
             visible.update(imported_record.export_tokens)
@@ -155,12 +226,11 @@ class ModuleScanner:
         target_name: Any,
     ) -> None:
         dependency = self._unwrap_token(dependency)
-        if inspect.isclass(dependency) and dependency not in self._all_provider_tokens():
-            return
         if dependency not in visible_tokens:
             raise TypeError(
                 f"{target_name} in {record.module_type.__name__} depends on {dependency!r}, "
-                "but that provider is not local or exported by an imported module."
+                "but that provider is not local or exported by an imported module. "
+                "Register it in providers=[...] or export it from an imported module."
             )
 
     def _target_type(self, target: ProviderDefinition) -> type | None:
@@ -192,6 +262,15 @@ class ModuleScanner:
                 global_module=module.get("global", module.get("global_module", False)),
             )
         return module
+
+    async def _normalize_module_ref_async(self, module: Any) -> Any:
+        if inspect.isawaitable(module):
+            module = await module
+        if isinstance(module, ForwardRef):
+            module = module.factory()
+            if inspect.isawaitable(module):
+                module = await module
+        return self._normalize_module_ref(module)
 
     def _module_key(self, module: Any, normalized: Any | None = None) -> Any:
         normalized = self._normalize_module_ref(module) if normalized is None else normalized
@@ -234,3 +313,56 @@ class ModuleScanner:
         instance = module()
         instance.configure(consumer)
         return consumer.middlewares
+
+    def _module_implicit_providers(self, metadata: ModuleMetadata, module_type: type) -> list[type]:
+        providers: list[type] = []
+        seen: set[type] = set()
+
+        def add(component: Any) -> None:
+            component = self._unwrap_token(component)
+            if inspect.isclass(component) and component not in seen:
+                seen.add(component)
+                providers.append(component)
+
+        for target in [*metadata.controllers, *metadata.gateways]:
+            for key in (
+                "__fanest_guards__",
+                "__fanest_pipes__",
+                "__fanest_interceptors__",
+                "__fanest_filters__",
+            ):
+                for component in getattr(target, key, []):
+                    add(component)
+            for handler in self._declared_callables(target):
+                for key in (
+                    "__fanest_guards__",
+                    "__fanest_pipes__",
+                    "__fanest_interceptors__",
+                    "__fanest_filters__",
+                ):
+                    for component in getattr(handler, key, []):
+                        add(component)
+                for parameter in inspect.signature(handler).parameters.values():
+                    source = parameter.default
+                    if isinstance(source, ParameterSource):
+                        for pipe in source.pipes:
+                            add(pipe)
+        for middleware in [*metadata.middlewares, *self._configured_middlewares(module_type)]:
+            if isinstance(middleware, MiddlewareRoute):
+                add(middleware.middleware)
+            else:
+                add(middleware)
+
+        return providers
+
+    def _declared_callables(self, target: type) -> list[Any]:
+        handlers: list[Any] = []
+        for name, value in vars(target).items():
+            if name.startswith("__"):
+                continue
+            candidate = value
+            if isinstance(value, (staticmethod, classmethod)):
+                candidate = value.__func__
+            if callable(candidate):
+                handlers.append(candidate)
+        return handlers

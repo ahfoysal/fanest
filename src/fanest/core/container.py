@@ -93,6 +93,12 @@ class FaNestContainer:
     def begin_request(self):
         return _request_instances.set({})
 
+    def bind_request_instances(self, instances: dict[Any, Any] | None):
+        return _request_instances.set(instances or {})
+
+    def current_request_instances(self) -> dict[Any, Any] | None:
+        return _request_instances.get()
+
     def end_request(self, token: Any) -> None:
         _request_instances.reset(token)
 
@@ -160,10 +166,7 @@ class FaNestContainer:
         token = self._unwrap_token(token)
         owner_key, provider = self._locate_provider(token, module_key)
         if provider is None:
-            if not inspect.isclass(token):
-                raise KeyError(token)
-            provider = token
-            owner_key = module_key
+            raise KeyError(token)
 
         scope = self._effective_scope(token, provider, module_key=owner_key)
         request_cache = _request_instances.get()
@@ -191,10 +194,7 @@ class FaNestContainer:
         token = self._unwrap_token(token)
         owner_key, provider = self._locate_provider(token, module_key)
         if provider is None:
-            if not inspect.isclass(token):
-                raise KeyError(token)
-            provider = token
-            owner_key = module_key
+            raise KeyError(token)
 
         scope = self._effective_scope(token, provider, module_key=owner_key)
         request_cache = _request_instances.get()
@@ -309,9 +309,7 @@ class FaNestContainer:
             dependency = self._unwrap_token(dependency)
             dependency_module_key, dependency_provider = self._locate_provider(dependency, module_key)
             if dependency_provider is None:
-                if not inspect.isclass(dependency):
-                    continue
-                dependency_provider = dependency
+                continue
             if self._effective_scope(
                 dependency,
                 dependency_provider,

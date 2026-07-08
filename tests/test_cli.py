@@ -240,6 +240,6 @@ def test_cli_info_and_build(tmp_path, monkeypatch):
     build = runner.invoke(app, ["build", "src"])
 
     assert info.exit_code == 0
-    assert "FaNest 0.1.1" in info.output
+    assert "FaNest 0.1.2" in info.output
     assert build.exit_code == 0
     assert "Build OK: src" in build.output

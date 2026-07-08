@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import Body as FastBody
 from fastapi import BackgroundTasks as FastBackgroundTasks
 from fastapi import Cookie, FastAPI, File, Form as FastForm, Header, HTTPException, Path, Query, Request, Response, WebSocket
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from starlette.websockets import WebSocketDisconnect
 
@@ -142,7 +143,19 @@ class FastApiAdapter:
         path = self._join_paths(self.global_prefix, gateway_metadata.path)
 
         async def websocket_endpoint(websocket: WebSocket) -> None:
+            connection_context = ExecutionContext(
+                handler=getattr(instance, "on_connect", instance),
+                controller=instance,
+                request=websocket,
+                kwargs={"websocket": websocket},
+            )
+            try:
+                await self._run_connection_guards(instance, connection_context)
+            except Exception:
+                await websocket.close(code=1008)
+                return
             await websocket.accept()
+            self.container.resolve(WebSocketManager).connect(websocket)
             connect_hook = getattr(instance, "on_connect", None)
             if connect_hook is not None:
                 result = connect_hook(websocket)
@@ -179,7 +192,7 @@ class FastApiAdapter:
                         context.kwargs.clear()
                         context.kwargs.update(self._bind_websocket_parameters(handler, data, websocket, context))
                     except Exception as exc:
-                        handled = await self._run_filters(instance, handler, context, exc)
+                        handled = await self._run_filters_safe(instance, handler, context, exc)
                         await websocket.send_json(
                             {"event": "error", "data": handled if handled is not None else str(exc)}
                         )
@@ -189,7 +202,7 @@ class FastApiAdapter:
                         if inspect.isawaitable(result):
                             result = await result
                     except Exception as exc:
-                        handled = await self._run_filters(instance, handler, context, exc)
+                        handled = await self._run_filters_safe(instance, handler, context, exc)
                         await websocket.send_json(
                             {"event": "error", "data": handled if handled is not None else str(exc)}
                         )
@@ -211,6 +224,15 @@ class FastApiAdapter:
 
         self.app.add_api_websocket_route(path, websocket_endpoint)
 
+    async def _run_connection_guards(self, gateway: Any, context: ExecutionContext) -> None:
+        for guard in getattr(gateway.__class__, "__fanest_guards__", []):
+            instance = self._resolve_component(guard, owner=gateway)
+            result = instance.can_activate(context)
+            if inspect.isawaitable(result):
+                result = await result
+            if not result:
+                raise HTTPException(status_code=403, detail="Forbidden")
+
     def _endpoint(
         self,
         controller_class: type,
@@ -225,6 +247,7 @@ class FastApiAdapter:
             **kwargs: Any,
         ) -> Any:
             request_scope = self.container.begin_request()
+            end_request_on_return = True
             controller = self.container.resolve(controller_class, module_key=module_key)
             handler = getattr(controller, handler_name)
             context = ExecutionContext(
@@ -237,6 +260,15 @@ class FastApiAdapter:
                 await self._run_guards(controller, handler, context)
                 context.kwargs.update(self._bind_request_parameters(handler, request, kwargs))
                 context.kwargs.update(self._bind_response_parameters(handler, response, kwargs))
+                context.kwargs.update(
+                    self._bind_native_framework_parameters(
+                        handler,
+                        request,
+                        response,
+                        background_tasks,
+                        context.kwargs,
+                    )
+                )
                 context.kwargs.update(
                     self._bind_background_tasks_parameters(
                         handler, background_tasks, context.kwargs
@@ -277,17 +309,27 @@ class FastApiAdapter:
                         return RedirectResponse(redirect["url"], status_code=redirect["status_code"])
                     return result
 
-                return await self._run_interceptors(controller, handler, context, call_handler)
+                result = await self._run_interceptors(controller, handler, context, call_handler)
+                if isinstance(result, StreamingResponse):
+                    request_instances = self.container.current_request_instances()
+                    self.container.end_request(request_scope)
+                    end_request_on_return = False
+                    return self._scope_bound_streaming_response(result, request_instances)
+                return result
             except Exception as exc:
                 handled = await self._run_filters(controller, handler, context, exc)
                 if handled is not None:
                     return handled
                 raise
             finally:
-                self.container.end_request(request_scope)
+                if end_request_on_return:
+                    self.container.end_request(request_scope)
 
         endpoint.__name__ = handler_name
         endpoint.__signature__ = self._build_signature(handler_function)  # type: ignore[attr-defined]
+        setattr(endpoint, "__fanest_controller_class__", controller_class)
+        setattr(endpoint, "__fanest_handler_name__", handler_name)
+        setattr(endpoint, "__fanest_module_key__", module_key)
         return endpoint
 
     def _build_signature(self, handler: Callable[..., Any]) -> inspect.Signature:
@@ -311,6 +353,8 @@ class FastApiAdapter:
         ]
         for name, parameter in original.parameters.items():
             if name == "self":
+                continue
+            if name in {"request", "response", "background_tasks"}:
                 continue
             source = parameter.default
             annotation = parameter.annotation
@@ -369,7 +413,7 @@ class FastApiAdapter:
         self, controller: Any, handler: Callable[..., Any], context: ExecutionContext
     ) -> None:
         for guard in self._collect(controller, handler, "__fanest_guards__"):
-            instance = self._resolve_component(guard)
+            instance = self._resolve_component(guard, owner=controller)
             result = instance.can_activate(context)
             if inspect.isawaitable(result):
                 result = await result
@@ -381,7 +425,7 @@ class FastApiAdapter:
     ) -> dict[str, Any]:
         kwargs = dict(context.kwargs)
         for pipe in self._collect(controller, handler, "__fanest_pipes__"):
-            instance = self._resolve_component(pipe)
+            instance = self._resolve_component(pipe, owner=controller)
             for name, value in list(kwargs.items()):
                 parameter = self._parameters(handler).get(name)
                 if parameter is not None and not self._should_pipe_parameter(parameter):
@@ -400,7 +444,7 @@ class FastApiAdapter:
                 continue
             annotation = parameter.annotation
             for pipe in parameter.default.pipes:
-                instance = self._resolve_component(pipe)
+                instance = self._resolve_component(pipe, owner=controller)
                 result = instance.transform(
                     value,
                     self._pipe_metadata(name, handler, parameter, annotation),
@@ -444,7 +488,7 @@ class FastApiAdapter:
         parameter = self._parameters(handler).get("data")
         annotation = parameter.annotation if parameter is not None else None
         for pipe in self._collect(gateway, handler, "__fanest_pipes__"):
-            instance = self._resolve_component(pipe)
+            instance = self._resolve_component(pipe, owner=gateway)
             transformed = instance.transform(
                 result,
                 {"name": "data", "handler": handler, "annotation": annotation},
@@ -476,7 +520,7 @@ class FastApiAdapter:
         async def dispatch(index: int) -> Any:
             if index >= len(interceptors):
                 return await call_handler()
-            instance = self._resolve_component(interceptors[index])
+            instance = self._resolve_component(interceptors[index], owner=controller)
             result = instance.intercept(context, lambda: dispatch(index + 1))
             if inspect.isawaitable(result):
                 return await result
@@ -502,6 +546,24 @@ class FastApiAdapter:
             source = parameter.default
             if isinstance(source, ParameterSource) and source.source == "response":
                 bound[name] = response
+        return bound
+
+    def _bind_native_framework_parameters(
+        self,
+        handler: Callable[..., Any],
+        request: Request,
+        response: Response,
+        background_tasks: FastBackgroundTasks,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        bound = dict(kwargs)
+        parameters = self._parameters(handler)
+        if "request" in parameters:
+            bound["request"] = request
+        if "response" in parameters:
+            bound["response"] = response
+        if "background_tasks" in parameters:
+            bound["background_tasks"] = background_tasks
         return bound
 
     def _uses_manual_response(self, handler: Callable[..., Any]) -> bool:
@@ -646,7 +708,7 @@ class FastApiAdapter:
         exc: Exception,
     ) -> Any:
         for exception_filter in self._collect(controller, handler, "__fanest_filters__"):
-            instance = self._resolve_component(exception_filter)
+            instance = self._resolve_component(exception_filter, owner=controller)
             catch_types = getattr(instance.__class__, "__fanest_catch_exceptions__", (Exception,))
             if not isinstance(exc, catch_types):
                 continue
@@ -655,6 +717,35 @@ class FastApiAdapter:
                 result = await result
             return result
         return None
+
+    async def _run_filters_safe(
+        self,
+        controller: Any,
+        handler: Callable[..., Any],
+        context: ExecutionContext,
+        exc: Exception,
+    ) -> Any:
+        try:
+            return await self._run_filters(controller, handler, context, exc)
+        except Exception as filter_exc:
+            return str(filter_exc)
+
+    async def handle_validation_error(self, request: Request, exc: RequestValidationError) -> Any:
+        route = request.scope.get("route")
+        endpoint = getattr(route, "endpoint", None)
+        controller_class = getattr(endpoint, "__fanest_controller_class__", None)
+        handler_name = getattr(endpoint, "__fanest_handler_name__", None)
+        module_key = getattr(endpoint, "__fanest_module_key__", None)
+        if controller_class is None or handler_name is None:
+            return None
+        request_scope = self.container.begin_request()
+        try:
+            controller = self.container.resolve(controller_class, module_key=module_key)
+            handler = getattr(controller, handler_name)
+            context = ExecutionContext(handler=handler, controller=controller, request=request, kwargs={})
+            return await self._run_filters(controller, handler, context, exc)
+        finally:
+            self.container.end_request(request_scope)
 
     def _collect(self, controller: Any, handler: Callable[..., Any], key: str) -> list[Any]:
         global_values = {
@@ -683,6 +774,25 @@ class FastApiAdapter:
 
         return StreamingResponse(body(), media_type="text/event-stream", headers=headers)
 
+    def _scope_bound_streaming_response(
+        self,
+        response: StreamingResponse,
+        request_instances: dict[Any, Any] | None,
+    ) -> StreamingResponse:
+        original_iterator = response.body_iterator
+        container = self.container
+
+        async def body_iterator():
+            stream_scope = container.bind_request_instances(request_instances)
+            try:
+                async for chunk in original_iterator:
+                    yield chunk
+            finally:
+                container.end_request(stream_scope)
+
+        response.body_iterator = body_iterator()
+        return response
+
     def _format_sse(self, item: Any) -> bytes:
         event = None
         data = item
@@ -709,9 +819,14 @@ class FastApiAdapter:
         rendered = re.sub(r"{{\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*}}", replace, content)
         return HTMLResponse(rendered, headers=headers)
 
-    def _resolve_component(self, component: Any) -> Any:
+    def _resolve_component(self, component: Any, *, owner: Any | None = None) -> Any:
         if inspect.isclass(component):
-            return self.container.resolve(component)
+            module_key = None
+            if owner is not None:
+                module_key = self.controller_modules.get(owner.__class__) or self.gateway_modules.get(
+                    owner.__class__
+                )
+            return self.container.resolve(component, module_key=module_key)
         return component
 
     def _parameters(self, handler: Callable[..., Any]) -> dict[str, inspect.Parameter]:

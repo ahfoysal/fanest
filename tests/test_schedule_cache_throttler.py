@@ -154,6 +154,30 @@ def test_scheduled_job_exception_does_not_kill_repeating_task():
     assert FlakyIntervalService.runs > 1
 
 
+@Injectable()
+class SlowIntervalService:
+    started: list[float] = []
+
+    @Interval(0.02)
+    async def slow(self):
+        type(self).started.append(time.monotonic())
+        await asyncio.sleep(0.04)
+
+
+@Module(providers=[SlowIntervalService])
+class SlowIntervalModule:
+    pass
+
+
+def test_interval_jobs_do_not_drift_by_waiting_for_slow_handlers():
+    SlowIntervalService.started = []
+
+    with TestClient(FaNestFactory.create(SlowIntervalModule)):
+        time.sleep(0.075)
+
+    assert len(SlowIntervalService.started) >= 3
+
+
 @Controller("cached")
 @UseInterceptors(CacheInterceptor)
 class CachedController:

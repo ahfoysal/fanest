@@ -1,10 +1,23 @@
+from fastapi import BackgroundTasks, Request, Response
 from fastapi.testclient import TestClient
 
-from fanest import Controller, FaNestFactory, Get, Module, Res, SetHeader, Sse, StreamableFile
+from fanest import Controller, FaNestFactory, Get, Injectable, Module, Res, SetHeader, Sse, StreamableFile
+
+
+@Injectable(scope="request")
+class StreamingRequestState:
+    created = 0
+
+    def __init__(self):
+        type(self).created += 1
+        self.instance_id = type(self).created
 
 
 @Controller("responses")
 class ResponseController:
+    def __init__(self, state: StreamingRequestState):
+        self.state = state
+
     @SetHeader("x-powered-by", "fanest")
     @Get("/header")
     async def header(self):
@@ -17,8 +30,29 @@ class ResponseController:
 
     @SetHeader("x-sse", "yes")
     @Sse("/events")
-    async def events(self):
-        yield {"event": "message", "data": {"text": "hello"}}
+    async def events(self, request: Request):
+        container = request.app.state.fanest_container
+        resolved_inside_stream = container.resolve(StreamingRequestState)
+        yield {
+            "event": "message",
+            "data": {
+                "text": "hello",
+                "same_scope": resolved_inside_stream is self.state,
+            },
+        }
+
+    @Get("/native-params")
+    async def native_params(
+        self,
+        request: Request,
+        response: Response,
+        background_tasks: BackgroundTasks,
+    ):
+        response.headers["x-native"] = "yes"
+        return {
+            "path": request.url.path,
+            "background_tasks": background_tasks is not None,
+        }
 
     @Get("/manual")
     async def manual(self, response=Res()):
@@ -31,7 +65,7 @@ class ResponseController:
         return {"ok": True}
 
 
-@Module(controllers=[ResponseController])
+@Module(controllers=[ResponseController], providers=[StreamingRequestState])
 class ResponseModule:
     pass
 
@@ -63,7 +97,19 @@ def test_sse_decorator_formats_event_streams():
 
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.headers["x-sse"] == "yes"
-    assert 'event: message\ndata: {"text": "hello"}' in response.text
+    assert 'event: message\ndata: {"text": "hello", "same_scope": true}' in response.text
+
+
+def test_native_framework_parameter_names_do_not_duplicate_generated_signature():
+    client = TestClient(FaNestFactory.create(ResponseModule))
+
+    response = client.get("/responses/native-params")
+
+    assert response.json() == {
+        "path": "/responses/native-params",
+        "background_tasks": True,
+    }
+    assert response.headers["x-native"] == "yes"
 
 
 def test_response_decorator_supports_manual_and_passthrough_modes():

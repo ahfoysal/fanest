@@ -1,4 +1,5 @@
 from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
@@ -68,6 +69,8 @@ class WrapInterceptor:
 
 class HttpErrorFilter:
     def catch(self, exc, context):
+        if isinstance(exc, RequestValidationError):
+            return {"error": "validation", "count": len(exc.errors())}
         if isinstance(exc, HTTPException):
             return {"error": exc.detail}
         raise exc
@@ -124,6 +127,10 @@ def test_param_query_body_pipes_guards_interceptors_and_filters():
     assert client.get("/users/7", headers={"x-deny": "1"}).json() == {"error": "Forbidden"}
     assert client.get("/users/blocked").json() == {"error": "blocked"}
     assert client.get("/users/param-pipe?value=4").json() == {"value": 5}
+    assert client.post("/users", json={"name": 123}).json() == {
+        "error": "validation",
+        "count": 1,
+    }
     TrackingPipe.seen = []
     assert client.get("/users/framework-params?value=ok").json() == {
         "value": "ok",

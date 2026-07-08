@@ -7,6 +7,8 @@ from typing import Any, cast
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
 
 from fanest.core.container import FaNestContainer
 from fanest.core.discovery import DiscoveryService
@@ -44,6 +46,73 @@ class FaNestFactory:
     ) -> FastAPI:
         scanner = ModuleScanner()
         scanner.scan(root_module)
+        return FaNestFactory._create_from_scanner(
+            scanner,
+            root_module,
+            title=title,
+            version=version,
+            description=description,
+            debug=debug,
+            overrides=overrides,
+            global_prefix=global_prefix,
+            cors=cors,
+            global_guards=global_guards,
+            global_pipes=global_pipes,
+            global_interceptors=global_interceptors,
+            global_filters=global_filters,
+        )
+
+    @staticmethod
+    async def create_async(
+        root_module: Any,
+        *,
+        title: str = "FaNest Application",
+        version: str = "0.1.0",
+        description: str | None = None,
+        debug: bool = False,
+        overrides: dict[type, object] | None = None,
+        global_prefix: str = "",
+        cors: bool | dict[str, object] = False,
+        global_guards: list[object] | None = None,
+        global_pipes: list[object] | None = None,
+        global_interceptors: list[object] | None = None,
+        global_filters: list[object] | None = None,
+    ) -> FastAPI:
+        scanner = ModuleScanner()
+        await scanner.scan_async(root_module)
+        return FaNestFactory._create_from_scanner(
+            scanner,
+            root_module,
+            title=title,
+            version=version,
+            description=description,
+            debug=debug,
+            overrides=overrides,
+            global_prefix=global_prefix,
+            cors=cors,
+            global_guards=global_guards,
+            global_pipes=global_pipes,
+            global_interceptors=global_interceptors,
+            global_filters=global_filters,
+        )
+
+    @staticmethod
+    def _create_from_scanner(
+        scanner: ModuleScanner,
+        root_module: Any,
+        *,
+        title: str,
+        version: str,
+        description: str | None,
+        debug: bool,
+        overrides: dict[type, object] | None,
+        global_prefix: str,
+        cors: bool | dict[str, object],
+        global_guards: list[object] | None,
+        global_pipes: list[object] | None,
+        global_interceptors: list[object] | None,
+        global_filters: list[object] | None,
+    ) -> FastAPI:
 
         container = FaNestContainer()
         module_import_keys: dict[Any, list[Any]] = {}
@@ -52,7 +121,11 @@ class FaNestFactory:
             module_import_keys[module_key] = imports
             container.register_module(
                 module_key,
-                providers=[*record.metadata.providers, *record.metadata.gateways],
+                providers=[
+                    *record.metadata.providers,
+                    *record.metadata.gateways,
+                    *record.metadata.controllers,
+                ],
                 imports=imports,
                 exports=set(record.metadata.exports),
                 global_module=record.metadata.global_module,
@@ -67,6 +140,14 @@ class FaNestFactory:
         )
         for token, value in (overrides or {}).items():
             container.override(token, value)
+        for component in [
+            *(global_guards or []),
+            *(global_pipes or []),
+            *(global_interceptors or []),
+            *(global_filters or []),
+        ]:
+            if inspect.isclass(component) and not container.has_provider(component):
+                container.register(component)
 
         lifespan = FaNestFactory._lifespan(scanner.records, container)
         app_options: dict[str, Any] = {
@@ -87,13 +168,13 @@ class FaNestFactory:
         for middleware in scanner.app_middlewares:
             app.add_middleware(middleware["class"], **middleware["options"])
         if cors:
-            options = cors if isinstance(cors, dict) else {}
+            options = cors if isinstance(cors, dict) else {"allow_origins": []}
             app.add_middleware(
                 CORSMiddleware,
-                allow_origins=cast(list[str], options.get("allow_origins", ["*"])),
+                allow_origins=cast(list[str], options.get("allow_origins", [])),
                 allow_credentials=cast(bool, options.get("allow_credentials", False)),
-                allow_methods=cast(list[str], options.get("allow_methods", ["*"])),
-                allow_headers=cast(list[str], options.get("allow_headers", ["*"])),
+                allow_methods=cast(list[str], options.get("allow_methods", ["GET"])),
+                allow_headers=cast(list[str], options.get("allow_headers", [])),
             )
         for middleware in reversed(scanner.middlewares):
             app.add_middleware(
@@ -114,7 +195,19 @@ class FaNestFactory:
         )
         adapter.register_controllers(scanner.controllers)
         adapter.register_gateways(scanner.gateways)
+        FaNestFactory._register_validation_exception_handler(app, adapter)
         return app
+
+    @staticmethod
+    def _register_validation_exception_handler(app: FastAPI, adapter: FastApiAdapter) -> None:
+        @app.exception_handler(RequestValidationError)
+        async def fanest_validation_exception_handler(request: Any, exc: RequestValidationError):
+            handled = await adapter.handle_validation_error(request, exc)
+            if isinstance(handled, Response):
+                return handled
+            if handled is not None:
+                return JSONResponse(status_code=400, content=handled)
+            return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
     @staticmethod
     def _lifespan(records: dict[Any, Any], container: FaNestContainer):

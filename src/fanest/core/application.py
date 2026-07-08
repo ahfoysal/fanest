@@ -82,6 +82,20 @@ class FaNestApplication:
             )
         return self._app
 
+    async def build_async(self) -> FastAPI:
+        if self._app is None:
+            from fanest.core.factory import FaNestFactory
+
+            self._app = await FaNestFactory.create_async(
+                self.root_module,
+                **self.options,
+                global_guards=self.global_guards,
+                global_pipes=self.global_pipes,
+                global_interceptors=self.global_interceptors,
+                global_filters=self.global_filters,
+            )
+        return self._app
+
     @property
     def fastapi(self) -> FastAPI:
         return self.build()

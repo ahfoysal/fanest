@@ -7,12 +7,14 @@ from fanest import (
     Inject,
     Injectable,
     Module,
+    ModuleRef,
     forward_ref,
     token,
     use_existing,
     use_factory,
     use_value,
 )
+from fanest.core.module_ref import UnknownProviderError
 
 
 @Injectable()
@@ -218,3 +220,41 @@ def test_exported_provider_resolves_its_own_module_local_dependencies():
     client = TestClient(FaNestFactory.create(ExportConsumerModule))
 
     assert client.get("/exported-scope").json() == {"message": "export-owner"}
+
+
+class MissingDatabaseConnection:
+    pass
+
+
+class MissingDatabaseConsumer:
+    def __init__(self, connection: MissingDatabaseConnection):
+        self.connection = connection
+
+
+@Module(providers=[MissingDatabaseConsumer])
+class MissingProviderModule:
+    pass
+
+
+def test_unregistered_class_dependency_fails_startup_instead_of_auto_instantiating():
+    with pytest.raises(TypeError, match="not local or exported"):
+        FaNestFactory.create(MissingProviderModule)
+
+
+class RootMissingService:
+    pass
+
+
+def test_container_does_not_silently_instantiate_unregistered_class():
+    app = FaNestFactory.create(ForwardImportAppModule)
+
+    with pytest.raises(KeyError):
+        app.state.fanest_container.resolve(RootMissingService)
+
+
+def test_module_ref_get_reports_unregistered_class_as_unknown_provider():
+    app = FaNestFactory.create(ForwardImportAppModule)
+    module_ref = app.state.fanest_container.resolve(ModuleRef)
+
+    with pytest.raises(UnknownProviderError):
+        module_ref.get(RootMissingService)

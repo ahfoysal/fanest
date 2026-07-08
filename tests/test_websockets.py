@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from fanest import (
     ConnectedSocket,
@@ -92,9 +93,9 @@ class SecureChatModule:
 def test_websocket_gateway_runs_guards_and_pipes():
     client = TestClient(FaNestFactory.create(SecureChatModule))
 
-    with client.websocket_connect("/secure-chat?token=bad") as websocket:
-        websocket.send_json({"event": "shout", "data": "hello"})
-        assert websocket.receive_json()["event"] == "error"
+    with pytest.raises(Exception):
+        with client.websocket_connect("/secure-chat?token=bad"):
+            pass
 
     with client.websocket_connect("/secure-chat?token=ok") as websocket:
         websocket.send_json({"event": "shout", "data": "hello"})
@@ -102,6 +103,35 @@ def test_websocket_gateway_runs_guards_and_pipes():
             "event": "shout",
             "data": {"message": "HELLO"},
         }
+
+
+def test_websocket_gateway_guard_runs_before_on_connect():
+    class CountingGuard:
+        def can_activate(self, context):
+            return False
+
+    @WebSocketGateway("/preauth")
+    @UseGuards(CountingGuard)
+    class PreAuthGateway:
+        connected = 0
+
+        async def on_connect(self, websocket):
+            type(self).connected += 1
+
+        @SubscribeMessage("echo")
+        async def echo(self, data, websocket):
+            return data
+
+    @Module(gateways=[PreAuthGateway])
+    class PreAuthModule:
+        pass
+
+    client = TestClient(FaNestFactory.create(PreAuthModule))
+
+    with pytest.raises(Exception):
+        with client.websocket_connect("/preauth"):
+            pass
+    assert PreAuthGateway.connected == 0
 
 
 @WebSocketGateway("/socketio")
@@ -206,6 +236,31 @@ class AdvancedSocketModule:
     pass
 
 
+@WebSocketGateway("/global-socket")
+class GlobalSocketGateway:
+    def __init__(self, server: SocketIoServer):
+        self.server = server
+
+    @SubscribeMessage("broadcast")
+    async def broadcast(self, data, websocket):
+        await self.server.emit("global", data)
+
+
+@Module(gateways=[GlobalSocketGateway])
+class GlobalSocketModule:
+    pass
+
+
+def test_socket_io_server_broadcasts_to_roomless_connections():
+    client = TestClient(FaNestFactory.create(GlobalSocketModule))
+
+    with client.websocket_connect("/global-socket") as sender:
+        with client.websocket_connect("/global-socket") as receiver:
+            sender.send_json({"event": "broadcast", "data": {"text": "hi"}})
+            assert sender.receive_json() == {"event": "global", "data": {"text": "hi"}}
+            assert receiver.receive_json() == {"event": "global", "data": {"text": "hi"}}
+
+
 def test_socket_io_server_broadcasts_to_all_connections_and_custom_response_event():
     client = TestClient(FaNestFactory.create(AdvancedSocketModule))
 
@@ -224,3 +279,36 @@ def test_websocket_gateway_reports_malformed_payloads():
     with client.websocket_connect("/advanced-socket") as websocket:
         websocket.send_text("{")
         assert websocket.receive_json()["event"] == "error"
+
+
+@Catch(ValueError)
+class BrokenWebSocketFilter:
+    def catch(self, exc, context):
+        raise RuntimeError("filter failed")
+
+
+@WebSocketGateway("/broken-filter")
+@UseFilters(BrokenWebSocketFilter)
+class BrokenFilterGateway:
+    @SubscribeMessage("fail")
+    async def fail(self, data, websocket):
+        raise ValueError("handler failed")
+
+    @SubscribeMessage("echo")
+    async def echo(self, data, websocket):
+        return data
+
+
+@Module(gateways=[BrokenFilterGateway])
+class BrokenFilterModule:
+    pass
+
+
+def test_websocket_filter_exception_returns_error_without_closing_connection():
+    client = TestClient(FaNestFactory.create(BrokenFilterModule))
+
+    with client.websocket_connect("/broken-filter") as websocket:
+        websocket.send_json({"event": "fail", "data": None})
+        assert websocket.receive_json() == {"event": "error", "data": "filter failed"}
+        websocket.send_json({"event": "echo", "data": "still-open"})
+        assert websocket.receive_json() == {"event": "echo", "data": "still-open"}
