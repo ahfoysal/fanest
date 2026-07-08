@@ -52,7 +52,7 @@ class RedisCacheStore:
 
     def __init__(self, *, url: str = "redis://localhost:6379/0", prefix: str = "fanest:cache:") -> None:
         try:
-            import redis
+            import redis  # type: ignore[reportMissingImports]
         except ImportError as exc:  # pragma: no cover - exercised without redis installed
             raise ImportError(
                 "RedisCacheStore requires the 'redis' package. "

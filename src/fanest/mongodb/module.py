@@ -103,7 +103,7 @@ class MongoService:
         uri = options.get("uri") or options.get("url")
         if uri:
             try:
-                from motor.motor_asyncio import AsyncIOMotorClient
+                from motor.motor_asyncio import AsyncIOMotorClient  # type: ignore[reportMissingImports]
             except ImportError as exc:  # pragma: no cover - exercised without motor installed
                 raise ImportError(
                     "MongoModule.for_root(uri=...) requires the 'motor' package. "
