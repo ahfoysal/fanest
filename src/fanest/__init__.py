@@ -97,7 +97,7 @@ from fanest.core.providers import (
 from fanest.mapped_types import IntersectionType, OmitType, PartialType, PickType
 from fanest.websockets import SocketIoServer, WebSocketManager
 
-__version__ = "0.1.9"
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
