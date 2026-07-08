@@ -289,7 +289,7 @@ class ModuleScanner:
 
     def _module_key(self, module: Any, normalized: Any | None = None) -> Any:
         normalized = self._normalize_module_ref(module) if normalized is None else normalized
-        if isinstance(module, dict | DynamicModule) or isinstance(normalized, DynamicModule):
+        if isinstance(normalized, DynamicModule):
             return ("dynamic", self._dynamic_module_fingerprint(normalized))
         return normalized
 

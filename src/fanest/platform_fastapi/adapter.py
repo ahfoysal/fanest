@@ -735,8 +735,9 @@ class FastApiAdapter:
         if response.background is None:
             response.background = background_tasks
             return
-        if hasattr(response.background, "tasks"):
-            response.background.tasks.extend(background_tasks.tasks)
+        existing_tasks = getattr(response.background, "tasks", None)
+        if isinstance(existing_tasks, list):
+            existing_tasks.extend(background_tasks.tasks)
             return
         combined = StarletteBackgroundTasks()
         combined.tasks.append(response.background)
