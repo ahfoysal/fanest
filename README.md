@@ -112,6 +112,7 @@ It shows:
 - file uploads
 - file validation pipes
 - response headers, SSE, and streaming files
+- rendered templates and static assets
 - custom parameter decorators
 - config module
 - async module configuration
@@ -130,6 +131,7 @@ It shows:
 - timeout jobs and scheduler registry
 - queue processors
 - mailer service
+- CQRS command/query/event buses
 - named microservice transports
 - WebSocket gateway with rooms, broadcasting, guards, and pipes
 - global prefix, CORS, and global pipes
@@ -259,8 +261,10 @@ fanest.cache             cache service, interceptor, and store adapters
 fanest.throttler         throttling module and guard
 fanest.schedule          interval, cron, timeout jobs, scheduler registry
 fanest.websockets        connection manager, rooms, broadcasting
+fanest.serve_static      static asset module
 fanest.queues            in-memory queue service, processors, jobs
 fanest.mailer            mail service with outbox and SMTP handoff
+fanest.cqrs              command, query, and event buses
 fanest.graphql           resolvers, queries, mutations, GraphQL endpoint
 fanest.microservices     message/event patterns and named transports
 fanest.mapped_types      PartialType, PickType, OmitType, IntersectionType
@@ -399,6 +403,7 @@ Current:
 - REST decorators
 - request binding
 - versioned routes, status codes, redirects, response headers, SSE, streaming files
+- rendered templates and static asset module
 - middleware
 - route-scoped middleware with exclusions
 - file upload binding
@@ -415,6 +420,7 @@ Current:
 - in-memory queue processors
 - queue retries and delayed jobs
 - mailer package with templates
+- CQRS package
 - microservice message/event patterns and named transports
 - lightweight GraphQL module
 - SQLAlchemy package start
@@ -441,7 +447,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 65 passed
+# 69 passed
 ```
 
 ## License
