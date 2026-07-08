@@ -1,6 +1,6 @@
 import pytest
 
-from fanest import Controller, FaNestFactory, Get, Injectable, Module
+from fanest import Controller, FaNestFactory, Get, Inject, Injectable, Module, forward_ref, token, use_existing, use_factory
 
 
 @Injectable()
@@ -31,3 +31,77 @@ class LeakyModule:
 def test_imported_private_provider_cannot_leak_across_module_boundary():
     with pytest.raises(TypeError, match="not local or exported"):
         FaNestFactory.create(LeakyModule)
+
+
+PRIVATE_TOKEN = token("PRIVATE_TOKEN")
+ALIAS_TOKEN = token("ALIAS_TOKEN")
+FACTORY_TOKEN = token("FACTORY_TOKEN")
+
+
+@Module(providers=[use_factory(PRIVATE_TOKEN, lambda: "private")], exports=[])
+class PrivateTokenModule:
+    pass
+
+
+class ExplicitInjectConsumer:
+    def __init__(self, value: str = Inject(PRIVATE_TOKEN)):
+        self.value = value
+
+
+@Module(imports=[PrivateTokenModule], providers=[ExplicitInjectConsumer])
+class ExplicitInjectLeakModule:
+    pass
+
+
+@Module(
+    imports=[PrivateTokenModule],
+    providers=[use_factory(FACTORY_TOKEN, lambda value: value, inject=[PRIVATE_TOKEN])],
+)
+class FactoryLeakModule:
+    pass
+
+
+@Module(
+    imports=[PrivateTokenModule],
+    providers=[use_existing(ALIAS_TOKEN, PRIVATE_TOKEN)],
+)
+class ExistingLeakModule:
+    pass
+
+
+def test_boundary_validation_covers_explicit_inject_factory_and_existing_providers():
+    for module in [ExplicitInjectLeakModule, FactoryLeakModule, ExistingLeakModule]:
+        with pytest.raises(TypeError, match="not local or exported"):
+            FaNestFactory.create(module)
+
+
+@Injectable()
+class ForwardImportedService:
+    def message(self):
+        return "ok"
+
+
+@Module(providers=[ForwardImportedService], exports=[ForwardImportedService])
+class ForwardImportedModule:
+    pass
+
+
+@Controller("forward-import")
+class ForwardImportController:
+    def __init__(self, service: ForwardImportedService):
+        self.service = service
+
+    @Get("/")
+    async def index(self):
+        return {"message": self.service.message()}
+
+
+@Module(imports=[forward_ref(lambda: ForwardImportedModule)], controllers=[ForwardImportController])
+class ForwardImportAppModule:
+    pass
+
+
+def test_module_imports_can_use_forward_ref():
+    app = FaNestFactory.create(ForwardImportAppModule)
+
+    assert app.state.fanest_container.resolve(ForwardImportedService).message() == "ok"

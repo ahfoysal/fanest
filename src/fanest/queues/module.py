@@ -157,7 +157,7 @@ class QueueService:
 
 class QueueModule:
     @staticmethod
-    def for_root(*, is_global: bool = False) -> type:
+    def for_root(*, is_global: bool = True) -> type:
         @Module(providers=[QueueService], exports=[QueueService], global_module=is_global)
         class DynamicQueueModule:
             pass

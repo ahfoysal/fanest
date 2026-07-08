@@ -231,7 +231,7 @@ async def downgrade(connection):
 
 class SqlAlchemyModule:
     @staticmethod
-    def for_root(*, database_url: str, echo: bool = False, is_global: bool = False) -> type:
+    def for_root(*, database_url: str, echo: bool = False, is_global: bool = True) -> type:
         options = {"database_url": database_url, "echo": echo}
 
         @Module(
@@ -249,7 +249,7 @@ class SqlAlchemyModule:
         *,
         use_factory: Callable[..., dict[str, Any]],
         inject: list[Any] | None = None,
-        is_global: bool = False,
+        is_global: bool = True,
     ) -> type:
         @Module(
             providers=[

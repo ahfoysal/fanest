@@ -72,7 +72,7 @@ class MongoService:
 
 class MongoModule:
     @staticmethod
-    def for_root(is_global: bool = False, **options: Any) -> type:
+    def for_root(is_global: bool = True, **options: Any) -> type:
         @Module(
             providers=[use_value(MONGO_OPTIONS, options), MongoService],
             exports=[MongoService],

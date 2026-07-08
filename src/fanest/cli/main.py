@@ -16,9 +16,12 @@ def new(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
         typer.echo(f"Would create FaNest application in {target}")
         return
     target.mkdir(parents=True, exist_ok=False)
-    (target / "src").mkdir()
-    (target / "src" / "__init__.py").write_text("", encoding="utf-8")
+    (target / "tests").mkdir()
     (target / "main.py").write_text(_main_template(), encoding="utf-8")
+    (target / "pyproject.toml").write_text(_project_pyproject_template(name), encoding="utf-8")
+    (target / "README.md").write_text(_project_readme_template(name), encoding="utf-8")
+    (target / ".gitignore").write_text(_gitignore_template(), encoding="utf-8")
+    (target / "tests" / "test_app.py").write_text(_project_test_template(), encoding="utf-8")
     typer.echo(f"Created FaNest application in {target}")
 
 
@@ -227,6 +230,15 @@ def _resolve_app_path(path: str, app_name: str = "app") -> str:
     if ":" in path:
         return path
     source = Path(path)
+    if not source.exists():
+        raise typer.BadParameter(f"Application file not found: {path}")
+    if source.is_dir():
+        for candidate in [source / "main.py", source / "src" / "main.py"]:
+            if candidate.exists():
+                source = candidate
+                break
+        else:
+            raise typer.BadParameter(f"No main.py found in application directory: {path}")
     if source.suffix == ".py":
         source = source.with_suffix("")
     parts = [part for part in source.parts if part not in {".", ""}]
@@ -296,6 +308,74 @@ class AppModule:
 
 
 app = FaNestFactory.create(AppModule)
+'''
+
+
+def _project_pyproject_template(name: str) -> str:
+    package_name = name.replace("_", "-")
+    return f'''[project]
+name = "{package_name}"
+version = "0.1.0"
+description = "A FaNest application"
+requires-python = ">=3.11"
+dependencies = [
+    "fanest",
+    "uvicorn[standard]",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "httpx",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+'''
+
+
+def _project_readme_template(name: str) -> str:
+    return f'''# {name}
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+fanest dev main.py
+```
+
+Open `http://127.0.0.1:8000/docs`.
+'''
+
+
+def _gitignore_template() -> str:
+    return '''.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+.env
+dist/
+build/
+*.egg-info/
+'''
+
+
+def _project_test_template() -> str:
+    return '''from fastapi.testclient import TestClient
+
+from main import app
+
+
+def test_app_index():
+    response = TestClient(app).get("/")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
 '''
 
 

@@ -17,6 +17,22 @@ def test_cli_dry_run_does_not_write_files(tmp_path, monkeypatch):
     assert not (tmp_path / "src").exists()
 
 
+def test_cli_new_generates_runnable_project_scaffold(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["new", "blog_api"])
+
+    assert result.exit_code == 0
+    assert (tmp_path / "blog_api/main.py").exists()
+    assert (tmp_path / "blog_api/pyproject.toml").exists()
+    assert (tmp_path / "blog_api/.gitignore").exists()
+    assert (tmp_path / "blog_api/tests/test_app.py").exists()
+    pyproject = (tmp_path / "blog_api/pyproject.toml").read_text(encoding="utf-8")
+    assert 'name = "blog-api"' in pyproject
+    assert '"uvicorn[standard]"' in pyproject
+
+
 def test_cli_generates_resource_and_extra_artifacts(tmp_path, monkeypatch):
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
@@ -88,14 +104,18 @@ def test_cli_generates_workspace_and_library(tmp_path, monkeypatch):
     assert (tmp_path / "acme/libs/common/common_module.py").exists()
 
 
-def test_cli_dev_and_run_accept_file_paths(monkeypatch):
+def test_cli_dev_and_run_accept_file_paths(tmp_path, monkeypatch):
     calls = []
 
     def fake_run_uvicorn(app_path, **options):
         calls.append((app_path, options))
 
     monkeypatch.setattr(cli_main, "_run_uvicorn", fake_run_uvicorn)
+    monkeypatch.chdir(tmp_path)
     runner = CliRunner()
+    Path("main.py").write_text("app = None\n", encoding="utf-8")
+    Path("src").mkdir(exist_ok=True)
+    Path("src/main.py").write_text("application = None\n", encoding="utf-8")
 
     dev = runner.invoke(app, ["dev", "main.py", "--port", "9000"])
     run = runner.invoke(app, ["run", "src/main.py", "--app", "application", "--workers", "2"])
@@ -107,3 +127,14 @@ def test_cli_dev_and_run_accept_file_paths(monkeypatch):
         "src.main:application",
         {"host": "0.0.0.0", "port": 8000, "reload": False, "workers": 2},
     )
+
+
+def test_cli_dev_reports_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_main, "_run_uvicorn", lambda *args, **kwargs: None)
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["dev", "missing.py"])
+
+    assert result.exit_code != 0
+    assert "Application file not found" in result.output

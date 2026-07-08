@@ -3,7 +3,14 @@ from dataclasses import dataclass
 from typing import Any, get_type_hints
 
 from fanest.common.middleware import MiddlewareConsumer
-from fanest.core.metadata import ModuleMetadata, ProviderDefinition
+from fanest.core.metadata import (
+    ExistingProvider,
+    FactoryProvider,
+    ForwardRef,
+    InjectMarker,
+    ModuleMetadata,
+    ProviderDefinition,
+)
 
 
 @dataclass
@@ -51,6 +58,7 @@ class ModuleScanner:
         self._validate_module_boundaries()
 
     def _scan_module(self, module: type) -> None:
+        module = self._unwrap_module(module)
         if module in self._seen_modules:
             return
         self._seen_modules.add(module)
@@ -82,6 +90,7 @@ class ModuleScanner:
     def _visible_tokens(self, record: ModuleRecord) -> set[Any]:
         visible = set(record.local_tokens)
         for imported_module in record.metadata.imports:
+            imported_module = self._unwrap_module(imported_module)
             imported_record = self.records[imported_module]
             visible.update(imported_record.export_tokens)
         for global_record in self.records.values():
@@ -92,6 +101,13 @@ class ModuleScanner:
     def _validate_target_dependencies(
         self, record: ModuleRecord, target: ProviderDefinition, visible_tokens: set[Any]
     ) -> None:
+        if isinstance(target, FactoryProvider):
+            for dependency in target.inject:
+                self._validate_dependency(record, dependency, visible_tokens, target.provide)
+            return
+        if isinstance(target, ExistingProvider):
+            self._validate_dependency(record, target.use_existing, visible_tokens, target.provide)
+            return
         target_type = self._target_type(target)
         if target_type is None:
             return
@@ -104,22 +120,33 @@ class ModuleScanner:
             ):
                 continue
             default = parameter.default
-            dependency = getattr(default, "token", None)
+            explicit_inject = isinstance(default, InjectMarker)
+            dependency = default.token if explicit_inject else None
             if dependency is None:
                 dependency = type_hints.get(name, parameter.annotation)
             if dependency is inspect.Parameter.empty:
                 continue
             if getattr(default, "optional", False):
                 continue
-            if default is not inspect.Parameter.empty:
+            if default is not inspect.Parameter.empty and not explicit_inject:
                 continue
-            if inspect.isclass(dependency) and dependency not in self._all_provider_tokens():
-                continue
-            if dependency not in visible_tokens:
-                raise TypeError(
-                    f"{target_type.__name__} in {record.module.__name__} depends on {dependency!r}, "
-                    "but that provider is not local or exported by an imported module."
-                )
+            self._validate_dependency(record, dependency, visible_tokens, target_type.__name__)
+
+    def _validate_dependency(
+        self,
+        record: ModuleRecord,
+        dependency: Any,
+        visible_tokens: set[Any],
+        target_name: Any,
+    ) -> None:
+        dependency = self._unwrap_token(dependency)
+        if inspect.isclass(dependency) and dependency not in self._all_provider_tokens():
+            return
+        if dependency not in visible_tokens:
+            raise TypeError(
+                f"{target_name} in {record.module.__name__} depends on {dependency!r}, "
+                "but that provider is not local or exported by an imported module."
+            )
 
     def _target_type(self, target: ProviderDefinition) -> type | None:
         use_class = getattr(target, "use_class", None)
@@ -134,6 +161,16 @@ class ModuleScanner:
         for record in self.records.values():
             tokens.update(record.local_tokens)
         return tokens
+
+    def _unwrap_module(self, module: Any) -> type:
+        if isinstance(module, ForwardRef):
+            return module.factory()
+        return module
+
+    def _unwrap_token(self, token: Any) -> Any:
+        if isinstance(token, ForwardRef):
+            return token.factory()
+        return token
 
     def _configured_middlewares(self, module: type) -> list[Any]:
         configure = getattr(module, "configure", None)
