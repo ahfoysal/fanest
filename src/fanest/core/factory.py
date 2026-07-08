@@ -8,7 +8,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from fanest.core.container import FaNestContainer
-from fanest.core.metadata import ProviderDefinition
+from fanest.core.discovery import DiscoveryService
+from fanest.core.metadata import ProviderDefinition, ValueProvider
 from fanest.core.scanner import ModuleScanner
 from fanest.common.middleware import FaNestMiddlewareAdapter
 from fanest.platform_fastapi.adapter import FastApiAdapter
@@ -45,6 +46,12 @@ class FaNestFactory:
         container = FaNestContainer()
         for provider in scanner.providers:
             container.register(provider)
+        container.register(
+            ValueProvider(
+                provide=DiscoveryService,
+                use_value=DiscoveryService(container, scanner.providers, scanner.controllers),
+            )
+        )
         for token, value in (overrides or {}).items():
             container.override(token, value)
 
@@ -62,6 +69,8 @@ class FaNestFactory:
             from fanest.platform_fastapi.modules import serve_static
 
             serve_static(app, static_asset["path"], static_asset["directory"], name=static_asset["name"])
+        for middleware in scanner.app_middlewares:
+            app.add_middleware(middleware["class"], **middleware["options"])
         if cors:
             options = cors if isinstance(cors, dict) else {}
             app.add_middleware(

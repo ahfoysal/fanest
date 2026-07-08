@@ -40,6 +40,8 @@ from fanest.common.decorators import (
 )
 from fanest.common.exceptions import (
     BadRequestException,
+    BaseExceptionFilter,
+    Catch,
     ConflictException,
     FaNestHttpException,
     ForbiddenException,
@@ -72,9 +74,11 @@ from fanest.common.serialization import ClassSerializerInterceptor, Serialize
 
 __all__ = [
     "BadRequestException",
+    "BaseExceptionFilter",
     "All",
     "BackgroundTasks",
     "Body",
+    "Catch",
     "ConflictException",
     "Controller",
     "ClassSerializerInterceptor",

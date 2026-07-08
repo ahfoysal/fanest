@@ -40,6 +40,8 @@ from fanest.common.decorators import (
 )
 from fanest.common.exceptions import (
     BadRequestException,
+    BaseExceptionFilter,
+    Catch,
     ConflictException,
     FaNestHttpException,
     ForbiddenException,
@@ -71,8 +73,10 @@ from fanest.common.responses import StreamableFile
 from fanest.common.serialization import ClassSerializerInterceptor, Serialize
 from fanest.core.application import FaNestApplication
 from fanest.core.factory import FaNestFactory
+from fanest.core.discovery import DiscoveryService, DiscoveredProvider
 from fanest.core.module import Global, Module
 from fanest.core.module_ref import ModuleRef
+from fanest.core.reflector import Reflector
 from fanest.core.providers import (
     Inject,
     Optional,
@@ -88,6 +92,7 @@ from fanest.websockets import WebSocketManager
 
 __all__ = [
     "BadRequestException",
+    "BaseExceptionFilter",
     "All",
     "BackgroundTasks",
     "Controller",
@@ -95,6 +100,8 @@ __all__ = [
     "ClassSerializerInterceptor",
     "ConflictException",
     "Delete",
+    "DiscoveredProvider",
+    "DiscoveryService",
     "DefaultValuePipe",
     "FaNestFactory",
     "FaNestApplication",
@@ -139,6 +146,7 @@ __all__ = [
     "Query",
     "Req",
     "Redirect",
+    "Reflector",
     "Render",
     "ResponseModel",
     "Res",
@@ -162,6 +170,7 @@ __all__ = [
     "ValidationPipe",
     "Version",
     "Body",
+    "Catch",
     "WebSocketGateway",
     "WebSocketManager",
     "create_param_decorator",

@@ -476,6 +476,9 @@ class FastApiAdapter:
     ) -> Any:
         for exception_filter in self._collect(controller, handler, "__fanest_filters__"):
             instance = self._resolve_component(exception_filter)
+            catch_types = getattr(instance.__class__, "__fanest_catch_exceptions__", (Exception,))
+            if not isinstance(exc, catch_types):
+                continue
             result = instance.catch(exc, context)
             if inspect.isawaitable(result):
                 result = await result

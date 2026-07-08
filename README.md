@@ -113,6 +113,7 @@ It shows:
 - file validation pipes
 - response headers, SSE, and streaming files
 - rendered templates and static assets
+- session cookies and security headers
 - custom parameter decorators
 - config module
 - async module configuration
@@ -122,6 +123,9 @@ It shows:
 - cache stores
 - throttling guard
 - Swagger document setup and security schemes
+- typed exception filters
+- Reflector and discovery services
+- health indicators
 - GraphQL resolvers
 - health endpoint
 - SQLAlchemy module wiring
@@ -252,6 +256,8 @@ The repository already contains first-party package starts:
 fanest.core              modules, DI, scanner, app factory
 fanest.common            decorators, exceptions, pipes
 fanest.platform_fastapi  FastAPI adapter
+fanest.session           signed cookie sessions
+fanest.security          helmet-style security headers
 fanest.config            ConfigModule and ConfigService
 fanest.swagger           decorators, DocumentBuilder, SwaggerModule
 fanest.auth              JWT service, auth guard, roles guard
@@ -269,6 +275,7 @@ fanest.graphql           resolvers, queries, mutations, GraphQL endpoint
 fanest.microservices     message/event patterns and named transports
 fanest.mapped_types      PartialType, PickType, OmitType, IntersectionType
 fanest.health            health endpoint module
+fanest.discovery/core    Reflector and DiscoveryService
 fanest.testing           TestingModule and provider overrides
 ```
 
@@ -404,6 +411,7 @@ Current:
 - request binding
 - versioned routes, status codes, redirects, response headers, SSE, streaming files
 - rendered templates and static asset module
+- signed sessions and security headers
 - middleware
 - route-scoped middleware with exclusions
 - file upload binding
@@ -412,6 +420,8 @@ Current:
 - mapped DTO helpers
 - response serialization
 - guards, pipes, interceptors, filters
+- `@Catch` typed exception filters
+- Reflector and DiscoveryService
 - Swagger helpers and security schemes
 - JWT auth and roles
 - cache and throttling
@@ -428,6 +438,7 @@ Current:
 - Mongo-style package start
 - cache store adapters
 - health checks
+- health indicators
 - testing utilities
 - CLI generators
 
@@ -447,7 +458,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 69 passed
+# 74 passed
 ```
 
 ## License

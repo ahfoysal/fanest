@@ -61,3 +61,16 @@ class InternalServerErrorException(FaNestHttpException):
 class ServiceUnavailableException(FaNestHttpException):
     def __init__(self, detail: Any = "Service Unavailable"):
         super().__init__(503, detail)
+
+
+def Catch(*exceptions: type[Exception]):
+    def decorator(cls):
+        setattr(cls, "__fanest_catch_exceptions__", exceptions or (Exception,))
+        return cls
+
+    return decorator
+
+
+class BaseExceptionFilter:
+    def catch(self, exc: Exception, context):
+        raise exc
