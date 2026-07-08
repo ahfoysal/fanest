@@ -1,3 +1,4 @@
+import json
 import time
 from typing import Any, Protocol
 
@@ -42,10 +43,44 @@ class MemoryCacheStore:
         self._store.pop(key, None)
 
 
-class RedisCacheStore(MemoryCacheStore):
-    def __init__(self, *, url: str = "redis://localhost:6379/0") -> None:
-        super().__init__()
+class RedisCacheStore:
+    """A real Redis-backed cache store (requires the ``redis`` package).
+
+    Values are JSON-serialized. Keys are namespaced by ``prefix`` so ``clear()``
+    only removes this cache's entries (never a blind ``FLUSHDB``).
+    """
+
+    def __init__(self, *, url: str = "redis://localhost:6379/0", prefix: str = "fanest:cache:") -> None:
+        try:
+            import redis
+        except ImportError as exc:  # pragma: no cover - exercised without redis installed
+            raise ImportError(
+                "RedisCacheStore requires the 'redis' package. "
+                "Install it with: pip install 'fanest[redis]'"
+            ) from exc
         self.url = url
+        self.prefix = prefix
+        self._client = redis.Redis.from_url(url)
+
+    def _key(self, key: str) -> str:
+        return f"{self.prefix}{key}"
+
+    def get(self, key: str) -> Any | None:
+        raw = self._client.get(self._key(key))
+        if raw is None:
+            return None
+        return json.loads(raw)
+
+    def set(self, key: str, value: Any, ttl: int | None = None) -> None:
+        data = json.dumps(value)
+        self._client.set(self._key(key), data, ex=int(ttl) if ttl else None)
+
+    def delete(self, key: str) -> None:
+        self._client.delete(self._key(key))
+
+    def clear(self) -> None:
+        for key in self._client.scan_iter(match=f"{self.prefix}*"):
+            self._client.delete(key)
 
 
 @Injectable()

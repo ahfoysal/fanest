@@ -37,6 +37,12 @@ dependencies = [
 standard = [
     "uvicorn[standard]>=0.30.0",
 ]
+redis = [
+    "redis>=5.0.0",
+]
+mongo = [
+    "motor>=3.0.0",
+]
 dev = [
     "build>=1.2.0",
     "pyright>=1.1.411",
