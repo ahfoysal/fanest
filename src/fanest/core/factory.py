@@ -97,6 +97,7 @@ class FaNestFactory:
                 FaNestFactory._register_events(container, instance)
                 FaNestFactory._register_queue_processors(container, instance)
                 FaNestFactory._register_graphql_resolver(container, instance)
+                FaNestFactory._register_cqrs_handlers(container, instance)
                 hook = getattr(instance, "on_module_init", None)
                 if hook is not None:
                     await FaNestFactory._call_lifecycle_hook(hook)
@@ -175,3 +176,25 @@ class FaNestFactory:
         except Exception:
             return
         schema.register_resolver(instance)
+
+    @staticmethod
+    def _register_cqrs_handlers(container: FaNestContainer, instance: object) -> None:
+        from fanest.cqrs import CommandBus, EventBus, QueryBus
+
+        command = getattr(instance.__class__, "__fanest_command_handler__", None)
+        if command is not None:
+            try:
+                container.resolve(CommandBus).register(command, instance)
+            except Exception:
+                pass
+        query = getattr(instance.__class__, "__fanest_query_handler__", None)
+        if query is not None:
+            try:
+                container.resolve(QueryBus).register(query, instance)
+            except Exception:
+                pass
+        for event in getattr(instance.__class__, "__fanest_event_handlers__", []):
+            try:
+                container.resolve(EventBus).register(event, instance)
+            except Exception:
+                pass
