@@ -5,7 +5,10 @@ from typing import Any
 from fanest import Body, Controller, Injectable, Module, Post
 
 
-def Resolver(cls):
+def Resolver(cls=None):
+    # Accept both `@Resolver` and `@Resolver()` so the wrong form does not raise.
+    if cls is None:
+        return Resolver
     return Injectable()(cls)
 
 

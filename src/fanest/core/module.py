@@ -36,7 +36,10 @@ def Module(
     return decorator
 
 
-def Global(cls: type[T]) -> type[T]:
+def Global(cls: type[T] | None = None) -> Any:
+    # Accept both `@Global` and `@Global()` so the wrong form does not raise.
+    if cls is None:
+        return Global
     metadata = getattr(cls, "__fanest_module__", None)
     if metadata is None:
         raise TypeError(f"{cls.__name__} is not a FaNest module. Add @Module(...) before @Global.")
