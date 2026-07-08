@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from fanest import Controller, FaNestFactory, Get, Module, SetHeader, Sse, StreamableFile
+from fanest import Controller, FaNestFactory, Get, Module, Res, SetHeader, Sse, StreamableFile
 
 
 @Controller("responses")
@@ -19,6 +19,16 @@ class ResponseController:
     @Sse("/events")
     async def events(self):
         yield {"event": "message", "data": {"text": "hello"}}
+
+    @Get("/manual")
+    async def manual(self, response=Res()):
+        response.status_code = 204
+        response.headers["x-manual"] = "yes"
+
+    @Get("/passthrough")
+    async def passthrough(self, response=Res(passthrough=True)):
+        response.headers["x-pass"] = "yes"
+        return {"ok": True}
 
 
 @Module(controllers=[ResponseController])
@@ -54,3 +64,16 @@ def test_sse_decorator_formats_event_streams():
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.headers["x-sse"] == "yes"
     assert 'event: message\ndata: {"text": "hello"}' in response.text
+
+
+def test_response_decorator_supports_manual_and_passthrough_modes():
+    client = TestClient(FaNestFactory.create(ResponseModule))
+
+    manual = client.get("/responses/manual")
+    passthrough = client.get("/responses/passthrough")
+
+    assert manual.status_code == 204
+    assert manual.text == ""
+    assert manual.headers["x-manual"] == "yes"
+    assert passthrough.json() == {"ok": True}
+    assert passthrough.headers["x-pass"] == "yes"

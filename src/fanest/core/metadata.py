@@ -12,6 +12,7 @@ class RouteMetadata:
 @dataclass(frozen=True)
 class ControllerMetadata:
     prefix: str = ""
+    host: str | None = None
 
 
 @dataclass(frozen=True)

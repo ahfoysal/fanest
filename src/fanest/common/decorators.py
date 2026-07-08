@@ -21,9 +21,9 @@ def Injectable(scope: str = "singleton") -> Callable[[type[T]], type[T]]:
     return decorator
 
 
-def Controller(prefix: str = "") -> Callable[[type[T]], type[T]]:
+def Controller(prefix: str = "", *, host: str | None = None) -> Callable[[type[T]], type[T]]:
     def decorator(cls: type[T]) -> type[T]:
-        setattr(cls, "__fanest_controller__", ControllerMetadata(prefix=prefix))
+        setattr(cls, "__fanest_controller__", ControllerMetadata(prefix=prefix, host=host))
         setattr(cls, "__fanest_provider__", ProviderMetadata(scope="request"))
         return cls
 
@@ -213,8 +213,8 @@ def Req() -> ParameterSource:
     return ParameterSource(source="request")
 
 
-def Res() -> ParameterSource:
-    return ParameterSource(source="response")
+def Res(*, passthrough: bool = False) -> ParameterSource:
+    return ParameterSource(source="response", default={"passthrough": passthrough})
 
 
 def Ip() -> ParameterSource:

@@ -226,7 +226,9 @@ class FastApiAdapter:
                 )
                 context.kwargs.update(self._bind_ip_parameters(handler, request, context.kwargs))
                 context.kwargs.update(self._bind_session_parameters(handler, request, context.kwargs))
-                context.kwargs.update(self._bind_host_parameters(handler, request, context.kwargs))
+                context.kwargs.update(
+                    self._bind_host_parameters(controller, handler, request, context.kwargs)
+                )
                 context.kwargs.update(self._bind_state_parameters(handler, request, kwargs))
                 context.kwargs.update(self._bind_custom_parameters(handler, context, kwargs))
                 kwargs = await self._run_pipes(controller, handler, context)
@@ -235,6 +237,8 @@ class FastApiAdapter:
                     result = handler(**kwargs)
                     if inspect.isawaitable(result):
                         result = await result
+                    if result is None and self._uses_manual_response(handler):
+                        return response
                     response_headers = dict(self._response_headers(controller, handler))
                     for name, value in response_headers.items():
                         response.headers[name] = value
@@ -482,6 +486,13 @@ class FastApiAdapter:
                 bound[name] = response
         return bound
 
+    def _uses_manual_response(self, handler: Callable[..., Any]) -> bool:
+        for parameter in inspect.signature(handler).parameters.values():
+            source = parameter.default
+            if isinstance(source, ParameterSource) and source.source == "response":
+                return not source.default.get("passthrough", False)
+        return False
+
     def _bind_background_tasks_parameters(
         self,
         handler: Callable[..., Any],
@@ -506,21 +517,42 @@ class FastApiAdapter:
         return bound
 
     def _bind_host_parameters(
-        self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
+        self, controller: Any, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
         bound = dict(kwargs)
         hostname = request.url.hostname
         parts = hostname.split(".") if hostname else []
+        host_params = self._host_params(controller, hostname)
         for name, parameter in inspect.signature(handler).parameters.items():
             source = parameter.default
             if isinstance(source, ParameterSource) and source.source == "host":
                 if source.name is None:
                     bound[name] = hostname
+                elif source.name in host_params:
+                    bound[name] = host_params[source.name]
                 elif source.name.isdigit():
                     bound[name] = parts[int(source.name)] if int(source.name) < len(parts) else source.default
                 else:
                     bound[name] = source.default
         return bound
+
+    def _host_params(self, controller: Any, hostname: str | None) -> dict[str, str]:
+        metadata: ControllerMetadata | None = getattr(controller.__class__, "__fanest_controller__", None)
+        if metadata is None or metadata.host is None or hostname is None:
+            return {}
+        pattern_parts = metadata.host.split(".")
+        host_parts = hostname.split(".")
+        if len(pattern_parts) != len(host_parts):
+            return {}
+        params: dict[str, str] = {}
+        for pattern, value in zip(pattern_parts, host_parts, strict=True):
+            if (pattern.startswith(":") and len(pattern) > 1):
+                params[pattern[1:]] = value
+            elif pattern.startswith("{") and pattern.endswith("}"):
+                params[pattern[1:-1]] = value
+            elif pattern != value:
+                return {}
+        return params
 
     def _bind_session_parameters(
         self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]

@@ -10,6 +10,7 @@ from fanest import (
     Form,
     Get,
     Head,
+    HostParam,
     Ip,
     Module,
     Options,
@@ -63,7 +64,14 @@ class HttpParityController:
         return {"name": name}
 
 
-@Module(controllers=[HttpParityController])
+@Controller("tenant", host=":account.example.com")
+class HostController:
+    @Get("/")
+    async def index(self, account: str = HostParam("account")):
+        return {"account": account}
+
+
+@Module(controllers=[HttpParityController, HostController])
 class HttpParityModule:
     pass
 
@@ -81,3 +89,4 @@ def test_http_method_response_model_version_ip_session_background_and_form():
     assert client.get("/v1/parity/task").json() == {"queued": True}
     assert HttpParityController.tasks == ["ran"]
     assert client.request("GET", "/v1/parity/form", data={"name": "Ada"}).json() == {"name": "Ada"}
+    assert client.get("/tenant", headers={"host": "acme.example.com"}).json() == {"account": "acme"}
