@@ -8,13 +8,18 @@ from fanest import (
     Get,
     Inject,
     Injectable,
+    MaxFileSizeValidator,
     Module,
     NotFoundException,
     Param,
+    ParseFilePipe,
     Post,
     Query,
     Req,
+    SetHeader,
     SubscribeMessage,
+    Sse,
+    StreamableFile,
     UseFilters,
     UseGuards,
     UseInterceptors,
@@ -28,17 +33,27 @@ from fanest.auth import AuthModule, CurrentUser, JwtAuthGuard, JwtService, Roles
 from fanest.cache import CacheInterceptor, CacheModule, CacheTTL
 from fanest.config import ConfigModule, ConfigService
 from fanest.health import HealthModule
-from fanest.schedule import Cron, Interval
+from fanest.schedule import Cron, Interval, SchedulerRegistry, Timeout
 from fanest.sqlalchemy import SqlAlchemyModule
-from fanest.swagger import ApiBearerAuth, ApiOperation, ApiTags, DocumentBuilder, SwaggerModule
+from fanest.swagger import (
+    ApiBearerAuth,
+    ApiConsumes,
+    ApiHeader,
+    ApiOperation,
+    ApiProperty,
+    ApiTags,
+    DocumentBuilder,
+    SwaggerModule,
+)
 from fanest.throttler import Throttle, ThrottlerGuard, ThrottlerModule
+from fanest.websockets import WebSocketManager
 
 APP_NAME = "APP_NAME"
 
 
 class CreateUserDto(BaseModel):
-    email: EmailStr
-    name: str
+    email: EmailStr = ApiProperty(description="User email", example="ada@example.com")
+    name: str = ApiProperty(description="Display name", example="Ada")
 
 
 @Injectable()
@@ -104,6 +119,7 @@ class UsersController:
         return self.users_service.find_all(search)
 
     @ApiOperation(summary="Create a user")
+    @ApiHeader("x-request-id", "Optional request id")
     @UsePipes(ValidationPipe())
     @Post("/")
     async def create(self, dto: CreateUserDto = Body()):
@@ -113,9 +129,20 @@ class UsersController:
     async def find_one(self, user_id: int = Param()):
         return self.users_service.find_one(user_id)
 
+    @ApiConsumes("multipart/form-data")
+    @UsePipes(ParseFilePipe([MaxFileSizeValidator(1024 * 1024)]))
     @Post("/avatar")
     async def upload_avatar(self, file=UploadedFile()):
         return {"filename": file.filename}
+
+    @SetHeader("x-report", "users")
+    @Get("/report")
+    async def report(self):
+        return StreamableFile(b"id,name\n1,Ada\n", content_type="text/csv", filename="users.csv")
+
+    @Sse("/events")
+    async def events(self):
+        yield {"event": "users.updated", "data": {"count": len(self.users_service.users)}}
 
     @Get("/session")
     async def session(self, session_id: str | None = Cookie("session_id")):
@@ -148,13 +175,27 @@ class AdminController:
 
 @WebSocketGateway("/chat")
 class ChatGateway:
+    def __init__(self, manager: WebSocketManager):
+        self.manager = manager
+
+    async def on_connect(self, websocket):
+        self.manager.join("chat", websocket)
+
     @SubscribeMessage("echo")
     async def echo(self, data, websocket):
         return {"echo": data}
 
+    @SubscribeMessage("broadcast")
+    async def broadcast(self, data, websocket):
+        await self.manager.broadcast("chat", "message", data, exclude=websocket)
+        return {"sent": True}
+
 
 @Injectable()
 class JobsService:
+    def __init__(self, registry: SchedulerRegistry):
+        self.registry = registry
+
     @Interval(30)
     async def heartbeat(self):
         return None
@@ -162,6 +203,10 @@ class JobsService:
     @Cron("*/60 * * * * *")
     async def cleanup(self):
         return None
+
+    @Timeout(5, name="startup-check")
+    async def startup_check(self):
+        return self.registry.get("startup-check").name
 
 
 @Module(

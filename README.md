@@ -110,8 +110,11 @@ It shows:
 - custom provider tokens
 - middleware
 - file uploads
+- file validation pipes
+- response headers, SSE, and streaming files
 - custom parameter decorators
 - config module
+- async module configuration
 - JWT auth
 - role guards
 - cache interceptor
@@ -121,8 +124,9 @@ It shows:
 - SQLAlchemy module wiring
 - interval jobs
 - cron jobs
+- timeout jobs and scheduler registry
 - microservice message/event patterns
-- WebSocket gateway
+- WebSocket gateway with rooms/broadcasting
 - global prefix, CORS, and global pipes
 
 Run it:
@@ -158,6 +162,10 @@ fanest generate pipe validation
 fanest generate interceptor logging
 fanest generate filter http_error
 fanest generate gateway chat
+fanest generate dto users
+fanest generate middleware request_id
+fanest generate decorator current_user
+fanest generate resource users --dry-run
 ```
 
 ## Core Features
@@ -167,10 +175,11 @@ FaNest currently includes:
 - `@Module`
 - `@Controller`
 - `@Injectable`
-- `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`
-- `Body`, `Param`, `Query`, `Header`, `Req`
-- `Cookie`, `Res`, `UploadedFile`, `UploadedFiles`
-- `HttpCode`, `Redirect`, `SetMetadata`, `create_param_decorator`
+- `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`, `@Options`, `@Head`, `@All`
+- `Body`, `Param`, `Query`, `Header`, `Cookie`, `Req`, `Res`, `Ip`, `Session`
+- `UploadedFile`, `UploadedFiles`, `BackgroundTasks`, custom param decorators
+- `HttpCode`, `Redirect`, `SetHeader`, `SetMetadata`, `Version`, `ResponseModel`
+- `Sse` and `StreamableFile`
 - `UseGuards`
 - `UsePipes`
 - `UseInterceptors`
@@ -179,6 +188,8 @@ FaNest currently includes:
 - `SubscribeMessage`
 - `Interval`
 - `Cron`
+- `Timeout`
+- `Global`
 - `MessagePattern`
 - `EventPattern`
 - lifecycle hooks: `on_module_init`, `on_application_shutdown`
@@ -216,9 +227,13 @@ Supported provider types:
 - class providers
 - value providers
 - factory providers
+- async factory providers
 - existing provider aliases
 - injection tokens
 - optional injection
+- singleton, request, and transient scopes
+- `forward_ref`
+- global modules
 - provider overrides in tests
 
 ## Packages
@@ -235,7 +250,8 @@ fanest.auth              JWT service, auth guard, roles guard
 fanest.sqlalchemy        async SQLAlchemy module and repositories
 fanest.cache             cache service and cache interceptor
 fanest.throttler         throttling module and guard
-fanest.schedule          interval and cron jobs
+fanest.schedule          interval, cron, timeout jobs, scheduler registry
+fanest.websockets        connection manager, rooms, broadcasting
 fanest.microservices     in-memory client/server, message and event patterns
 fanest.mapped_types      PartialType, PickType, OmitType, IntersectionType
 fanest.health            health endpoint module
@@ -249,7 +265,14 @@ Pipes:
 - `ValidationPipe`
 - `ParseIntPipe`
 - `ParseBoolPipe`
+- `ParseFloatPipe`
+- `ParseUUIDPipe`
+- `ParseEnumPipe`
+- `ParseArrayPipe`
 - `DefaultValuePipe`
+- `ParseFilePipe`
+- `MaxFileSizeValidator`
+- `FileTypeValidator`
 
 Exceptions:
 
@@ -259,6 +282,9 @@ Exceptions:
 - `NotFoundException`
 - `ConflictException`
 - `InternalServerErrorException`
+- `UnprocessableEntityException`
+- `TooManyRequestsException`
+- `ServiceUnavailableException`
 
 ## Swagger
 
@@ -277,6 +303,10 @@ config = (
 document = SwaggerModule.create_document(app, config)
 SwaggerModule.setup("/docs", app, document)
 ```
+
+Swagger decorators include `ApiTags`, `ApiOperation`, `ApiParam`, `ApiQuery`, `ApiHeader`,
+`ApiBody`, `ApiResponse`, `ApiConsumes`, `ApiProduces`, `ApiBearerAuth`, `ApiExcludeEndpoint`,
+and `ApiProperty`.
 
 ## Mapped Types
 
@@ -345,11 +375,14 @@ FaNest is aiming at the full NestJS surface area. The current implementation cov
 Current:
 
 - modules, controllers, providers
-- DI with custom providers
+- DI with custom, async, scoped, optional, and aliased providers
+- global modules and exported module boundaries
 - REST decorators
 - request binding
+- versioned routes, status codes, redirects, response headers, SSE, streaming files
 - middleware
 - file upload binding
+- file validation
 - custom param decorators
 - mapped DTO helpers
 - response serialization
@@ -357,8 +390,8 @@ Current:
 - Swagger helpers
 - JWT auth and roles
 - cache and throttling
-- WebSocket gateways
-- cron and interval jobs
+- WebSocket gateways and room broadcasting
+- cron, interval, timeout jobs, and scheduler registry
 - microservice message/event patterns
 - SQLAlchemy package start
 - health checks
@@ -367,9 +400,6 @@ Current:
 
 Still to deepen:
 
-- request-scoped and transient providers
-- `forwardRef` circular dependency handling
-- richer module export enforcement
 - middleware consumer API with route exclusions
 - GraphQL module
 - more microservice transports
