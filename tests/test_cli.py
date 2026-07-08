@@ -1,6 +1,9 @@
 from pathlib import Path
+import socket
 import sys
 
+import pytest
+import typer
 from typer.testing import CliRunner
 
 from fanest.cli import main as cli_main
@@ -186,11 +189,59 @@ def test_cli_dev_and_run_accept_file_paths(tmp_path, monkeypatch):
 
     assert dev.exit_code == 0
     assert run.exit_code == 0
-    assert calls[0] == ("main:app", {"host": "127.0.0.1", "port": 9000, "reload": True})
+    assert calls[0] == (
+        "main:app",
+        {"host": "127.0.0.1", "port": 9000, "reload": True},
+    )
     assert calls[1] == (
         "src.main:application",
         {"host": "0.0.0.0", "port": 8000, "reload": False, "workers": 2},
     )
+
+
+def test_cli_uvicorn_runner_sets_app_dir_to_current_directory(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeUvicorn:
+        @staticmethod
+        def run(app_path, **options):
+            calls.append((app_path, options))
+
+    monkeypatch.setitem(sys.modules, "uvicorn", FakeUvicorn)
+    monkeypatch.chdir(tmp_path)
+
+    cli_main._run_uvicorn("main:app", host="127.0.0.1", port=0, reload=True)
+
+    assert calls == [
+        (
+                "main:app",
+                {
+                    "host": "127.0.0.1",
+                    "port": 0,
+                    "reload": True,
+                    "app_dir": str(tmp_path),
+                },
+        )
+    ]
+
+
+def test_cli_uvicorn_runner_reports_port_in_use(monkeypatch, capsys):
+    class FakeUvicorn:
+        @staticmethod
+        def run(app_path, **options):
+            raise AssertionError("uvicorn should not start when the port is unavailable")
+
+    monkeypatch.setitem(sys.modules, "uvicorn", FakeUvicorn)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+
+        with pytest.raises(typer.Exit):
+            cli_main._run_uvicorn("main:app", host="127.0.0.1", port=port, reload=True)
+
+    captured = capsys.readouterr()
+    assert f"Port {port} is already in use. Try running with --port {port + 1}." in captured.err
 
 
 def test_cli_dev_reports_missing_file(tmp_path, monkeypatch):

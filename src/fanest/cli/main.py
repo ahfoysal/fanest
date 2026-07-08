@@ -1,9 +1,11 @@
 from pathlib import Path
 import compileall
+import errno
 import importlib
 import importlib.util
 import platform
 import re
+import socket
 import sys
 from typing import Any
 
@@ -76,9 +78,7 @@ def start(
     port: int = 8000,
     reload: bool = True,
 ) -> None:
-    import uvicorn
-
-    uvicorn.run(app_path, host=host, port=port, reload=reload)
+    _run_uvicorn(app_path, host=host, port=port, reload=reload)
 
 
 @app.command()
@@ -364,7 +364,37 @@ def _resolve_app_path(path: str, app_name: str = "app") -> str:
 def _run_uvicorn(app_path: str, **options: Any) -> None:
     import uvicorn
 
-    uvicorn.run(app_path, **options)
+    options.setdefault("app_dir", str(Path.cwd()))
+    _ensure_port_available(str(options.get("host", "127.0.0.1")), int(options.get("port", 8000)))
+    try:
+        uvicorn.run(app_path, **options)
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            _port_in_use_error(int(options.get("port", 8000)))
+        raise
+
+
+def _ensure_port_available(host: str, port: int) -> None:
+    if port == 0:
+        return
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    bind_host = "::" if family == socket.AF_INET6 and host in {"0.0.0.0", ""} else host
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((bind_host, port))
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                _port_in_use_error(port)
+            raise
+
+
+def _port_in_use_error(port: int) -> None:
+    typer.secho(
+        f"Port {port} is already in use. Try running with --port {port + 1}.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    raise typer.Exit(1)
 
 
 def _register_module_import(parent_module: str, child_name: str, child_class: str, dry_run: bool) -> None:
