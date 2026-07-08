@@ -35,6 +35,8 @@ class FastApiAdapter:
         global_pipes: list[object] | None = None,
         global_interceptors: list[object] | None = None,
         global_filters: list[object] | None = None,
+        controller_modules: dict[type, Any] | None = None,
+        gateway_modules: dict[type, Any] | None = None,
     ) -> None:
         self.app = app
         self.container = container
@@ -43,6 +45,8 @@ class FastApiAdapter:
         self.global_pipes = global_pipes or []
         self.global_interceptors = global_interceptors or []
         self.global_filters = global_filters or []
+        self.controller_modules = controller_modules or {}
+        self.gateway_modules = gateway_modules or {}
         self._parameter_cache: dict[Any, dict[str, inspect.Parameter]] = {}
 
     def register_controllers(self, controllers: list[type]) -> None:
@@ -77,7 +81,12 @@ class FastApiAdapter:
                 controller_metadata.prefix,
                 route_metadata.path,
             )
-            endpoint = self._endpoint(controller, handler.__name__, handler)
+            endpoint = self._endpoint(
+                controller,
+                handler.__name__,
+                handler,
+                module_key=self.controller_modules.get(controller),
+            )
             route_options = dict(route_metadata.options)
             tags = getattr(controller, "__fanest_swagger_tags__", None)
             if tags and "tags" not in route_options:
@@ -122,7 +131,8 @@ class FastApiAdapter:
         if gateway_metadata is None:
             raise TypeError(f"{gateway.__name__} is not a FaNest gateway.")
 
-        instance = self.container.resolve(gateway)
+        module_key = self.gateway_modules.get(gateway)
+        instance = self.container.resolve(gateway, module_key=module_key)
         handlers: dict[str, Callable[..., Any]] = {}
         for _, handler in inspect.getmembers(instance, predicate=inspect.ismethod):
             message_metadata: MessageMetadata | None = getattr(handler, "__fanest_message__", None)
@@ -202,7 +212,11 @@ class FastApiAdapter:
         self.app.add_api_websocket_route(path, websocket_endpoint)
 
     def _endpoint(
-        self, controller_class: type, handler_name: str, handler_function: Callable[..., Any]
+        self,
+        controller_class: type,
+        handler_name: str,
+        handler_function: Callable[..., Any],
+        module_key: Any | None = None,
     ) -> Callable[..., Any]:
         async def endpoint(
             request: Request,
@@ -211,7 +225,7 @@ class FastApiAdapter:
             **kwargs: Any,
         ) -> Any:
             request_scope = self.container.begin_request()
-            controller = self.container.resolve(controller_class)
+            controller = self.container.resolve(controller_class, module_key=module_key)
             handler = getattr(controller, handler_name)
             context = ExecutionContext(
                 handler=handler,

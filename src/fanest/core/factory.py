@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fanest.core.container import FaNestContainer
 from fanest.core.discovery import DiscoveryService
 from fanest.core.enhancers import APP_ENHANCER_TOKENS, APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE
-from fanest.core.metadata import ProviderDefinition, ValueProvider
+from fanest.core.metadata import ValueProvider
 from fanest.core.scanner import ModuleScanner
 from fanest.common.middleware import FaNestMiddlewareAdapter
 from fanest.platform_fastapi.adapter import FastApiAdapter

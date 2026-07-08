@@ -14,6 +14,7 @@ from fanest.core.metadata import (
 from fanest.core.enhancers import APP_ENHANCER_TOKENS
 from fanest.core.module_ref import ModuleRef
 from fanest.core.reflector import Reflector
+from fanest.schedule.registry import SchedulerRegistry
 from fanest.websockets import SocketIoServer, WebSocketManager
 
 _request_instances: ContextVar[dict[Any, Any] | None] = ContextVar(
@@ -58,6 +59,7 @@ class FaNestContainer:
         self._resolving: set[Any] = set()
         self.register(ValueProvider(provide=ModuleRef, use_value=ModuleRef(self)))
         self.register(ValueProvider(provide=Reflector, use_value=Reflector()))
+        self.register(ValueProvider(provide=SchedulerRegistry, use_value=SchedulerRegistry()))
         websocket_manager = WebSocketManager()
         self.register(ValueProvider(provide=WebSocketManager, use_value=websocket_manager))
         self.register(ValueProvider(provide=SocketIoServer, use_value=SocketIoServer(websocket_manager)))
@@ -95,24 +97,30 @@ class FaNestContainer:
         _request_instances.reset(token)
 
     def override(self, token: Any, value: Any) -> None:
+        provider = self._override_provider(token, value)
         if token in APP_ENHANCER_TOKENS:
-            self._multi_providers[token] = [
-                value if isinstance(value, (ClassProvider, ValueProvider, FactoryProvider, ExistingProvider)) else ValueProvider(provide=token, use_value=value)
-            ]
+            self._multi_providers[token] = [provider]
             self._scope_cache.clear()
             return
-        if isinstance(value, (ClassProvider, ValueProvider, FactoryProvider, ExistingProvider)):
-            self._providers[token] = value
-            self._instances.pop(token, None)
-            self._invalidate_provider_cache(token)
-            return
-        if inspect.isclass(value):
-            self._providers[token] = ClassProvider(provide=token, use_class=value)
-            self._instances.pop(token, None)
-            self._invalidate_provider_cache(token)
-            return
-        self._instances[token] = value
+        replaced_module_provider = False
+        for module_key, providers in self._module_providers.items():
+            if token not in providers:
+                continue
+            providers[token] = provider
+            self._instances.pop(self._cache_key(module_key, token), None)
+            replaced_module_provider = True
+        self._providers[token] = provider
         self._invalidate_provider_cache(token)
+        self._instances.pop(token, None)
+        if not replaced_module_provider and isinstance(provider, ValueProvider):
+            self._instances[token] = provider.use_value
+
+    def _override_provider(self, token: Any, value: Any) -> ProviderDefinition:
+        if isinstance(value, (ClassProvider, ValueProvider, FactoryProvider, ExistingProvider)):
+            return value
+        if inspect.isclass(value):
+            return ClassProvider(provide=token, use_class=value)
+        return ValueProvider(provide=token, use_value=value)
 
     def resolve_all(self, token: Any) -> list[Any]:
         return [self._resolve_provider(provider) for provider in self._multi_providers.get(token, [])]
