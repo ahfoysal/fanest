@@ -71,3 +71,17 @@ def test_cli_register_module_dry_run_does_not_mutate_parent(tmp_path, monkeypatc
     assert result.exit_code == 0
     assert "Would update" in result.output
     assert app_module.read_text(encoding="utf-8") == original
+
+
+def test_cli_generates_workspace_and_library(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    workspace = runner.invoke(app, ["workspace", "acme"])
+    monkeypatch.chdir(tmp_path / "acme")
+    library = runner.invoke(app, ["generate", "library", "common"])
+
+    assert workspace.exit_code == 0
+    assert library.exit_code == 0
+    assert (tmp_path / "acme/apps/api/main.py").exists()
+    assert (tmp_path / "acme/libs/common/common_module.py").exists()

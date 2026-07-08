@@ -36,6 +36,42 @@ def ApiResponse(status_code: int, description: str | None = None, model: type | 
     return decorator
 
 
+def ApiOkResponse(description: str | None = None, model: type | None = None):
+    return ApiResponse(200, description, model)
+
+
+def ApiCreatedResponse(description: str | None = None, model: type | None = None):
+    return ApiResponse(201, description, model)
+
+
+def ApiAcceptedResponse(description: str | None = None, model: type | None = None):
+    return ApiResponse(202, description, model)
+
+
+def ApiNoContentResponse(description: str | None = None):
+    return ApiResponse(204, description)
+
+
+def ApiBadRequestResponse(description: str | None = None, model: type | None = None):
+    return ApiResponse(400, description, model)
+
+
+def ApiUnauthorizedResponse(description: str | None = None, model: type | None = None):
+    return ApiResponse(401, description, model)
+
+
+def ApiForbiddenResponse(description: str | None = None, model: type | None = None):
+    return ApiResponse(403, description, model)
+
+
+def ApiNotFoundResponse(description: str | None = None, model: type | None = None):
+    return ApiResponse(404, description, model)
+
+
+def ApiConflictResponse(description: str | None = None, model: type | None = None):
+    return ApiResponse(409, description, model)
+
+
 def ApiOperation(*, summary: str | None = None, description: str | None = None):
     def decorator(handler):
         _set_route_option(handler, "summary", summary)

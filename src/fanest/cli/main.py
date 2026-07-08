@@ -22,6 +22,26 @@ def new(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
 
 
 @app.command()
+def workspace(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    root = Path(name)
+    paths = [
+        root / "apps",
+        root / "libs",
+        root / "apps" / "api",
+        root / "apps" / "api" / "src",
+        root / "libs" / "common",
+    ]
+    if dry_run:
+        for path in paths:
+            typer.echo(f"Would create {path}")
+        return
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+    (root / "apps" / "api" / "main.py").write_text(_main_template(), encoding="utf-8")
+    typer.echo(f"Created FaNest workspace in {root}")
+
+
+@app.command()
 def start(
     app_path: str = "main:app",
     host: str = "127.0.0.1",
@@ -142,6 +162,15 @@ def generate_decorator(name: str, dry_run: bool = typer.Option(False, "--dry-run
     resource = _resource_dir(name, dry_run)
     _write_file(resource / f"{name}_decorator.py", _decorator_template(name), dry_run)
     typer.echo(f"Generated decorator {name}")
+
+
+@generate_app.command("library")
+def generate_library(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    target = Path("libs") / name
+    class_name = _class_name(name)
+    _write_file(target / "__init__.py", f"from .{name}_module import {class_name}Module\n", dry_run)
+    _write_file(target / f"{name}_module.py", _library_template(class_name), dry_run)
+    typer.echo(f"Generated library {name}")
 
 
 def _class_name(name: str) -> str:
@@ -334,4 +363,14 @@ def _decorator_template(name: str) -> str:
 
 
 {name} = create_param_decorator(lambda data, context: context.request.state)
+'''
+
+
+def _library_template(class_name: str) -> str:
+    return f'''from fanest import Module
+
+
+@Module()
+class {class_name}Module:
+    pass
 '''

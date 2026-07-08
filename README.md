@@ -167,6 +167,7 @@ WS   /api/chat
 
 ```bash
 fanest new blog-api
+fanest workspace acme-platform
 fanest start main:app --reload
 
 fanest generate resource users
@@ -181,6 +182,7 @@ fanest generate gateway chat
 fanest generate dto users
 fanest generate middleware request_id
 fanest generate decorator current_user
+fanest generate library common
 fanest generate resource users --dry-run
 fanest generate module users --module app_module.py
 ```
@@ -334,7 +336,8 @@ SwaggerModule.setup("/docs", app, document)
 
 Swagger decorators include `ApiTags`, `ApiOperation`, `ApiParam`, `ApiQuery`, `ApiHeader`,
 `ApiBody`, `ApiResponse`, `ApiConsumes`, `ApiProduces`, `ApiBearerAuth`, `ApiBasicAuth`,
-`ApiCookieAuth`, `ApiSecurity`, `ApiExcludeEndpoint`, and `ApiProperty`.
+`ApiCookieAuth`, `ApiSecurity`, response shortcuts such as `ApiOkResponse`,
+`ApiCreatedResponse`, `ApiNotFoundResponse`, `ApiExcludeEndpoint`, and `ApiProperty`.
 
 ## Mapped Types
 
@@ -453,6 +456,7 @@ Current:
 - health indicators
 - testing utilities
 - CLI generators
+- workspace and library CLI commands
 
 Still to deepen:
 
@@ -470,7 +474,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 80 passed
+# 81 passed
 ```
 
 ## License

@@ -6,8 +6,10 @@ from fanest.swagger import (
     ApiBearerAuth,
     ApiBasicAuth,
     ApiConsumes,
+    ApiCreatedResponse,
     ApiExcludeEndpoint,
     ApiHeader,
+    ApiNotFoundResponse,
     ApiOperation,
     ApiParam,
     ApiProduces,
@@ -45,6 +47,8 @@ class DocsController:
         return {"id": doc_id}
 
     @ApiBasicAuth()
+    @ApiCreatedResponse("Created")
+    @ApiNotFoundResponse("Missing")
     @Get("/basic")
     async def basic(self):
         return {"ok": True}
@@ -83,6 +87,8 @@ def test_swagger_decorators_and_module_setup():
     assert document["components"]["securitySchemes"]["api_key"]["name"] == "x-api-key"
     basic_operation = client.get("/api-docs/openapi.json").json()["paths"]["/docs/basic"]["get"]
     assert {"basic": []} in basic_operation["security"]
+    assert basic_operation["responses"]["201"]["description"] == "Created"
+    assert basic_operation["responses"]["404"]["description"] == "Missing"
     assert "/docs/internal" not in client.get("/api-docs/openapi.json").json()["paths"]
     assert CreateDocDto.model_json_schema()["properties"]["title"]["description"] == "Document title"
     assert client.get("/api-docs").status_code == 200
