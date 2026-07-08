@@ -226,6 +226,7 @@ class ModuleScanner:
         target_name: Any,
     ) -> None:
         dependency = self._unwrap_token(dependency)
+        dependency = self._resolve_named_token(dependency, visible_tokens)
         if dependency not in visible_tokens:
             raise TypeError(
                 f"{target_name} in {record.module_type.__name__} depends on {dependency!r}, "
@@ -303,6 +304,16 @@ class ModuleScanner:
     def _unwrap_token(self, token: Any) -> Any:
         if isinstance(token, ForwardRef):
             return token.factory()
+        return token
+
+    def _resolve_named_token(self, token: Any, candidates: set[Any]) -> Any:
+        if not isinstance(token, str):
+            return token
+        for candidate in candidates:
+            if not inspect.isclass(candidate):
+                continue
+            if token in {candidate.__name__, candidate.__qualname__}:
+                return candidate
         return token
 
     def _configured_middlewares(self, module: type) -> list[Any]:

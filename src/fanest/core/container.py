@@ -164,6 +164,7 @@ class FaNestContainer:
 
     def resolve(self, token: Any, module_key: Any | None = None) -> Any:
         token = self._unwrap_token(token)
+        token = self._resolve_named_token(token, module_key)
         owner_key, provider = self._locate_provider(token, module_key)
         if provider is None:
             raise KeyError(token)
@@ -192,6 +193,7 @@ class FaNestContainer:
 
     async def resolve_async(self, token: Any, module_key: Any | None = None) -> Any:
         token = self._unwrap_token(token)
+        token = self._resolve_named_token(token, module_key)
         owner_key, provider = self._locate_provider(token, module_key)
         if provider is None:
             raise KeyError(token)
@@ -367,6 +369,7 @@ class FaNestContainer:
         if isinstance(marker, InjectMarker):
             try:
                 token = self._unwrap_token(marker.token)
+                token = self._resolve_named_token(token, module_key)
                 owner_key, _ = self._locate_provider(token, module_key)
                 if self._cache_key(owner_key, token) in self._resolving:
                     return ForwardRefProxy(self, token, module_key=owner_key)
@@ -381,6 +384,7 @@ class FaNestContainer:
         if isinstance(marker, InjectMarker):
             try:
                 token = self._unwrap_token(marker.token)
+                token = self._resolve_named_token(token, module_key)
                 owner_key, _ = self._locate_provider(token, module_key)
                 if self._cache_key(owner_key, token) in self._resolving:
                     return ForwardRefProxy(self, token, module_key=owner_key)
@@ -483,6 +487,7 @@ class FaNestContainer:
         module_key: Any | None = None,
         seen: set[Any] | None = None,
     ) -> tuple[Any | None, ProviderDefinition | None]:
+        token = self._resolve_named_token(token, module_key)
         if module_key is None:
             module_matches = [
                 (candidate_key, providers[token])
@@ -525,3 +530,45 @@ class FaNestContainer:
         if module_key is None:
             return token
         return (module_key, token)
+
+    def _resolve_named_token(self, token: Any, module_key: Any | None = None) -> Any:
+        if not isinstance(token, str):
+            return token
+        if self._has_exact_provider_token(token, module_key):
+            return token
+        matches = [
+            candidate
+            for candidate in self._visible_provider_tokens(module_key)
+            if inspect.isclass(candidate) and token in {candidate.__name__, candidate.__qualname__}
+        ]
+        unique_matches = list(dict.fromkeys(matches))
+        if len(unique_matches) == 1:
+            return unique_matches[0]
+        return token
+
+    def _has_exact_provider_token(self, token: Any, module_key: Any | None = None) -> bool:
+        if module_key is not None and token in self._module_providers.get(module_key, {}):
+            return True
+        if module_key is not None and token in self._visible_provider_tokens(module_key):
+            return True
+        return token in self._providers or token in self._multi_providers
+
+    def _visible_provider_tokens(self, module_key: Any | None = None, seen: set[Any] | None = None) -> list[Any]:
+        if module_key is None:
+            tokens: list[Any] = [*self._providers.keys(), *self._multi_providers.keys()]
+            for providers in self._module_providers.values():
+                tokens.extend(providers.keys())
+            return tokens
+
+        seen = seen or set()
+        if module_key in seen:
+            return []
+        seen.add(module_key)
+        tokens = list(self._module_providers.get(module_key, {}).keys())
+        for imported_module in self._module_imports.get(module_key, []):
+            tokens.extend(self._module_exports.get(imported_module, set()))
+        for global_module in self._global_modules:
+            if global_module == module_key:
+                continue
+            tokens.extend(self._module_exports.get(global_module, set()))
+        return tokens

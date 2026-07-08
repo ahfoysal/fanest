@@ -121,6 +121,64 @@ def test_module_imports_can_use_forward_ref():
     assert app.state.fanest_container.resolve(ForwardImportedService).message() == "ok"
 
 
+@Injectable()
+class StringForwardRefServiceA:
+    def __init__(self, service_b: "StringForwardRefServiceB" = Inject(forward_ref(lambda: "StringForwardRefServiceB"))):
+        self.service_b = service_b
+
+    def name(self):
+        return "a"
+
+    def peer_name(self):
+        return self.service_b.name()
+
+
+@Injectable()
+class StringForwardRefServiceB:
+    def __init__(self, service_a: "StringForwardRefServiceA" = Inject(forward_ref(lambda: "StringForwardRefServiceA"))):
+        self.service_a = service_a
+
+    def name(self):
+        return "b"
+
+    def peer_name(self):
+        return self.service_a.name()
+
+
+@Module(
+    imports=[forward_ref(lambda: StringForwardRefModuleB)],
+    providers=[StringForwardRefServiceA],
+    exports=[StringForwardRefServiceA],
+)
+class StringForwardRefModuleA:
+    pass
+
+
+@Module(
+    imports=[forward_ref(lambda: StringForwardRefModuleA)],
+    providers=[StringForwardRefServiceB],
+    exports=[StringForwardRefServiceB],
+)
+class StringForwardRefModuleB:
+    pass
+
+
+@Module(imports=[StringForwardRefModuleA, StringForwardRefModuleB])
+class StringForwardRefAppModule:
+    pass
+
+
+def test_circular_modules_support_string_forward_ref_dependencies():
+    app = FaNestFactory.create(StringForwardRefAppModule)
+    container = app.state.fanest_container
+
+    service_a = container.resolve(StringForwardRefServiceA)
+    service_b = container.resolve(StringForwardRefServiceB)
+
+    assert service_a.peer_name() == "b"
+    assert service_b.peer_name() == "a"
+
+
 SCOPED_MESSAGE = token("SCOPED_MESSAGE")
 
 
