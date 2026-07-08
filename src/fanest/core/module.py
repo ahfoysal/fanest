@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import Any, TypeVar
 
@@ -9,12 +9,12 @@ T = TypeVar("T")
 
 def Module(
     *,
-    imports: list[type] | None = None,
-    controllers: list[type] | None = None,
-    providers: list[ProviderDefinition] | None = None,
-    gateways: list[type] | None = None,
-    middlewares: list[type] | None = None,
-    exports: list[type] | None = None,
+    imports: Sequence[Any] | None = None,
+    controllers: Sequence[type] | None = None,
+    providers: Sequence[ProviderDefinition] | None = None,
+    gateways: Sequence[type] | None = None,
+    middlewares: Sequence[type] | None = None,
+    exports: Sequence[Any] | None = None,
     global_module: bool = False,
 ) -> Callable[[type[T]], type[T]]:
     def decorator(cls: type[T]) -> type[T]:
@@ -22,12 +22,12 @@ def Module(
             cls,
             "__fanest_module__",
             ModuleMetadata(
-                imports=imports or [],
-                controllers=controllers or [],
-                providers=providers or [],
-                gateways=gateways or [],
-                middlewares=middlewares or [],
-                exports=exports or [],
+                imports=list(imports or []),
+                controllers=list(controllers or []),
+                providers=list(providers or []),
+                gateways=list(gateways or []),
+                middlewares=list(middlewares or []),
+                exports=list(exports or []),
                 global_module=global_module,
             ),
         )
@@ -47,22 +47,22 @@ def Global(cls: type[T]) -> type[T]:
 def dynamic_module(
     module: type,
     *,
-    imports: list[Any] | None = None,
-    controllers: list[type] | None = None,
-    providers: list[ProviderDefinition] | None = None,
-    gateways: list[type] | None = None,
-    middlewares: list[type] | None = None,
-    exports: list[Any] | None = None,
+    imports: Sequence[Any] | None = None,
+    controllers: Sequence[type] | None = None,
+    providers: Sequence[ProviderDefinition] | None = None,
+    gateways: Sequence[type] | None = None,
+    middlewares: Sequence[type] | None = None,
+    exports: Sequence[Any] | None = None,
     global_module: bool = False,
     global_: bool | None = None,
 ) -> DynamicModule:
     return DynamicModule(
         module=module,
-        imports=imports or [],
-        controllers=controllers or [],
-        providers=providers or [],
-        gateways=gateways or [],
-        middlewares=middlewares or [],
-        exports=exports or [],
+        imports=list(imports or []),
+        controllers=list(controllers or []),
+        providers=list(providers or []),
+        gateways=list(gateways or []),
+        middlewares=list(middlewares or []),
+        exports=list(exports or []),
         global_module=global_module if global_ is None else global_,
     )

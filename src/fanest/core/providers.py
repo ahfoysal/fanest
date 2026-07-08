@@ -15,11 +15,11 @@ def token(name: str) -> InjectionToken:
     return InjectionToken(name)
 
 
-def Inject(token: Any, *, optional: bool = False, default: Any = None) -> InjectMarker:
+def Inject(token: Any, *, optional: bool = False, default: Any = None) -> Any:
     return InjectMarker(token=token, optional=optional, default=default)
 
 
-def Optional(token: Any, default: Any = None) -> InjectMarker:
+def Optional(token: Any, default: Any = None) -> Any:
     return Inject(token, optional=True, default=default)
 
 

@@ -43,6 +43,7 @@ class FastApiAdapter:
         self.global_pipes = global_pipes or []
         self.global_interceptors = global_interceptors or []
         self.global_filters = global_filters or []
+        self._parameter_cache: dict[Any, dict[str, inspect.Parameter]] = {}
 
     def register_controllers(self, controllers: list[type]) -> None:
         for controller in controllers:
@@ -149,6 +150,9 @@ class FastApiAdapter:
                         continue
                     event = payload.get("event")
                     data = payload.get("data")
+                    if not isinstance(event, str):
+                        await websocket.send_json({"event": "error", "data": "Event must be a string"})
+                        continue
                     handler = handlers.get(event)
                     if handler is None:
                         await websocket.send_json({"event": "error", "data": "Unknown event"})
@@ -365,7 +369,7 @@ class FastApiAdapter:
         for pipe in self._collect(controller, handler, "__fanest_pipes__"):
             instance = self._resolve_component(pipe)
             for name, value in list(kwargs.items()):
-                parameter = inspect.signature(handler).parameters.get(name)
+                parameter = self._parameters(handler).get(name)
                 if parameter is not None and not self._should_pipe_parameter(parameter):
                     continue
                 annotation = parameter.annotation if parameter is not None else None
@@ -377,7 +381,7 @@ class FastApiAdapter:
                     result = await result
                 kwargs[name] = result
         for name, value in list(kwargs.items()):
-            parameter = inspect.signature(handler).parameters.get(name)
+            parameter = self._parameters(handler).get(name)
             if parameter is None or not isinstance(parameter.default, ParameterSource):
                 continue
             annotation = parameter.annotation
@@ -423,7 +427,7 @@ class FastApiAdapter:
         context: ExecutionContext,
     ) -> Any:
         result = data
-        parameter = inspect.signature(handler).parameters.get("data")
+        parameter = self._parameters(handler).get("data")
         annotation = parameter.annotation if parameter is not None else None
         for pipe in self._collect(gateway, handler, "__fanest_pipes__"):
             instance = self._resolve_component(pipe)
@@ -470,7 +474,7 @@ class FastApiAdapter:
         self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
         bound = dict(kwargs)
-        for name, parameter in inspect.signature(handler).parameters.items():
+        for name, parameter in self._parameters(handler).items():
             source = parameter.default
             if isinstance(source, ParameterSource) and source.source == "request":
                 bound[name] = request
@@ -480,14 +484,14 @@ class FastApiAdapter:
         self, handler: Callable[..., Any], response: Response, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
         bound = dict(kwargs)
-        for name, parameter in inspect.signature(handler).parameters.items():
+        for name, parameter in self._parameters(handler).items():
             source = parameter.default
             if isinstance(source, ParameterSource) and source.source == "response":
                 bound[name] = response
         return bound
 
     def _uses_manual_response(self, handler: Callable[..., Any]) -> bool:
-        for parameter in inspect.signature(handler).parameters.values():
+        for parameter in self._parameters(handler).values():
             source = parameter.default
             if isinstance(source, ParameterSource) and source.source == "response":
                 return not source.default.get("passthrough", False)
@@ -500,7 +504,7 @@ class FastApiAdapter:
         kwargs: dict[str, Any],
     ) -> dict[str, Any]:
         bound = dict(kwargs)
-        for name, parameter in inspect.signature(handler).parameters.items():
+        for name, parameter in self._parameters(handler).items():
             source = parameter.default
             if isinstance(source, ParameterSource) and source.source == "background_tasks":
                 bound[name] = background_tasks
@@ -510,7 +514,7 @@ class FastApiAdapter:
         self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
         bound = dict(kwargs)
-        for name, parameter in inspect.signature(handler).parameters.items():
+        for name, parameter in self._parameters(handler).items():
             source = parameter.default
             if isinstance(source, ParameterSource) and source.source == "ip":
                 bound[name] = request.client.host if request.client else None
@@ -523,7 +527,7 @@ class FastApiAdapter:
         hostname = request.url.hostname
         parts = hostname.split(".") if hostname else []
         host_params = self._host_params(controller, hostname)
-        for name, parameter in inspect.signature(handler).parameters.items():
+        for name, parameter in self._parameters(handler).items():
             source = parameter.default
             if isinstance(source, ParameterSource) and source.source == "host":
                 if source.name is None:
@@ -558,7 +562,7 @@ class FastApiAdapter:
         self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
         bound = dict(kwargs)
-        for name, parameter in inspect.signature(handler).parameters.items():
+        for name, parameter in self._parameters(handler).items():
             source = parameter.default
             if isinstance(source, ParameterSource) and source.source == "session":
                 bound[name] = request.scope.get("session", source.default)
@@ -568,7 +572,7 @@ class FastApiAdapter:
         self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
         bound = dict(kwargs)
-        for name, parameter in inspect.signature(handler).parameters.items():
+        for name, parameter in self._parameters(handler).items():
             source = parameter.default
             if isinstance(source, ParameterSource) and source.source == "state":
                 state_name = source.name or name
@@ -579,7 +583,7 @@ class FastApiAdapter:
         self, handler: Callable[..., Any], context: ExecutionContext, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
         bound = dict(kwargs)
-        for name, parameter in inspect.signature(handler).parameters.items():
+        for name, parameter in self._parameters(handler).items():
             source = parameter.default
             if isinstance(source, ParameterSource) and source.source == "custom":
                 factory = source.default["factory"]
@@ -595,7 +599,7 @@ class FastApiAdapter:
         context: ExecutionContext,
     ) -> dict[str, Any]:
         bound: dict[str, Any] = {}
-        for name, parameter in inspect.signature(handler).parameters.items():
+        for name, parameter in self._parameters(handler).items():
             source = parameter.default
             if isinstance(source, ParameterSource):
                 if source.source == "message_body":
@@ -695,6 +699,15 @@ class FastApiAdapter:
         if inspect.isclass(component):
             return self.container.resolve(component)
         return component
+
+    def _parameters(self, handler: Callable[..., Any]) -> dict[str, inspect.Parameter]:
+        key = getattr(handler, "__func__", handler)
+        cached = self._parameter_cache.get(key)
+        if cached is not None:
+            return cached
+        parameters = dict(inspect.signature(handler).parameters)
+        self._parameter_cache[key] = parameters
+        return parameters
 
     def _metadata(self, target: Any, key: str, default: Any = None) -> Any:
         if hasattr(target, key):

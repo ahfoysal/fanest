@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import logging
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
@@ -7,6 +8,8 @@ from typing import Any
 from croniter import croniter
 
 from fanest.schedule.registry import SchedulerRegistry
+
+logger = logging.getLogger("fanest.schedule")
 
 
 class ScheduleRunner:
@@ -52,18 +55,18 @@ class ScheduleRunner:
         delay = float(metadata["seconds"])
         while True:
             await asyncio.sleep(delay)
-            await self._call(handler)
+            await self._safe_call(handler)
 
     async def _run_timeout(self, metadata: dict[str, Any], handler: Any) -> None:
         await asyncio.sleep(float(metadata["seconds"]))
-        await self._call(handler)
+        await self._safe_call(handler)
 
     async def _run_cron(self, metadata: dict[str, Any], handler: Any) -> None:
         expression = metadata["expression"]
         while True:
             delay = self.next_cron_delay(expression)
             await asyncio.sleep(delay)
-            await self._call(handler)
+            await self._safe_call(handler)
 
     def next_cron_delay(self, expression: str, now: datetime | None = None) -> float:
         now = now or datetime.now(timezone.utc)
@@ -75,3 +78,11 @@ class ScheduleRunner:
         result = handler()
         if inspect.isawaitable(result):
             await result
+
+    async def _safe_call(self, handler: Any) -> None:
+        try:
+            await self._call(handler)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Scheduled job %r failed", getattr(handler, "__qualname__", handler))

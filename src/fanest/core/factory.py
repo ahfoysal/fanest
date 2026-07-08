@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,13 +58,15 @@ class FaNestFactory:
             container.override(token, value)
 
         lifespan = FaNestFactory._lifespan(scanner.providers, container)
-        app = FastAPI(
-            title=title,
-            version=version,
-            description=description,
-            debug=debug,
-            lifespan=lifespan,
-        )
+        app_options: dict[str, Any] = {
+            "title": title,
+            "version": version,
+            "debug": debug,
+            "lifespan": lifespan,
+        }
+        if description is not None:
+            app_options["description"] = description
+        app = FastAPI(**app_options)
         app.state.fanest_container = container
         app.state.fanest_root_module = root_module
         for static_asset in scanner.static_assets:
@@ -76,10 +79,10 @@ class FaNestFactory:
             options = cors if isinstance(cors, dict) else {}
             app.add_middleware(
                 CORSMiddleware,
-                allow_origins=options.get("allow_origins", ["*"]),
-                allow_credentials=options.get("allow_credentials", False),
-                allow_methods=options.get("allow_methods", ["*"]),
-                allow_headers=options.get("allow_headers", ["*"]),
+                allow_origins=cast(list[str], options.get("allow_origins", ["*"])),
+                allow_credentials=cast(bool, options.get("allow_credentials", False)),
+                allow_methods=cast(list[str], options.get("allow_methods", ["*"])),
+                allow_headers=cast(list[str], options.get("allow_headers", ["*"])),
             )
         for middleware in reversed(scanner.middlewares):
             app.add_middleware(

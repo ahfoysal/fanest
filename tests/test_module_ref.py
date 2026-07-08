@@ -1,7 +1,7 @@
 import pytest
 
 from fanest import Inject, Injectable, Module, ModuleRef, forward_ref, use_factory
-from fanest.core.container import FaNestContainer
+from fanest.core.container import FaNestContainer, ForwardRefProxy
 from fanest.core.module_ref import StrictLookupError, UnknownProviderError
 
 
@@ -126,3 +126,58 @@ async def test_module_ref_create_and_resolve_sync_handle_scoped_dependencies():
     assert isinstance(created.request, RequestScopedService)
     assert first_transient is not second_transient
     assert TransientScopedService.created == 2
+
+
+@Injectable()
+class CircularA:
+    def __init__(self, b: "CircularB"):
+        self.b = b
+
+    def name(self):
+        return "a"
+
+    def b_name(self):
+        return self.b.name()
+
+
+@Injectable()
+class CircularB:
+    def __init__(self, a: CircularA = Inject(forward_ref(lambda: CircularA))):
+        self.a = a
+
+    def name(self):
+        return "b"
+
+    def a_name(self):
+        return self.a.name()
+
+
+def test_forward_ref_constructor_cycle_uses_lazy_proxy():
+    container = FaNestContainer()
+    container.register(CircularA)
+    container.register(CircularB)
+
+    instance = container.resolve(CircularA)
+
+    assert instance.b_name() == "b"
+    assert isinstance(instance.b.a, ForwardRefProxy)
+    assert instance.b.a_name() == "a"
+
+
+class UnsafeCircularA:
+    def __init__(self, b: "UnsafeCircularB"):
+        self.b = b
+
+
+class UnsafeCircularB:
+    def __init__(self, a: UnsafeCircularA):
+        self.a = a
+
+
+def test_plain_constructor_cycle_still_fails_clearly():
+    container = FaNestContainer()
+    container.register(UnsafeCircularA)
+    container.register(UnsafeCircularB)
+
+    with pytest.raises(RuntimeError, match="Circular dependency detected"):
+        container.resolve(UnsafeCircularA)

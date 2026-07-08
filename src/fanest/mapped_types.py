@@ -1,4 +1,4 @@
-from typing import Any, get_args, get_origin
+from typing import Any, cast, get_args, get_origin
 
 from pydantic import BaseModel, create_model
 
@@ -8,7 +8,10 @@ def PartialType(model: type[BaseModel]) -> type[BaseModel]:
     for name, field in model.model_fields.items():
         annotation = _optional(field.annotation)
         fields[name] = (annotation, None)
-    return create_model(f"Partial{model.__name__}", __base__=BaseModel, **fields)
+    return cast(
+        type[BaseModel],
+        create_model(f"Partial{model.__name__}", __base__=BaseModel, **cast(Any, fields)),
+    )
 
 
 def PickType(model: type[BaseModel], fields: list[str]) -> type[BaseModel]:
@@ -17,7 +20,10 @@ def PickType(model: type[BaseModel], fields: list[str]) -> type[BaseModel]:
         field = model.model_fields[name]
         default = field.default if not field.is_required() else ...
         model_fields[name] = (field.annotation, default)
-    return create_model(f"Pick{model.__name__}", __base__=BaseModel, **model_fields)
+    return cast(
+        type[BaseModel],
+        create_model(f"Pick{model.__name__}", __base__=BaseModel, **cast(Any, model_fields)),
+    )
 
 
 def OmitType(model: type[BaseModel], fields: list[str]) -> type[BaseModel]:
@@ -31,7 +37,14 @@ def IntersectionType(left: type[BaseModel], right: type[BaseModel]) -> type[Base
         for name, field in model.model_fields.items():
             default = field.default if not field.is_required() else ...
             model_fields[name] = (field.annotation, default)
-    return create_model(f"{left.__name__}{right.__name__}Intersection", __base__=BaseModel, **model_fields)
+    return cast(
+        type[BaseModel],
+        create_model(
+            f"{left.__name__}{right.__name__}Intersection",
+            __base__=BaseModel,
+            **cast(Any, model_fields),
+        ),
+    )
 
 
 def _optional(annotation: Any) -> Any:

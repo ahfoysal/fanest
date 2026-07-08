@@ -82,7 +82,7 @@ class ModuleMetadata:
     providers: list[ProviderDefinition] = field(default_factory=list)
     gateways: list[type] = field(default_factory=list)
     middlewares: list[Any] = field(default_factory=list)
-    exports: list[type] = field(default_factory=list)
+    exports: list[Any] = field(default_factory=list)
     global_module: bool = False
 
 

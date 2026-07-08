@@ -1,7 +1,7 @@
 import inspect
 import os
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, TypeVar, cast as typing_cast
 
 from pydantic import BaseModel, TypeAdapter
 
@@ -37,7 +37,7 @@ class ConfigService:
         if cast is not None and value is not None:
             if cast is bool and isinstance(value, str):
                 return value.lower() in {"1", "true", "yes", "on"}
-            return cast(value)
+            return typing_cast(Callable[[Any], T], cast)(value)
         return value
 
     def get_required(self, key: str, *, cast: type[T] | None = None) -> Any:

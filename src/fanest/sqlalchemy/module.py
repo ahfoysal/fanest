@@ -141,7 +141,7 @@ class SqlAlchemyRepository:
                 sqlalchemy_update(self.model).where(*self._filters(criteria)).values(**values)
             )
             await self._commit_or_flush(session)
-            return int(result.rowcount or 0)
+            return int(getattr(result, "rowcount", 0) or 0)
 
     async def delete(self, entity: Any) -> None:
         async with self._session(write=True) as session:
@@ -152,7 +152,7 @@ class SqlAlchemyRepository:
         async with self._session(write=True) as session:
             result = await session.execute(sqlalchemy_delete(self.model).where(*self._filters(criteria)))
             await self._commit_or_flush(session)
-            return int(result.rowcount or 0)
+            return int(getattr(result, "rowcount", 0) or 0)
 
     def _filters(self, criteria: dict[str, Any]) -> list[Any]:
         return [getattr(self.model, key) == value for key, value in criteria.items()]

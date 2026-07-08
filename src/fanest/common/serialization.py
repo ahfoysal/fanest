@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 
@@ -50,7 +50,7 @@ def serialize_value(value: Any, options: SerializeOptions) -> Any:
             exclude_none=options.exclude_none,
         )
     if is_dataclass(value):
-        return serialize_value(asdict(value), options)
+        return serialize_value(asdict(cast(Any, value)), options)
     if isinstance(value, list):
         return [serialize_value(item, options) for item in value]
     if isinstance(value, tuple):

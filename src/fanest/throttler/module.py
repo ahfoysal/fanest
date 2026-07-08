@@ -26,12 +26,12 @@ class ThrottlerService:
         cls._ttl = ttl
 
     def hit(self, key: str, *, limit: int | None = None, ttl: int | None = None) -> bool:
-        limit = limit or self.limit
-        ttl = ttl or self.ttl
+        resolved_limit = limit if limit is not None else self.limit
+        resolved_ttl = ttl if ttl is not None else self.ttl
         now = time.monotonic()
-        window_start = now - ttl
+        window_start = now - resolved_ttl
         hits = [hit for hit in self._hits.get(key, []) if hit >= window_start]
-        if len(hits) >= limit:
+        if len(hits) >= resolved_limit:
             self._hits[key] = hits
             return False
         hits.append(now)

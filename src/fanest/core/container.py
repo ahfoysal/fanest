@@ -21,11 +21,34 @@ _request_instances: ContextVar[dict[Any, Any] | None] = ContextVar(
 )
 
 
+class ForwardRefProxy:
+    def __init__(self, container: "FaNestContainer", token: Any) -> None:
+        object.__setattr__(self, "_fanest_container", container)
+        object.__setattr__(self, "_fanest_token", token)
+
+    def _target(self) -> Any:
+        return object.__getattribute__(self, "_fanest_container").resolve(
+            object.__getattribute__(self, "_fanest_token")
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._target(), name, value)
+
+    def __repr__(self) -> str:
+        return f"<ForwardRefProxy token={object.__getattribute__(self, '_fanest_token')!r}>"
+
+
 class FaNestContainer:
     def __init__(self) -> None:
         self._providers: dict[Any, ProviderDefinition] = {}
         self._multi_providers: dict[Any, list[ProviderDefinition]] = {}
         self._instances: dict[Any, Any] = {}
+        self._dependency_cache: dict[type, tuple[dict[str, inspect.Parameter], dict[str, Any]]] = {}
+        self._provider_dependency_cache: dict[Any, list[Any]] = {}
+        self._scope_cache: dict[Any, str] = {}
         self._resolving: set[Any] = set()
         self.register(ValueProvider(provide=ModuleRef, use_value=ModuleRef(self)))
         self.register(ValueProvider(provide=Reflector, use_value=Reflector()))
@@ -35,6 +58,7 @@ class FaNestContainer:
 
     def register(self, provider: ProviderDefinition) -> None:
         token = self.provider_token(provider)
+        self._invalidate_provider_cache(token)
         if token in APP_ENHANCER_TOKENS:
             self._multi_providers.setdefault(token, []).append(provider)
             return
@@ -51,16 +75,20 @@ class FaNestContainer:
             self._multi_providers[token] = [
                 value if isinstance(value, (ClassProvider, ValueProvider, FactoryProvider, ExistingProvider)) else ValueProvider(provide=token, use_value=value)
             ]
+            self._scope_cache.clear()
             return
         if isinstance(value, (ClassProvider, ValueProvider, FactoryProvider, ExistingProvider)):
             self._providers[token] = value
             self._instances.pop(token, None)
+            self._invalidate_provider_cache(token)
             return
         if inspect.isclass(value):
             self._providers[token] = ClassProvider(provide=token, use_class=value)
             self._instances.pop(token, None)
+            self._invalidate_provider_cache(token)
             return
         self._instances[token] = value
+        self._invalidate_provider_cache(token)
 
     def resolve_all(self, token: Any) -> list[Any]:
         return [self._resolve_provider(provider) for provider in self._multi_providers.get(token, [])]
@@ -225,8 +253,12 @@ class FaNestContainer:
         provider: ProviderDefinition,
         seen: set[Any] | None = None,
     ) -> str:
+        if seen is None and token in self._scope_cache:
+            return self._scope_cache[token]
         own_scope = self._provider_scope(provider)
         if own_scope != "singleton":
+            if seen is None:
+                self._scope_cache[token] = own_scope
             return own_scope
         seen = seen or set()
         if token in seen:
@@ -240,25 +272,34 @@ class FaNestContainer:
                     continue
                 dependency_provider = dependency
             if self._effective_scope(dependency, dependency_provider, seen) == "request":
+                if len(seen) == 1:
+                    self._scope_cache[token] = "request"
                 return "request"
+        if len(seen) == 1:
+            self._scope_cache[token] = own_scope
         return own_scope
 
     def _provider_dependencies(self, provider: ProviderDefinition) -> list[Any]:
+        provider_key = self.provider_token(provider) if not isinstance(provider, ForwardRef) else provider.factory()
+        if provider_key in self._provider_dependency_cache:
+            return self._provider_dependency_cache[provider_key]
         if isinstance(provider, ExistingProvider):
-            return [provider.use_existing]
-        if isinstance(provider, FactoryProvider):
-            return list(provider.inject)
-        if isinstance(provider, ClassProvider):
-            return self._class_dependencies(provider.use_class)
-        if inspect.isclass(provider):
-            return self._class_dependencies(provider)
-        return []
+            dependencies = [provider.use_existing]
+        elif isinstance(provider, FactoryProvider):
+            dependencies = list(provider.inject)
+        elif isinstance(provider, ClassProvider):
+            dependencies = self._class_dependencies(provider.use_class)
+        elif inspect.isclass(provider):
+            dependencies = self._class_dependencies(provider)
+        else:
+            dependencies = []
+        self._provider_dependency_cache[provider_key] = dependencies
+        return dependencies
 
     def _class_dependencies(self, provider: type) -> list[Any]:
-        signature = inspect.signature(provider.__init__)
-        type_hints = get_type_hints(provider.__init__)
+        parameters, type_hints = self._constructor_metadata(provider)
         dependencies: list[Any] = []
-        for name, parameter in signature.parameters.items():
+        for name, parameter in parameters.items():
             if name == "self" or parameter.kind in (
                 inspect.Parameter.VAR_POSITIONAL,
                 inspect.Parameter.VAR_KEYWORD,
@@ -281,7 +322,10 @@ class FaNestContainer:
     def _resolve_injected_token(self, marker: Any) -> Any:
         if isinstance(marker, InjectMarker):
             try:
-                return self.resolve(self._unwrap_token(marker.token))
+                token = self._unwrap_token(marker.token)
+                if token in self._resolving:
+                    return ForwardRefProxy(self, token)
+                return self.resolve(token)
             except Exception:
                 if marker.optional:
                     return marker.default
@@ -291,7 +335,10 @@ class FaNestContainer:
     async def _resolve_injected_token_async(self, marker: Any) -> Any:
         if isinstance(marker, InjectMarker):
             try:
-                return await self.resolve_async(self._unwrap_token(marker.token))
+                token = self._unwrap_token(marker.token)
+                if token in self._resolving:
+                    return ForwardRefProxy(self, token)
+                return await self.resolve_async(token)
             except Exception:
                 if marker.optional:
                     return marker.default
@@ -310,11 +357,10 @@ class FaNestContainer:
         return await self._instantiate_async(provider)
 
     def _instantiate(self, provider: type) -> Any:
-        signature = inspect.signature(provider.__init__)
-        type_hints = get_type_hints(provider.__init__)
+        parameters, type_hints = self._constructor_metadata(provider)
         kwargs: dict[str, Any] = {}
 
-        for name, parameter in signature.parameters.items():
+        for name, parameter in parameters.items():
             if name == "self":
                 continue
             if parameter.kind in (
@@ -339,11 +385,10 @@ class FaNestContainer:
         return provider(**kwargs)
 
     async def _instantiate_async(self, provider: type) -> Any:
-        signature = inspect.signature(provider.__init__)
-        type_hints = get_type_hints(provider.__init__)
+        parameters, type_hints = self._constructor_metadata(provider)
         kwargs: dict[str, Any] = {}
 
-        for name, parameter in signature.parameters.items():
+        for name, parameter in parameters.items():
             if name == "self":
                 continue
             if parameter.kind in (
@@ -366,3 +411,19 @@ class FaNestContainer:
             kwargs[name] = await self.resolve_async(annotation)
 
         return provider(**kwargs)
+
+    def _constructor_metadata(self, provider: type) -> tuple[dict[str, inspect.Parameter], dict[str, Any]]:
+        cached = self._dependency_cache.get(provider)
+        if cached is not None:
+            return cached
+        signature = inspect.signature(provider.__init__)
+        type_hints = get_type_hints(provider.__init__)
+        parameters = dict(signature.parameters)
+        metadata = (parameters, type_hints)
+        self._dependency_cache[provider] = metadata
+        return metadata
+
+    def _invalidate_provider_cache(self, token: Any) -> None:
+        token = self._unwrap_token(token)
+        self._provider_dependency_cache.pop(token, None)
+        self._scope_cache.clear()

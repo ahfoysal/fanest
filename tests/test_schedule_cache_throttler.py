@@ -129,6 +129,31 @@ def test_disabled_cron_job_is_not_scheduled():
     assert DisabledCronService.runs == 0
 
 
+@Injectable()
+class FlakyIntervalService:
+    runs = 0
+
+    @Interval(0.01)
+    async def flaky(self):
+        type(self).runs += 1
+        if type(self).runs == 1:
+            raise RuntimeError("temporary failure")
+
+
+@Module(providers=[FlakyIntervalService])
+class FlakyIntervalModule:
+    pass
+
+
+def test_scheduled_job_exception_does_not_kill_repeating_task():
+    FlakyIntervalService.runs = 0
+
+    with TestClient(FaNestFactory.create(FlakyIntervalModule)):
+        time.sleep(0.05)
+
+    assert FlakyIntervalService.runs > 1
+
+
 @Controller("cached")
 @UseInterceptors(CacheInterceptor)
 class CachedController:

@@ -97,7 +97,7 @@ class GraphQLModule:
                 self.schema = schema
 
             @Post("/")
-            async def execute(self, payload: dict[str, Any] = Body()):
+            async def execute(self, payload: dict[str, Any] = Body()):  # type: ignore[assignment]
                 return await self.schema.execute(
                     payload.get("query", ""),
                     variables=payload.get("variables"),
