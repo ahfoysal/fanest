@@ -1,15 +1,19 @@
 from pathlib import Path
+import compileall
 import importlib
 import importlib.util
+import platform
 import re
 import sys
 from typing import Any
 
 import typer
+import fanest
 
 app = typer.Typer(help="FaNest command line tools.")
 generate_app = typer.Typer(help="Generate FaNest artifacts.")
 app.add_typer(generate_app, name="generate")
+app.add_typer(generate_app, name="g", help="Alias for generate.")
 
 
 @app.command()
@@ -46,6 +50,23 @@ def workspace(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> No
         path.mkdir(parents=True, exist_ok=True)
     (root / "apps" / "api" / "main.py").write_text(_main_template(), encoding="utf-8")
     typer.echo(f"Created FaNest workspace in {root}")
+
+
+@app.command()
+def info() -> None:
+    typer.echo(f"FaNest {fanest.__version__}")
+    typer.echo(f"Python {platform.python_version()}")
+    typer.echo(f"Platform {platform.platform()}")
+
+
+@app.command()
+def build(path: str = typer.Argument("src")) -> None:
+    target = Path(path)
+    if not target.exists():
+        raise typer.BadParameter(f"Build path not found: {path}")
+    if not compileall.compile_dir(str(target), quiet=1):
+        raise typer.Exit(1)
+    typer.echo(f"Build OK: {target}")
 
 
 @app.command()
@@ -245,6 +266,54 @@ def generate_library(name: str, dry_run: bool = typer.Option(False, "--dry-run")
     typer.echo(f"Generated library {name}")
 
 
+@generate_app.command("class")
+def generate_class(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    resource = _resource_dir(name, dry_run)
+    class_name = _class_name(name)
+    _write_file(resource / f"{name}.py", _class_template(class_name), dry_run)
+    typer.echo(f"Generated class {name}")
+
+
+@generate_app.command("provider")
+def generate_provider(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    resource = _resource_dir(name, dry_run)
+    class_name = _class_name(name)
+    _write_file(resource / f"{name}_provider.py", _provider_template(class_name), dry_run)
+    typer.echo(f"Generated provider {name}")
+
+
+@generate_app.command("exception")
+def generate_exception(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    resource = _resource_dir(name, dry_run)
+    class_name = _class_name(name)
+    _write_file(resource / f"{name}_exception.py", _exception_template(class_name), dry_run)
+    typer.echo(f"Generated exception {name}")
+
+
+@generate_app.command("resolver")
+def generate_resolver(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    resource = _resource_dir(name, dry_run)
+    class_name = _class_name(name)
+    _write_file(resource / f"{name}_resolver.py", _resolver_template(class_name), dry_run)
+    typer.echo(f"Generated resolver {name}")
+
+
+@generate_app.command("repository")
+def generate_repository(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    resource = _resource_dir(name, dry_run)
+    class_name = _class_name(name)
+    _write_file(resource / f"{name}_repository.py", _repository_template(class_name), dry_run)
+    typer.echo(f"Generated repository {name}")
+
+
+@generate_app.command("test")
+def generate_test(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    target = Path("tests") / f"test_{name}.py"
+    class_name = _class_name(name)
+    _write_file(target, _test_template(class_name), dry_run)
+    typer.echo(f"Generated test {name}")
+
+
 def _class_name(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_"))
 
@@ -361,10 +430,9 @@ def _project_pyproject_template(name: str) -> str:
 name = "{package_name}"
 version = "0.1.0"
 description = "A FaNest application"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
-    "fanest",
-    "uvicorn[standard]",
+    "fanest[standard]",
 ]
 
 [project.optional-dependencies]
@@ -505,7 +573,9 @@ class {class_name}Gateway:
 
 
 def _dto_template(class_name: str) -> str:
-    return f'''from pydantic import BaseModel
+    return f'''from __future__ import annotations
+
+from pydantic import BaseModel
 
 
 class Create{class_name}Dto(BaseModel):
@@ -539,4 +609,58 @@ def _library_template(class_name: str) -> str:
 @Module()
 class {class_name}Module:
     pass
+'''
+
+
+def _class_template(class_name: str) -> str:
+    return f'''class {class_name}:
+    pass
+'''
+
+
+def _provider_template(class_name: str) -> str:
+    return f'''from fanest import Injectable
+
+
+@Injectable()
+class {class_name}Provider:
+    pass
+'''
+
+
+def _exception_template(class_name: str) -> str:
+    return f'''from fanest import BadRequestException
+
+
+class {class_name}Exception(BadRequestException):
+    pass
+'''
+
+
+def _resolver_template(class_name: str) -> str:
+    return f'''from fanest.graphql import Query, Resolver
+
+
+@Resolver()
+class {class_name}Resolver:
+    @Query("{class_name[0].lower() + class_name[1:]}")
+    async def resolve(self):
+        return {{"ok": True}}
+'''
+
+
+def _repository_template(class_name: str) -> str:
+    return f'''from fanest import Injectable
+
+
+@Injectable()
+class {class_name}Repository:
+    async def find_all(self):
+        return []
+'''
+
+
+def _test_template(class_name: str) -> str:
+    return f'''def test_{class_name.lower()}():
+    assert True
 '''

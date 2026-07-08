@@ -4,9 +4,13 @@ import os
 import subprocess
 import sys
 import tempfile
-import tomllib
 from pathlib import Path
 from zipfile import ZipFile
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]

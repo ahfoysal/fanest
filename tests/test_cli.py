@@ -30,7 +30,8 @@ def test_cli_new_generates_runnable_project_scaffold(tmp_path, monkeypatch):
     assert (tmp_path / "blog_api/tests/test_app.py").exists()
     pyproject = (tmp_path / "blog_api/pyproject.toml").read_text(encoding="utf-8")
     assert 'name = "blog-api"' in pyproject
-    assert '"uvicorn[standard]"' in pyproject
+    assert 'requires-python = ">=3.10"' in pyproject
+    assert '"fanest[standard]"' in pyproject
 
 
 def test_cli_generates_resource_and_extra_artifacts(tmp_path, monkeypatch):
@@ -50,6 +51,28 @@ def test_cli_generates_resource_and_extra_artifacts(tmp_path, monkeypatch):
     assert "CreateUsersDto" in Path(tmp_path / "src/users/users_dto.py").read_text()
     assert (tmp_path / "src/request_id/request_id_middleware.py").exists()
     assert (tmp_path / "src/current_user/current_user_decorator.py").exists()
+
+
+def test_cli_generate_alias_and_nest_style_artifacts(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    results = [
+        runner.invoke(app, ["g", "class", "billing"]),
+        runner.invoke(app, ["g", "provider", "billing"]),
+        runner.invoke(app, ["g", "exception", "billing"]),
+        runner.invoke(app, ["g", "resolver", "billing"]),
+        runner.invoke(app, ["g", "repository", "billing"]),
+        runner.invoke(app, ["g", "test", "billing"]),
+    ]
+
+    assert all(result.exit_code == 0 for result in results)
+    assert (tmp_path / "src/billing/billing.py").exists()
+    assert (tmp_path / "src/billing/billing_provider.py").exists()
+    assert (tmp_path / "src/billing/billing_exception.py").exists()
+    assert (tmp_path / "src/billing/billing_resolver.py").exists()
+    assert (tmp_path / "src/billing/billing_repository.py").exists()
+    assert (tmp_path / "tests/test_billing.py").exists()
 
 
 def test_cli_registers_generated_module_in_parent_module(tmp_path, monkeypatch):
@@ -164,3 +187,18 @@ def test_cli_check_reports_invalid_target(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "Application target is not callable" in result.output
+
+
+def test_cli_info_and_build(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Path("src").mkdir()
+    Path("src/app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    runner = CliRunner()
+
+    info = runner.invoke(app, ["info"])
+    build = runner.invoke(app, ["build", "src"])
+
+    assert info.exit_code == 0
+    assert "FaNest 0.1.0" in info.output
+    assert build.exit_code == 0
+    assert "Build OK: src" in build.output
