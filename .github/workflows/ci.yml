@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
   pull_request:
-    branches: [main]
+    branches: [main, staging]
 
 jobs:
   test:
@@ -40,8 +40,5 @@ jobs:
       - name: Build package
         run: uv build
 
-      - name: Smoke install wheel
-        run: |
-          uv venv .smoke-venv --python ${{ matrix.python-version }}
-          uv pip install --python .smoke-venv/bin/python dist/*.whl
-          .smoke-venv/bin/python -c "from fanest import Controller, FaNestFactory, Get, Module; from fanest.cli.main import app as cli; assert callable(cli); print(FaNestFactory)"
+      - name: Verify release artifacts
+        run: uv run python scripts/verify_release.py
