@@ -1,13 +1,15 @@
 import inspect
+import json
 from collections.abc import Callable
 from typing import Any
 
 from fastapi import Body as FastBody
 from fastapi import BackgroundTasks as FastBackgroundTasks
 from fastapi import Cookie, FastAPI, File, Form as FastForm, Header, HTTPException, Path, Query, Request, Response, WebSocket
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from starlette.websockets import WebSocketDisconnect
 
+from fanest.common.responses import StreamableFile
 from fanest.core.container import FaNestContainer
 from fanest.core.metadata import (
     ControllerMetadata,
@@ -191,6 +193,13 @@ class FastApiAdapter:
                         result = handler(**kwargs)
                         if inspect.isawaitable(result):
                             result = await result
+                        response_headers = dict(self._response_headers(controller, handler))
+                        for name, value in response_headers.items():
+                            response.headers[name] = value
+                        if self._metadata(handler, "__fanest_sse__", False):
+                            return self._sse_response(result, response_headers)
+                        if isinstance(result, StreamableFile):
+                            return result.to_response(response_headers)
                         redirect = self._metadata(handler, "__fanest_redirect__")
                         if redirect is not None:
                             if isinstance(result, dict) and result.get("url"):
@@ -436,6 +445,32 @@ class FastApiAdapter:
         controller_values = getattr(controller.__class__, key, [])
         handler_values = self._metadata(handler, key, [])
         return [*global_values, *controller_values, *handler_values]
+
+    def _response_headers(self, controller: Any, handler: Callable[..., Any]) -> list[tuple[str, str]]:
+        controller_values = getattr(controller.__class__, "__fanest_response_headers__", [])
+        handler_values = self._metadata(handler, "__fanest_response_headers__", [])
+        return [*controller_values, *handler_values]
+
+    def _sse_response(self, result: Any, headers: dict[str, str] | None = None) -> StreamingResponse:
+        async def body():
+            if hasattr(result, "__aiter__"):
+                async for item in result:
+                    yield self._format_sse(item)
+                return
+            for item in result:
+                yield self._format_sse(item)
+
+        return StreamingResponse(body(), media_type="text/event-stream", headers=headers)
+
+    def _format_sse(self, item: Any) -> bytes:
+        event = None
+        data = item
+        if isinstance(item, dict) and "data" in item:
+            event = item.get("event")
+            data = item["data"]
+        payload = json.dumps(data)
+        prefix = f"event: {event}\n" if event else ""
+        return f"{prefix}data: {payload}\n\n".encode()
 
     def _resolve_component(self, component: Any) -> Any:
         if inspect.isclass(component):

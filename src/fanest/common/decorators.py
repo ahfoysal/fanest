@@ -149,6 +149,22 @@ def ResponseModel(model: Any, **options: Any) -> Callable[[Callable[..., Any]], 
     return decorator
 
 
+def SetHeader(name: str, value: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
+        _append_metadata(handler, "__fanest_response_headers__", ((name, value),))
+        return handler
+
+    return decorator
+
+
+def Sse(path: str = "", **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
+        setattr(handler, "__fanest_sse__", True)
+        return route("GET", path, **options)(handler)
+
+    return decorator
+
+
 def Body(name: str | None = None, default: Any = ...) -> ParameterSource:
     return ParameterSource(source="body", name=name, default=default)
 

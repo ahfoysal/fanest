@@ -1,6 +1,8 @@
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from pydantic import Field
+
 T = TypeVar("T")
 
 
@@ -70,12 +72,87 @@ def ApiBody(description: str | None = None):
     return decorator
 
 
+def ApiHeader(name: str, description: str | None = None, required: bool = False):
+    def decorator(handler):
+        parameter = _parameter(name, "header", description)
+        parameter["required"] = required
+        _append_openapi_extra(handler, "parameters", parameter)
+        return handler
+
+    return decorator
+
+
+def ApiConsumes(*mime_types: str):
+    def decorator(handler):
+        _merge_openapi_extra(
+            handler,
+            {
+                "requestBody": {
+                    "content": {
+                        mime_type: {"schema": {"type": "object"}} for mime_type in mime_types
+                    }
+                }
+            },
+        )
+        return handler
+
+    return decorator
+
+
+def ApiProduces(*mime_types: str):
+    def decorator(handler):
+        _merge_openapi_extra(
+            handler,
+            {
+                "responses": {
+                    "200": {
+                        "content": {
+                            mime_type: {"schema": {"type": "object"}} for mime_type in mime_types
+                        }
+                    }
+                }
+            },
+        )
+        return handler
+
+    return decorator
+
+
+def ApiExcludeEndpoint():
+    def decorator(handler):
+        _set_route_option(handler, "include_in_schema", False)
+        return handler
+
+    return decorator
+
+
 def ApiBearerAuth() -> Callable[[T], T]:
     def decorator(target: T) -> T:
         setattr(target, "__fanest_bearer_auth__", True)
         return target
 
     return decorator
+
+
+def ApiProperty(
+    default: Any = ...,
+    *,
+    description: str | None = None,
+    example: Any = None,
+    examples: list[Any] | None = None,
+    deprecated: bool | None = None,
+    **extra: Any,
+) -> Any:
+    kwargs = dict(extra)
+    if description is not None:
+        kwargs["description"] = description
+    if example is not None:
+        kwargs["examples"] = [example]
+    if examples is not None:
+        kwargs["examples"] = examples
+    if deprecated is not None:
+        kwargs["deprecated"] = deprecated
+    return Field(default, **kwargs)
 
 
 def _set_route_option(handler: Any, key: str, value: Any) -> None:
@@ -91,21 +168,43 @@ def _set_route_option(handler: Any, key: str, value: Any) -> None:
 
 
 def _append_openapi_extra(handler: Any, key: str, value: Any) -> None:
-    route = getattr(handler, "__fanest_route__", None)
-    if route is not None:
-        extra = dict(route.options.get("openapi_extra", {}))
-    else:
-        extra = dict(getattr(handler, "__fanest_pending_openapi_extra__", {}))
+    extra = _openapi_extra(handler)
 
     if key == "parameters":
         extra[key] = [*extra.get(key, []), value]
     else:
         extra[key] = value
 
+    route = getattr(handler, "__fanest_route__", None)
     if route is not None:
         route.options["openapi_extra"] = extra
     else:
         setattr(handler, "__fanest_pending_openapi_extra__", extra)
+
+
+def _merge_openapi_extra(handler: Any, value: dict[str, Any]) -> None:
+    extra = _openapi_extra(handler)
+    _deep_update(extra, value)
+    route = getattr(handler, "__fanest_route__", None)
+    if route is not None:
+        route.options["openapi_extra"] = extra
+    else:
+        setattr(handler, "__fanest_pending_openapi_extra__", extra)
+
+
+def _openapi_extra(handler: Any) -> dict[str, Any]:
+    route = getattr(handler, "__fanest_route__", None)
+    if route is not None:
+        return dict(route.options.get("openapi_extra", {}))
+    return dict(getattr(handler, "__fanest_pending_openapi_extra__", {}))
+
+
+def _deep_update(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_update(target[key], value)
+        else:
+            target[key] = value
 
 
 def _parameter(name: str, location: str, description: str | None) -> dict[str, Any]:
