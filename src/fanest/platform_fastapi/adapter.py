@@ -379,6 +379,15 @@ class FastApiAdapter:
         call_handler: Callable[[], Any],
     ) -> Any:
         interceptors = self._collect(controller, handler, "__fanest_interceptors__")
+        metric_counter = self._metadata(handler, "__fanest_metric_counter__")
+        if metric_counter is not None:
+            from fanest.metrics import MetricsRegistry
+
+            try:
+                registry = self.container.resolve(MetricsRegistry)
+                registry.inc(metric_counter)
+            except Exception:
+                pass
 
         async def dispatch(index: int) -> Any:
             if index >= len(interceptors):

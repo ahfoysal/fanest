@@ -112,6 +112,7 @@ class FaNestFactory:
                 FaNestFactory._register_graphql_resolver(container, instance)
                 FaNestFactory._register_cqrs_handlers(container, instance)
                 FaNestFactory._register_passport_strategy(container, instance)
+                FaNestFactory._register_worker_tasks(container, instance)
                 hook = getattr(instance, "on_module_init", None)
                 if hook is not None:
                     await FaNestFactory._call_lifecycle_hook(hook)
@@ -223,3 +224,16 @@ class FaNestFactory:
             container.resolve(PassportService).register(instance)
         except Exception:
             pass
+
+    @staticmethod
+    def _register_worker_tasks(container: FaNestContainer, instance: object) -> None:
+        from fanest.workers import WorkerService
+
+        try:
+            workers = container.resolve(WorkerService)
+        except Exception:
+            return
+        for _, handler in inspect.getmembers(instance, predicate=callable):
+            task_name = getattr(handler, "__fanest_task_handler__", None)
+            if task_name is not None:
+                workers.register(task_name, handler)

@@ -128,6 +128,8 @@ It shows:
 - typed exception filters
 - Reflector and discovery services
 - health indicators
+- metrics counters
+- worker task handlers
 - GraphQL resolvers
 - health endpoint
 - SQLAlchemy module wiring
@@ -284,6 +286,8 @@ fanest.graphql           resolvers, queries, mutations, GraphQL endpoint
 fanest.microservices     message/event patterns and named transports
 fanest.mapped_types      PartialType, PickType, OmitType, IntersectionType
 fanest.health            health endpoint module
+fanest.metrics           counters and metrics endpoint
+fanest.workers           task handler registry
 fanest.discovery/core    Reflector and DiscoveryService
 fanest.testing           TestingModule and provider overrides
 ```
@@ -454,6 +458,8 @@ Current:
 - cache store adapters
 - health checks
 - health indicators
+- metrics module
+- worker task handlers
 - testing utilities
 - CLI generators
 - workspace and library CLI commands
@@ -474,7 +480,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 81 passed
+# 83 passed
 ```
 
 ## License
