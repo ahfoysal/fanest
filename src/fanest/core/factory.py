@@ -95,6 +95,7 @@ class FaNestFactory:
                 instance = await container.resolve_async(container.provider_token(provider))
                 instances.append(instance)
                 FaNestFactory._register_events(container, instance)
+                FaNestFactory._register_queue_processors(container, instance)
                 hook = getattr(instance, "on_module_init", None)
                 if hook is not None:
                     result = hook()
@@ -126,3 +127,19 @@ class FaNestFactory:
             event = getattr(handler, "__fanest_event__", None)
             if event is not None:
                 emitter.on(event, handler)
+
+    @staticmethod
+    def _register_queue_processors(container: FaNestContainer, instance: object) -> None:
+        from fanest.queues import QueueService
+
+        queue = getattr(instance.__class__, "__fanest_queue__", None)
+        if queue is None:
+            return
+        try:
+            queue_service = container.resolve(QueueService)
+        except Exception:
+            return
+        for _, handler in inspect.getmembers(instance, predicate=callable):
+            job_name = getattr(handler, "__fanest_process__", None)
+            if job_name is not None:
+                queue_service.register_processor(queue, job_name, handler)

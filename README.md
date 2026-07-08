@@ -125,6 +125,8 @@ It shows:
 - interval jobs
 - cron jobs
 - timeout jobs and scheduler registry
+- queue processors
+- mailer service
 - microservice message/event patterns
 - WebSocket gateway with rooms/broadcasting
 - global prefix, CORS, and global pipes
@@ -252,6 +254,8 @@ fanest.cache             cache service and cache interceptor
 fanest.throttler         throttling module and guard
 fanest.schedule          interval, cron, timeout jobs, scheduler registry
 fanest.websockets        connection manager, rooms, broadcasting
+fanest.queues            in-memory queue service, processors, jobs
+fanest.mailer            mail service with outbox and SMTP handoff
 fanest.microservices     in-memory client/server, message and event patterns
 fanest.mapped_types      PartialType, PickType, OmitType, IntersectionType
 fanest.health            health endpoint module
@@ -392,6 +396,8 @@ Current:
 - cache and throttling
 - WebSocket gateways and room broadcasting
 - cron, interval, timeout jobs, and scheduler registry
+- in-memory queue processors
+- mailer package
 - microservice message/event patterns
 - SQLAlchemy package start
 - health checks
@@ -403,8 +409,8 @@ Still to deepen:
 - middleware consumer API with route exclusions
 - GraphQL module
 - more microservice transports
-- queues
-- mailer
+- Redis-backed queues
+- SMTP templates and provider adapters
 - advanced SQLAlchemy migrations/templates
 - MongoDB package
 - CLI auto-registration into modules
