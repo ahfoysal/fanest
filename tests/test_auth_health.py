@@ -27,7 +27,7 @@ class AuthAppModule:
 def test_jwt_auth_guard_and_current_user():
     app = FaNestFactory.create(AuthAppModule)
     client = TestClient(app)
-    token = JwtService().sign({"sub": "123"})
+    token = app.state.fanest_container.resolve(JwtService).sign({"sub": "123"})
 
     unauthorized = client.get("/profile")
     authorized = client.get("/profile", headers={"authorization": f"Bearer {token}"})

@@ -1,10 +1,12 @@
 import time
+from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Injectable, Module, UseGuards, UseInterceptors
 from fanest.cache import CacheInterceptor, CacheModule, CacheTTL
 from fanest.schedule import Cron, Interval
+from fanest.schedule.runner import ScheduleRunner
 from fanest.throttler import Throttle, ThrottlerGuard, ThrottlerModule
 
 
@@ -36,6 +38,13 @@ def test_interval_and_cron_jobs_run_during_lifespan():
 
     assert JobsService.interval_runs > 0
     assert JobsService.cron_runs > 0
+
+
+def test_cron_delay_uses_full_expression_not_first_field_only():
+    runner = ScheduleRunner([])
+    now = datetime(2026, 7, 8, 8, 59, 0, tzinfo=timezone.utc)
+
+    assert runner.next_cron_delay("0 9 * * *", now) == 60
 
 
 @Controller("cached")

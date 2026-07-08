@@ -4,19 +4,17 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from fanest import Injectable, Module
+from fanest import Inject, Injectable, Module, use_value
 from fanest.core.providers import token, use_factory
+
+SQLALCHEMY_OPTIONS = token("SQLALCHEMY_OPTIONS")
 
 
 @Injectable()
 class SqlAlchemyService:
-    _engine: AsyncEngine | None = None
-    _sessionmaker: async_sessionmaker[AsyncSession] | None = None
-
-    @classmethod
-    def configure(cls, *, database_url: str, echo: bool = False) -> None:
-        cls._engine = create_async_engine(database_url, echo=echo)
-        cls._sessionmaker = async_sessionmaker(cls._engine, expire_on_commit=False)
+    def __init__(self, options: dict[str, Any] = Inject(SQLALCHEMY_OPTIONS)):
+        self._engine = create_async_engine(options["database_url"], echo=options.get("echo", False))
+        self._sessionmaker = async_sessionmaker(self._engine, expire_on_commit=False)
 
     @property
     def engine(self) -> AsyncEngine:
@@ -71,9 +69,12 @@ def repository_token(model: type):
 class SqlAlchemyModule:
     @staticmethod
     def for_root(*, database_url: str, echo: bool = False) -> type:
-        SqlAlchemyService.configure(database_url=database_url, echo=echo)
+        options = {"database_url": database_url, "echo": echo}
 
-        @Module(providers=[SqlAlchemyService], exports=[SqlAlchemyService])
+        @Module(
+            providers=[use_value(SQLALCHEMY_OPTIONS, options), SqlAlchemyService],
+            exports=[SqlAlchemyService],
+        )
         class DynamicSqlAlchemyModule:
             pass
 

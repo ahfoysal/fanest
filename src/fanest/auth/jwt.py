@@ -3,38 +3,30 @@ from typing import Any
 
 import jwt
 
-from fanest import ForbiddenException, Injectable, Module, UnauthorizedException
+from fanest import ForbiddenException, Inject, Injectable, Module, UnauthorizedException, use_value
 from fanest.core.metadata import ParameterSource
+from fanest.core.providers import token
+
+JWT_OPTIONS = token("JWT_OPTIONS")
 
 
 @Injectable()
 class JwtService:
-    _secret = "change-me"
-    _algorithm = "HS256"
-    _expires_in_seconds: int | None = 3600
-
-    @classmethod
-    def configure(
-        cls,
-        *,
-        secret: str,
-        algorithm: str = "HS256",
-        expires_in_seconds: int | None = 3600,
-    ) -> None:
-        cls._secret = secret
-        cls._algorithm = algorithm
-        cls._expires_in_seconds = expires_in_seconds
+    def __init__(self, options: dict[str, Any] = Inject(JWT_OPTIONS)):
+        self.secret = options["secret"]
+        self.algorithm = options.get("algorithm", "HS256")
+        self.expires_in_seconds = options.get("expires_in_seconds", 3600)
 
     def sign(self, payload: dict[str, Any]) -> str:
         token_payload = dict(payload)
-        if self._expires_in_seconds is not None:
+        if self.expires_in_seconds is not None:
             token_payload["exp"] = datetime.now(timezone.utc) + timedelta(
-                seconds=self._expires_in_seconds
+                seconds=self.expires_in_seconds
             )
-        return jwt.encode(token_payload, self._secret, algorithm=self._algorithm)
+        return jwt.encode(token_payload, self.secret, algorithm=self.algorithm)
 
     def verify(self, token: str) -> dict[str, Any]:
-        return jwt.decode(token, self._secret, algorithms=[self._algorithm])
+        return jwt.decode(token, self.secret, algorithms=[self.algorithm])
 
 
 class JwtAuthGuard:
@@ -87,13 +79,13 @@ class AuthModule:
         algorithm: str = "HS256",
         expires_in_seconds: int | None = 3600,
     ) -> type:
-        JwtService.configure(
-            secret=secret,
-            algorithm=algorithm,
-            expires_in_seconds=expires_in_seconds,
-        )
+        options = {
+            "secret": secret,
+            "algorithm": algorithm,
+            "expires_in_seconds": expires_in_seconds,
+        }
 
-        @Module(providers=[JwtService], exports=[JwtService])
+        @Module(providers=[use_value(JWT_OPTIONS, options), JwtService], exports=[JwtService])
         class DynamicAuthModule:
             pass
 
