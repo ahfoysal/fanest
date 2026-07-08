@@ -1,11 +1,12 @@
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 import jwt
 
 from fanest import ForbiddenException, Inject, Injectable, Module, UnauthorizedException, use_value
 from fanest.core.metadata import ParameterSource
 from fanest.core.providers import token
+from fanest.core.providers import use_factory as provider_factory
 
 JWT_OPTIONS = token("JWT_OPTIONS")
 
@@ -107,6 +108,21 @@ class AuthModule:
         }
 
         @Module(providers=[use_value(JWT_OPTIONS, options), JwtService], exports=[JwtService])
+        class DynamicAuthModule:
+            pass
+
+        return DynamicAuthModule
+
+    @staticmethod
+    def for_root_async(
+        *,
+        use_factory: Callable[..., dict[str, Any]],
+        inject: list[Any] | None = None,
+    ) -> type:
+        @Module(
+            providers=[provider_factory(JWT_OPTIONS, use_factory, inject=inject or []), JwtService],
+            exports=[JwtService],
+        )
         class DynamicAuthModule:
             pass
 

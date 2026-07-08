@@ -1,13 +1,14 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import wraps
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from fanest import Inject, Injectable, Module, use_value
-from fanest.core.providers import token, use_factory
+from fanest.core.providers import token
+from fanest.core.providers import use_factory as provider_factory
 
 SQLALCHEMY_OPTIONS = token("SQLALCHEMY_OPTIONS")
 
@@ -105,9 +106,27 @@ class SqlAlchemyModule:
         return DynamicSqlAlchemyModule
 
     @staticmethod
+    def for_root_async(
+        *,
+        use_factory: Callable[..., dict[str, Any]],
+        inject: list[Any] | None = None,
+    ) -> type:
+        @Module(
+            providers=[
+                provider_factory(SQLALCHEMY_OPTIONS, use_factory, inject=inject or []),
+                SqlAlchemyService,
+            ],
+            exports=[SqlAlchemyService],
+        )
+        class DynamicSqlAlchemyModule:
+            pass
+
+        return DynamicSqlAlchemyModule
+
+    @staticmethod
     def for_feature(models: list[type]) -> type:
         providers = [
-            use_factory(
+            provider_factory(
                 repository_token(model),
                 lambda service, model=model: service.create_repository(model),
                 inject=[SqlAlchemyService],

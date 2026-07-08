@@ -92,7 +92,7 @@ class FaNestFactory:
         async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             instances = []
             for provider in providers:
-                instance = container.resolve(container.provider_token(provider))
+                instance = await container.resolve_async(container.provider_token(provider))
                 instances.append(instance)
                 FaNestFactory._register_events(container, instance)
                 hook = getattr(instance, "on_module_init", None)
@@ -105,7 +105,7 @@ class FaNestFactory:
             yield
             await schedule_runner.stop()
             for provider in providers:
-                instance = container.resolve(container.provider_token(provider))
+                instance = await container.resolve_async(container.provider_token(provider))
                 hook = getattr(instance, "on_application_shutdown", None)
                 if hook is not None:
                     result = hook()

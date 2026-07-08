@@ -78,6 +78,9 @@ class ModuleScanner:
         for imported_module in record.metadata.imports:
             imported_record = self.records[imported_module]
             visible.update(imported_record.export_tokens)
+        for global_record in self.records.values():
+            if global_record.metadata.global_module and global_record is not record:
+                visible.update(global_record.export_tokens)
         return visible
 
     def _validate_target_dependencies(

@@ -69,7 +69,7 @@ from fanest.common.responses import StreamableFile
 from fanest.common.serialization import ClassSerializerInterceptor, Serialize
 from fanest.core.application import FaNestApplication
 from fanest.core.factory import FaNestFactory
-from fanest.core.module import Module
+from fanest.core.module import Global, Module
 from fanest.core.module_ref import ModuleRef
 from fanest.core.providers import (
     Inject,
@@ -102,6 +102,7 @@ __all__ = [
     "Form",
     "ForbiddenException",
     "Get",
+    "Global",
     "GoneException",
     "Header",
     "Head",

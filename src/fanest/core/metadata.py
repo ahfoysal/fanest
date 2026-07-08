@@ -82,6 +82,7 @@ class ModuleMetadata:
     gateways: list[type] = field(default_factory=list)
     middlewares: list[Any] = field(default_factory=list)
     exports: list[type] = field(default_factory=list)
+    global_module: bool = False
 
 
 @dataclass(frozen=True)

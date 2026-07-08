@@ -1,9 +1,10 @@
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
-from fanest import Injectable, Module, use_value, Inject
+from fanest import Inject, Injectable, Module, use_value
 from fanest.core.providers import token
+from fanest.core.providers import use_factory as provider_factory
 
 HTTP_OPTIONS = token("HTTP_OPTIONS")
 
@@ -37,6 +38,21 @@ class HttpModule:
     @staticmethod
     def register(**options: Any) -> type:
         @Module(providers=[use_value(HTTP_OPTIONS, options), HttpService], exports=[HttpService])
+        class DynamicHttpModule:
+            pass
+
+        return DynamicHttpModule
+
+    @staticmethod
+    def register_async(
+        *,
+        use_factory: Callable[..., dict[str, Any]],
+        inject: list[Any] | None = None,
+    ) -> type:
+        @Module(
+            providers=[provider_factory(HTTP_OPTIONS, use_factory, inject=inject or []), HttpService],
+            exports=[HttpService],
+        )
         class DynamicHttpModule:
             pass
 

@@ -1,11 +1,13 @@
+import inspect
 import os
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel
 
 from fanest import Inject, Injectable, Module, use_value
 from fanest.core.providers import token
+from fanest.core.providers import use_factory as provider_factory
 
 CONFIG_VALUES = token("CONFIG_VALUES")
 T = TypeVar("T")
@@ -64,6 +66,36 @@ class ConfigModule:
             config_values = schema.model_validate(config_values).model_dump()
 
         @Module(providers=[use_value(CONFIG_VALUES, config_values), ConfigService], exports=[ConfigService])
+        class DynamicConfigModule:
+            pass
+
+        return DynamicConfigModule
+
+    @staticmethod
+    def for_root_async(
+        *,
+        use_factory: Callable[..., dict[str, Any]],
+        inject: list[Any] | None = None,
+        env_file: str | list[str] | None = ".env",
+        schema: type[BaseModel] | None = None,
+    ) -> type:
+        async def load_values(*dependencies: Any) -> dict[str, Any]:
+            config_values: dict[str, Any] = dict(os.environ)
+            env_files = [env_file] if isinstance(env_file, str) else env_file or []
+            for file in env_files:
+                config_values.update(ConfigService.read_env_file(file))
+            result = use_factory(*dependencies)
+            if inspect.isawaitable(result):
+                result = await result
+            config_values.update(result or {})
+            if schema is not None:
+                return schema.model_validate(config_values).model_dump()
+            return config_values
+
+        @Module(
+            providers=[provider_factory(CONFIG_VALUES, load_values, inject=inject or []), ConfigService],
+            exports=[ConfigService],
+        )
         class DynamicConfigModule:
             pass
 
