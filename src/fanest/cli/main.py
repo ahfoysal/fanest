@@ -3,6 +3,7 @@ import compileall
 import errno
 import importlib
 import importlib.util
+import keyword
 import platform
 import re
 import socket
@@ -132,7 +133,20 @@ def _load_check_module(path: str, module_name: str):
         if spec is None or spec.loader is None:
             raise typer.BadParameter(f"Could not import application file: {path}")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Put the project root on sys.path so the target file can import sibling
+        # packages (e.g. ``from app.something import ...``) just like ``dev``/``run`` do.
+        cwd = str(Path.cwd())
+        added_cwd = cwd not in sys.path
+        if added_cwd:
+            sys.path.insert(0, cwd)
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            if added_cwd:
+                try:
+                    sys.path.remove(cwd)
+                except ValueError:
+                    pass
         return module
     try:
         sys.path.insert(0, str(Path.cwd()))
@@ -156,7 +170,7 @@ def generate_resource(
     class_name = _class_name(name)
     _write_file(resource / f"{name}_service.py", _service_template(class_name), dry_run)
     _write_file(resource / f"{name}_controller.py", _controller_template(name, class_name), dry_run)
-    _write_file(resource / f"{name}_module.py", _module_template(name, class_name), dry_run)
+    _write_file(resource / f"{name}_module.py", _resource_module_template(name, class_name), dry_run)
     if module:
         _register_module_import(module, name, class_name, dry_run)
     typer.echo(f"Generated resource {name}")
@@ -314,6 +328,21 @@ def generate_test(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -
     typer.echo(f"Generated test {name}")
 
 
+def _validate_artifact_name(name: str) -> None:
+    """Reject names that would escape the project or produce invalid Python.
+
+    A generator name becomes both a directory/file name and a Python class/module
+    identifier, so it must be a plain Python identifier: no path separators or
+    ``..`` (path traversal), no leading digits, no spaces/dashes, and not a keyword.
+    """
+    if not name or not name.isidentifier() or keyword.iskeyword(name):
+        raise typer.BadParameter(
+            f"Invalid name {name!r}: use a valid Python identifier "
+            "(letters, digits and underscores; not starting with a digit; "
+            "not a reserved keyword), e.g. 'user_profile'."
+        )
+
+
 def _class_name(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_"))
 
@@ -328,6 +357,7 @@ def _ensure_resource_dir(name: str, *, exist_ok: bool = True) -> Path:
 
 
 def _resource_dir(name: str, dry_run: bool, *, exist_ok: bool = True) -> Path:
+    _validate_artifact_name(name)
     if dry_run:
         return Path("src") / name
     return _ensure_resource_dir(name, exist_ok=exist_ok)
@@ -561,6 +591,19 @@ class {class_name}Controller:
 
 
 def _module_template(name: str, class_name: str) -> str:
+    # A standalone module (``g module``) must not import a controller/service
+    # that was never generated — that would raise ModuleNotFoundError on import.
+    return f'''from fanest import Module
+
+
+@Module()
+class {class_name}Module:
+    pass
+'''
+
+
+def _resource_module_template(name: str, class_name: str) -> str:
+    # Used by ``g resource``, which also generates the controller and service.
     return f'''from fanest import Module
 
 from .{name}_controller import {class_name}Controller
@@ -682,7 +725,7 @@ def _resolver_template(class_name: str) -> str:
     return f'''from fanest.graphql import Query, Resolver
 
 
-@Resolver()
+@Resolver
 class {class_name}Resolver:
     @Query("{class_name[0].lower() + class_name[1:]}")
     async def resolve(self):
