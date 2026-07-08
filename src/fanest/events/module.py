@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 from collections.abc import Callable
 from typing import Any
@@ -11,6 +12,31 @@ def OnEvent(event: str):
         return handler
 
     return decorator
+
+
+async def _await_all(awaitables: list[Any]) -> None:
+    for awaitable in awaitables:
+        await awaitable
+
+
+class _EmitResult:
+    """Awaitable returned by :meth:`EventEmitter.emit`.
+
+    Synchronous handlers have already run by the time this object exists, and
+    any asynchronous handlers are already scheduled. Awaiting it waits for the
+    async handlers to finish; not awaiting it lets them run fire-and-forget.
+    Implemented as a generator-based awaitable (not a coroutine) so a bare
+    ``emitter.emit(...)`` never raises "coroutine was never awaited".
+    """
+
+    __slots__ = ("_tasks",)
+
+    def __init__(self, tasks: list[Any]) -> None:
+        self._tasks = tasks
+
+    def __await__(self):
+        if self._tasks:
+            yield from asyncio.gather(*self._tasks).__await__()
 
 
 @Injectable()
@@ -35,17 +61,37 @@ class EventEmitter:
             item for item in self._once_handlers.get(event, []) if item != handler
         ]
 
-    async def emit(self, event: str, payload: Any = None) -> None:
+    def emit(self, event: str, payload: Any = None) -> _EmitResult:
+        """Emit an event to all registered handlers.
+
+        Works whether or not the caller awaits it: sync handlers run inline and
+        async handlers are scheduled immediately, so ``emitter.emit(...)`` fires
+        the event without silently dropping it, while ``await emitter.emit(...)``
+        still waits for the async handlers to complete.
+        """
         handlers = [
             *self._handlers.get(event, []),
             *self._handlers.get("*", []),
             *self._once_handlers.pop(event, []),
             *self._once_handlers.pop("*", []),
         ]
+        pending: list[Any] = []
         for handler in handlers:
             result = handler(payload)
             if inspect.isawaitable(result):
-                await result
+                pending.append(result)
+        if not pending:
+            return _EmitResult([])
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            tasks = [loop.create_task(_await_all([awaitable])) for awaitable in pending]
+            return _EmitResult(tasks)
+        # No running loop: run the async handlers to completion synchronously.
+        asyncio.run(_await_all(pending))
+        return _EmitResult([])
 
     def _handler_key(self, handler: Callable[..., Any]) -> Any:
         return getattr(

@@ -21,6 +21,12 @@ class JwtService:
 
     def sign(self, payload: dict[str, Any], **options: Any) -> str:
         token_payload = dict(payload)
+        # RFC 7519 requires `sub` to be a string, and PyJWT >= 2.10 rejects a
+        # non-string `sub` on verify. Coerce it here so the common
+        # `sub = user.id` (int) round-trips through sign()/verify().
+        subject = token_payload.get("sub")
+        if subject is not None and not isinstance(subject, str):
+            token_payload["sub"] = str(subject)
         expires_in_seconds = options.pop("expires_in_seconds", self.expires_in_seconds)
         if expires_in_seconds is not None:
             token_payload["exp"] = datetime.now(timezone.utc) + timedelta(
