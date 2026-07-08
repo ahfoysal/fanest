@@ -96,6 +96,7 @@ class FaNestFactory:
                 instances.append(instance)
                 FaNestFactory._register_events(container, instance)
                 FaNestFactory._register_queue_processors(container, instance)
+                FaNestFactory._register_graphql_resolver(container, instance)
                 hook = getattr(instance, "on_module_init", None)
                 if hook is not None:
                     result = hook()
@@ -143,3 +144,21 @@ class FaNestFactory:
             job_name = getattr(handler, "__fanest_process__", None)
             if job_name is not None:
                 queue_service.register_processor(queue, job_name, handler)
+
+    @staticmethod
+    def _register_graphql_resolver(container: FaNestContainer, instance: object) -> None:
+        from fanest.graphql import GraphQLSchema
+
+        if getattr(instance.__class__, "__fanest_provider__", None) is None:
+            return
+        has_graphql_handlers = any(
+            getattr(handler, "__fanest_graphql__", None) is not None
+            for _, handler in inspect.getmembers(instance, predicate=callable)
+        )
+        if not has_graphql_handlers:
+            return
+        try:
+            schema = container.resolve(GraphQLSchema)
+        except Exception:
+            return
+        schema.register_resolver(instance)
