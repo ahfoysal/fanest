@@ -58,16 +58,71 @@ class MongoCollection:
         return all(document.get(key) == value for key, value in query.items())
 
 
+class MotorCollection:
+    """Real MongoDB-backed collection (requires ``motor``), matching the
+    in-memory :class:`MongoCollection` contract: string ``_id`` values that
+    round-trip, and the same insert/find/update/delete methods.
+    """
+
+    def __init__(self, motor_collection: Any):
+        self._collection = motor_collection
+
+    async def insert_one(self, document: dict[str, Any]) -> dict[str, Any]:
+        stored = dict(document)
+        stored.setdefault("_id", str(uuid4()))
+        await self._collection.insert_one(stored)
+        return dict(stored)
+
+    async def find(self, query: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        cursor = self._collection.find(query or {})
+        return [document async for document in cursor]
+
+    async def find_one(self, query: dict[str, Any]) -> dict[str, Any] | None:
+        return await self._collection.find_one(query)
+
+    async def update_one(self, query: dict[str, Any], update: dict[str, Any]) -> dict[str, Any] | None:
+        changes = update if any(str(k).startswith("$") for k in update) else {"$set": update}
+        await self._collection.update_one(query, changes)
+        return await self.find_one(query)
+
+    async def delete_one(self, query: dict[str, Any]) -> bool:
+        result = await self._collection.delete_one(query)
+        return result.deleted_count > 0
+
+    async def clear(self) -> None:
+        await self._collection.delete_many({})
+
+
 @Injectable()
 class MongoService:
     def __init__(self, options: dict[str, Any] = Inject(MONGO_OPTIONS)):
         self.options = options
-        self._collections: dict[str, MongoCollection] = {}
+        self._collections: dict[str, Any] = {}
+        self._client = None
+        self._db = None
+        uri = options.get("uri") or options.get("url")
+        if uri:
+            try:
+                from motor.motor_asyncio import AsyncIOMotorClient
+            except ImportError as exc:  # pragma: no cover - exercised without motor installed
+                raise ImportError(
+                    "MongoModule.for_root(uri=...) requires the 'motor' package. "
+                    "Install it with: pip install 'fanest[mongo]'"
+                ) from exc
+            self._client = AsyncIOMotorClient(uri)
+            self._db = self._client[options.get("database", "fanest")]
 
-    def collection(self, name: str) -> MongoCollection:
+    def collection(self, name: str) -> Any:
         if name not in self._collections:
-            self._collections[name] = MongoCollection(name)
+            if self._db is not None:
+                self._collections[name] = MotorCollection(self._db[name])
+            else:
+                self._collections[name] = MongoCollection(name)
         return self._collections[name]
+
+    async def on_application_shutdown(self) -> None:
+        if self._client is not None:
+            self._client.close()
 
 
 class MongoModule:

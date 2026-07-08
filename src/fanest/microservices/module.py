@@ -1,4 +1,5 @@
 import inspect
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -78,29 +79,44 @@ class InMemoryTransport:
         return getattr(handler, "__fanest_registration_key__", handler)
 
 
-class RedisTransport(InMemoryTransport):
+class _NetworkPlaceholderTransport(InMemoryTransport):
+    """Base for networked transports that aren't implemented yet.
+
+    They currently behave as in-memory transports (single process only) and do
+    NOT connect to a real broker. A warning is emitted so this isn't relied on
+    for cross-service messaging in production by mistake.
+    """
+
+    _broker = "network"
+
     def __init__(self) -> None:
-        super().__init__("redis")
+        super().__init__(self._broker)
+        warnings.warn(
+            f"The '{self._broker}' microservice transport is an in-memory placeholder: "
+            f"it does not connect to a real {self._broker} broker, so messages stay within "
+            "this process. Do not rely on it for cross-service messaging in production.",
+            stacklevel=2,
+        )
 
 
-class NatsTransport(InMemoryTransport):
-    def __init__(self) -> None:
-        super().__init__("nats")
+class RedisTransport(_NetworkPlaceholderTransport):
+    _broker = "redis"
 
 
-class RabbitMqTransport(InMemoryTransport):
-    def __init__(self) -> None:
-        super().__init__("rabbitmq")
+class NatsTransport(_NetworkPlaceholderTransport):
+    _broker = "nats"
 
 
-class KafkaTransport(InMemoryTransport):
-    def __init__(self) -> None:
-        super().__init__("kafka")
+class RabbitMqTransport(_NetworkPlaceholderTransport):
+    _broker = "rabbitmq"
 
 
-class GrpcTransport(InMemoryTransport):
-    def __init__(self) -> None:
-        super().__init__("grpc")
+class KafkaTransport(_NetworkPlaceholderTransport):
+    _broker = "kafka"
+
+
+class GrpcTransport(_NetworkPlaceholderTransport):
+    _broker = "grpc"
 
 
 class MicroserviceServer:
