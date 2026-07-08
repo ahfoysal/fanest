@@ -171,6 +171,7 @@ fanest generate dto users
 fanest generate middleware request_id
 fanest generate decorator current_user
 fanest generate resource users --dry-run
+fanest generate module users --module app_module.py
 ```
 
 ## Core Features
@@ -412,10 +413,12 @@ Current:
 - WebSocket gateways, room broadcasting, guards, and pipes
 - cron, interval, timeout jobs, and scheduler registry
 - in-memory queue processors
-- mailer package
+- queue retries and delayed jobs
+- mailer package with templates
 - microservice message/event patterns and named transports
 - lightweight GraphQL module
 - SQLAlchemy package start
+- migration template helper
 - Mongo-style package start
 - cache store adapters
 - health checks
@@ -424,9 +427,9 @@ Current:
 
 Still to deepen:
 
-- Redis-backed queues
-- SMTP templates and provider adapters
-- advanced SQLAlchemy migrations/templates
+- Redis-backed queue transport
+- advanced SMTP provider adapters
+- full migration runner
 - CLI auto-registration into modules
 - workspace/monorepo mode
 
@@ -438,7 +441,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 61 passed
+# 65 passed
 ```
 
 ## License
