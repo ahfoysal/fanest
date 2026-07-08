@@ -34,6 +34,8 @@ class JwtAuthGuard:
         self.jwt_service = jwt_service
 
     def can_activate(self, context):
+        if is_public(context.handler, context.controller.__class__):
+            return True
         authorization = context.request.headers.get("authorization")
         if not authorization or not authorization.lower().startswith("bearer "):
             raise UnauthorizedException("Missing bearer token")
@@ -47,6 +49,8 @@ class JwtAuthGuard:
 
 class RolesGuard:
     def can_activate(self, context):
+        if is_public(context.handler, context.controller.__class__):
+            return True
         required_roles = getattr(context.handler, "__fanest_roles__", [])
         if not required_roles:
             return True
@@ -65,6 +69,23 @@ def Roles(*roles: str):
         return target
 
     return decorator
+
+
+def Public():
+    def decorator(target):
+        setattr(target, "__fanest_public__", True)
+        return target
+
+    return decorator
+
+
+def is_public(handler: Any, controller: type | None = None) -> bool:
+    if getattr(handler, "__fanest_public__", False):
+        return True
+    func = getattr(handler, "__func__", None)
+    if func is not None and getattr(func, "__fanest_public__", False):
+        return True
+    return bool(controller is not None and getattr(controller, "__fanest_public__", False))
 
 
 def CurrentUser(default: Any = None) -> ParameterSource:

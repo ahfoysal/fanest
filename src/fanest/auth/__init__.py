@@ -1,4 +1,13 @@
-from fanest.auth.jwt import AuthModule, CurrentUser, JWT_OPTIONS, JwtAuthGuard, JwtService, Roles, RolesGuard
+from fanest.auth.jwt import (
+    AuthModule,
+    CurrentUser,
+    JWT_OPTIONS,
+    JwtAuthGuard,
+    JwtService,
+    Public,
+    Roles,
+    RolesGuard,
+)
 
 __all__ = [
     "AuthModule",
@@ -6,6 +15,7 @@ __all__ = [
     "JWT_OPTIONS",
     "JwtAuthGuard",
     "JwtService",
+    "Public",
     "Roles",
     "RolesGuard",
 ]

@@ -11,6 +11,7 @@ dependencies = [
     "croniter>=3.0.0",
     "email-validator>=2.2.0",
     "fastapi>=0.115.0",
+    "greenlet>=3.0.0",
     "pyjwt>=2.8.0",
     "python-multipart>=0.0.9",
     "pydantic>=2.0.0",

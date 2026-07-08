@@ -3,6 +3,7 @@ from fanest.sqlalchemy.module import (
     SqlAlchemyModule,
     SqlAlchemyRepository,
     SqlAlchemyService,
+    Transactional,
     repository_token,
 )
 
@@ -11,5 +12,6 @@ __all__ = [
     "SqlAlchemyModule",
     "SqlAlchemyRepository",
     "SqlAlchemyService",
+    "Transactional",
     "repository_token",
 ]

@@ -25,6 +25,9 @@ class CacheService:
     def clear(self) -> None:
         self._store.clear()
 
+    def delete(self, key: str) -> None:
+        self._store.pop(key, None)
+
 
 class CacheInterceptor:
     def __init__(self, cache_service: CacheService):
@@ -32,7 +35,13 @@ class CacheInterceptor:
 
     async def intercept(self, context, call_next):
         request = context.request
-        key = f"{request.method}:{request.url.path}?{request.url.query}"
+        evict_key = getattr(context.handler, "__fanest_cache_evict__", None)
+        if evict_key is not None:
+            self.cache_service.delete(evict_key)
+            return await call_next()
+        if request.method != "GET":
+            return await call_next()
+        key = self._cache_key(context)
         cached = self.cache_service.get(key)
         if cached is not None:
             return cached
@@ -41,10 +50,33 @@ class CacheInterceptor:
         self.cache_service.set(key, result, ttl)
         return result
 
+    def _cache_key(self, context) -> str:
+        custom_key = getattr(context.handler, "__fanest_cache_key__", None)
+        if custom_key is not None:
+            return custom_key
+        request = context.request
+        return f"{request.method}:{request.url.path}?{request.url.query}"
+
 
 def CacheTTL(seconds: int):
     def decorator(handler):
         setattr(handler, "__fanest_cache_ttl__", seconds)
+        return handler
+
+    return decorator
+
+
+def CacheKey(key: str):
+    def decorator(handler):
+        setattr(handler, "__fanest_cache_key__", key)
+        return handler
+
+    return decorator
+
+
+def CacheEvict(key: str):
+    def decorator(handler):
+        setattr(handler, "__fanest_cache_evict__", key)
         return handler
 
     return decorator

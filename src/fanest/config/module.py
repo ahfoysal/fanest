@@ -1,22 +1,23 @@
 import os
 from pathlib import Path
+from typing import Any, TypeVar
 
-from fanest import Injectable, Module
+from pydantic import BaseModel
+
+from fanest import Inject, Injectable, Module, use_value
+from fanest.core.providers import token
+
+CONFIG_VALUES = token("CONFIG_VALUES")
+T = TypeVar("T")
 
 
 @Injectable()
 class ConfigService:
-    _values: dict[str, str] = {}
+    def __init__(self, values: dict[str, Any] = Inject(CONFIG_VALUES)):
+        self._values = values
 
-    @classmethod
-    def configure(cls, *, env_file: str | None = None) -> None:
-        values = dict(os.environ)
-        if env_file:
-            values.update(cls._read_env_file(env_file))
-        cls._values = values
-
-    @classmethod
-    def _read_env_file(cls, env_file: str) -> dict[str, str]:
+    @staticmethod
+    def read_env_file(env_file: str) -> dict[str, str]:
         path = Path(env_file)
         if not path.exists():
             return {}
@@ -29,22 +30,40 @@ class ConfigService:
             values[key.strip()] = value.strip().strip('"').strip("'")
         return values
 
-    def get(self, key: str, default: str | None = None) -> str | None:
-        return self._values.get(key, default)
+    def get(self, key: str, default: T | None = None, *, cast: type[T] | None = None) -> Any:
+        value = self._values.get(key, default)
+        if cast is not None and value is not None:
+            if cast is bool and isinstance(value, str):
+                return value.lower() in {"1", "true", "yes", "on"}
+            return cast(value)
+        return value
 
-    def get_required(self, key: str) -> str:
+    def get_required(self, key: str, *, cast: type[T] | None = None) -> Any:
         value = self.get(key)
         if value is None:
             raise KeyError(f"Missing required config value: {key}")
+        if cast is not None:
+            return self.get(key, cast=cast)
         return value
 
 
 class ConfigModule:
     @staticmethod
-    def for_root(*, env_file: str | None = ".env") -> type:
-        ConfigService.configure(env_file=env_file)
+    def for_root(
+        *,
+        env_file: str | list[str] | None = ".env",
+        schema: type[BaseModel] | None = None,
+        values: dict[str, Any] | None = None,
+    ) -> type:
+        config_values: dict[str, Any] = dict(os.environ)
+        env_files = [env_file] if isinstance(env_file, str) else env_file or []
+        for file in env_files:
+            config_values.update(ConfigService.read_env_file(file))
+        config_values.update(values or {})
+        if schema is not None:
+            config_values = schema.model_validate(config_values).model_dump()
 
-        @Module(providers=[ConfigService], exports=[ConfigService])
+        @Module(providers=[use_value(CONFIG_VALUES, config_values), ConfigService], exports=[ConfigService])
         class DynamicConfigModule:
             pass
 

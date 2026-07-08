@@ -1,3 +1,3 @@
-from fanest.config.module import ConfigModule, ConfigService
+from fanest.config.module import CONFIG_VALUES, ConfigModule, ConfigService
 
-__all__ = ["ConfigModule", "ConfigService"]
+__all__ = ["CONFIG_VALUES", "ConfigModule", "ConfigService"]

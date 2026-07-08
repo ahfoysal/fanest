@@ -1,4 +1,6 @@
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from functools import wraps
 from typing import Any
 
 from sqlalchemy import select
@@ -27,6 +29,14 @@ class SqlAlchemyService:
             raise RuntimeError("SqlAlchemyModule.for_root(...) has not been configured.")
         async with self._sessionmaker() as session:
             yield session
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[AsyncSession]:
+        if self._sessionmaker is None:
+            raise RuntimeError("SqlAlchemyModule.for_root(...) has not been configured.")
+        async with self._sessionmaker() as session:
+            async with session.begin():
+                yield session
 
     def create_repository(self, model: type) -> "SqlAlchemyRepository":
         return SqlAlchemyRepository(self, model)
@@ -64,6 +74,20 @@ class SqlAlchemyRepository:
 
 def repository_token(model: type):
     return token(f"SQLALCHEMY_REPOSITORY:{model.__module__}.{model.__name__}")
+
+
+def Transactional(service_attr: str = "db"):
+    def decorator(handler):
+        @wraps(handler)
+        async def wrapper(self, *args, **kwargs):
+            service = getattr(self, service_attr)
+            async with service.transaction() as session:
+                kwargs.setdefault("session", session)
+                return await handler(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 class SqlAlchemyModule:
