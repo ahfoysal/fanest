@@ -1,7 +1,7 @@
 from fastapi import BackgroundTasks, Request, Response
 from fastapi.testclient import TestClient
 
-from fanest import Controller, FaNestFactory, Get, Injectable, Module, Res, SetHeader, Sse, StreamableFile
+from fanest import Controller, FaNestFactory, Get, Injectable, Module, Query, Res, SetHeader, Sse, StreamableFile
 
 
 @Injectable(scope="request")
@@ -58,6 +58,19 @@ class ResponseController:
         return {
             "path": request.url.path,
             "background_tasks": background_tasks is not None,
+        }
+
+    @Get("/reserved-query-names")
+    async def reserved_query_names(
+        self,
+        request: str = Query(),
+        response: str = Query(),
+        background_tasks: str = Query(),
+    ):
+        return {
+            "request": request,
+            "response": response,
+            "background_tasks": background_tasks,
         }
 
     @Get("/manual")
@@ -128,6 +141,25 @@ def test_native_framework_parameter_names_do_not_duplicate_generated_signature()
         "background_tasks": True,
     }
     assert response.headers["x-native"] == "yes"
+
+
+def test_reserved_framework_parameter_names_can_still_be_user_query_params():
+    client = TestClient(FaNestFactory.create(ResponseModule))
+
+    response = client.get(
+        "/responses/reserved-query-names",
+        params={
+            "request": "hello",
+            "response": "world",
+            "background_tasks": "later",
+        },
+    )
+
+    assert response.json() == {
+        "request": "hello",
+        "response": "world",
+        "background_tasks": "later",
+    }
 
 
 def test_response_decorator_supports_manual_and_passthrough_modes():

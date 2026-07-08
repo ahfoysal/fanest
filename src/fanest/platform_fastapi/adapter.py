@@ -265,6 +265,7 @@ class FastApiAdapter:
             background_tasks: FastBackgroundTasks,
             **kwargs: Any,
         ) -> Any:
+            kwargs = self._restore_reserved_user_parameter_names(handler_function, kwargs)
             request_scope = self.container.begin_request()
             end_request_on_return = True
             controller = await self.container.resolve_async(controller_class, module_key=module_key)
@@ -376,7 +377,7 @@ class FastApiAdapter:
         for name, parameter in original.parameters.items():
             if name == "self":
                 continue
-            if name in {"request", "response", "background_tasks"}:
+            if self._is_native_framework_parameter(name, parameter):
                 continue
             source = parameter.default
             annotation = parameter.annotation
@@ -395,15 +396,63 @@ class FastApiAdapter:
                 default = self._fastapi_default(source, name)
             else:
                 default = parameter.default
+            parameter_name = name
             parameters.append(
                 inspect.Parameter(
-                    name,
+                    self._signature_parameter_name(name, parameter),
                     inspect.Parameter.KEYWORD_ONLY,
-                    default=default,
+                    default=self._signature_parameter_default(parameter_name, parameter, default),
                     annotation=annotation,
                 )
             )
         return inspect.Signature(parameters=parameters, return_annotation=original.return_annotation)
+
+    def _signature_parameter_name(self, name: str, parameter: inspect.Parameter) -> str:
+        if name in {"request", "response", "background_tasks"} and not self._is_native_framework_parameter(name, parameter):
+            return f"__fanest_user_{name}"
+        return name
+
+    def _signature_parameter_default(
+        self,
+        name: str,
+        parameter: inspect.Parameter,
+        default: Any,
+    ) -> Any:
+        if self._signature_parameter_name(name, parameter) == name:
+            return default
+        source = parameter.default
+        if isinstance(source, ParameterSource):
+            return self._fastapi_default(
+                ParameterSource(
+                    source=source.source,
+                    name=source.name or name,
+                    default=source.default,
+                    pipes=source.pipes,
+                ),
+                name,
+            )
+        if default is inspect.Parameter.empty:
+            return Query(..., alias=name)
+        return default
+
+    def _restore_reserved_user_parameter_names(
+        self,
+        handler: Callable[..., Any],
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        restored = dict(kwargs)
+        for name, parameter in self._parameters(handler).items():
+            internal_name = self._signature_parameter_name(name, parameter)
+            if internal_name != name and internal_name in restored:
+                restored[name] = restored.pop(internal_name)
+        return restored
+
+    def _is_native_framework_parameter(self, name: str, parameter: inspect.Parameter) -> bool:
+        if name not in {"request", "response", "background_tasks"}:
+            return False
+        if isinstance(parameter.default, ParameterSource):
+            return False
+        return parameter.annotation in {Request, Response, FastBackgroundTasks}
 
     def _fastapi_default(self, source: ParameterSource, fallback_name: str) -> Any:
         alias = source.name or fallback_name
@@ -580,11 +629,17 @@ class FastApiAdapter:
     ) -> dict[str, Any]:
         bound = dict(kwargs)
         parameters = self._parameters(handler)
-        if "request" in parameters:
+        request_parameter = parameters.get("request")
+        if request_parameter is not None and self._is_native_framework_parameter("request", request_parameter):
             bound["request"] = request
-        if "response" in parameters:
+        response_parameter = parameters.get("response")
+        if response_parameter is not None and self._is_native_framework_parameter("response", response_parameter):
             bound["response"] = response
-        if "background_tasks" in parameters:
+        background_tasks_parameter = parameters.get("background_tasks")
+        if (
+            background_tasks_parameter is not None
+            and self._is_native_framework_parameter("background_tasks", background_tasks_parameter)
+        ):
             bound["background_tasks"] = background_tasks
         return bound
 

@@ -10,6 +10,7 @@ from fanest import (
     MiddlewareConsumer,
     Module,
     Post,
+    Injectable,
     PartialType,
     Serialize,
     UseInterceptors,
@@ -143,6 +144,34 @@ async def test_microservice_message_and_event_patterns():
 
     service = server.container.resolve(MathService)
     assert service.events == [7]
+
+
+@Injectable(scope="request")
+class ScopedMathService:
+    created = 0
+
+    def __init__(self):
+        type(self).created += 1
+        self.instance_id = type(self).created
+
+    @MessagePattern("scoped.id")
+    async def scoped_id(self, data, context):
+        return {"id": self.instance_id, "transport": context.transport}
+
+
+@Module(providers=[ScopedMathService])
+class ScopedMathModule:
+    pass
+
+
+@pytest.mark.anyio
+async def test_microservice_handlers_resolve_inside_message_scope():
+    ScopedMathService.created = 0
+    server = MicroserviceServer(ScopedMathModule).compile()
+    client = server.client()
+
+    assert await client.send("scoped.id", {}) == {"id": 1, "transport": "memory"}
+    assert await client.send("scoped.id", {}) == {"id": 2, "transport": "memory"}
 
 
 @pytest.mark.anyio

@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 import asyncio
 
-from fanest import Controller, FaNestFactory, Get, Module, Post
+from fanest import Controller, FaNestFactory, Get, Injectable, Module, Post
 from fanest.mailer import MailerModule, MailerService
 from fanest.queues import Process, Processor, QueueModule, QueueService
 
@@ -43,6 +43,64 @@ def test_queue_module_registers_processors_and_runs_jobs():
 
     assert response.status_code == 200
     assert response.json()["handled"] == ["ada@example.com"]
+
+
+def test_queue_processors_are_not_duplicated_across_repeated_lifespan_startups():
+    EmailProcessor.handled = []
+    app = FaNestFactory.create(QueueAppModule)
+
+    with TestClient(app) as client:
+        assert client.post("/queues").status_code == 200
+    with TestClient(app) as client:
+        assert client.post("/queues").status_code == 200
+
+    assert EmailProcessor.handled == ["ada@example.com", "ada@example.com"]
+
+
+@Injectable(scope="request")
+@Processor("scoped")
+class ScopedProcessor:
+    created = 0
+    handled: list[int] = []
+
+    def __init__(self):
+        type(self).created += 1
+        self.instance_id = type(self).created
+
+    @Process("run")
+    async def run(self, job):
+        type(self).handled.append(self.instance_id)
+
+
+@Controller("scoped-queues")
+class ScopedQueueController:
+    def __init__(self, queue: QueueService):
+        self.queue = queue
+
+    @Post("/")
+    async def enqueue(self):
+        await self.queue.add("scoped", {}, name="run")
+        return {"handled": ScopedProcessor.handled}
+
+
+@Module(
+    imports=[QueueModule.for_root()],
+    controllers=[ScopedQueueController],
+    providers=[ScopedProcessor],
+)
+class ScopedQueueModule:
+    pass
+
+
+def test_request_scoped_queue_processors_resolve_per_job_scope():
+    ScopedProcessor.created = 0
+    ScopedProcessor.handled = []
+
+    with TestClient(FaNestFactory.create(ScopedQueueModule)) as client:
+        assert client.post("/scoped-queues").json() == {"handled": [1]}
+        assert client.post("/scoped-queues").json() == {"handled": [1, 2]}
+
+    assert ScopedProcessor.created == 2
 
 
 @Processor("retry")

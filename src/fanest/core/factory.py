@@ -268,6 +268,16 @@ class FaNestFactory:
                             provider_type,
                             module_key=module_key,
                         )
+                        FaNestFactory._register_queue_processor_provider(
+                            container,
+                            provider_type,
+                            module_key=module_key,
+                        )
+                        FaNestFactory._register_worker_task_provider(
+                            container,
+                            provider_type,
+                            module_key=module_key,
+                        )
                     if FaNestFactory._is_request_scoped_provider(container, provider, module_key=module_key):
                         continue
                     instance = await container.resolve_async(
@@ -275,9 +285,7 @@ class FaNestFactory:
                         module_key=module_key,
                     )
                     instances.append(instance)
-                    FaNestFactory._register_queue_processors(container, instance, module_key=module_key)
                     FaNestFactory._register_passport_strategy(container, instance, module_key=module_key)
-                    FaNestFactory._register_worker_tasks(container, instance, module_key=module_key)
                     hook = getattr(instance, "on_module_init", None)
                     if hook is not None:
                         await FaNestFactory._call_lifecycle_hook(hook)
@@ -361,19 +369,37 @@ class FaNestFactory:
 
     @staticmethod
     def _register_queue_processors(container: FaNestContainer, instance: object, *, module_key: Any | None = None) -> None:
+        FaNestFactory._register_queue_processor_provider(container, instance.__class__, module_key=module_key)
+
+    @staticmethod
+    def _register_queue_processor_provider(
+        container: FaNestContainer,
+        provider: type,
+        *,
+        module_key: Any | None = None,
+    ) -> None:
         from fanest.queues import QueueService
 
-        queue = getattr(instance.__class__, "__fanest_queue__", None)
+        queue = getattr(provider, "__fanest_queue__", None)
         if queue is None:
             return
         try:
             queue_service = container.resolve(QueueService, module_key=module_key)
         except Exception:
             return
-        for _, handler in inspect.getmembers(instance, predicate=callable):
+        for _, handler in inspect.getmembers(provider, predicate=inspect.isfunction):
             job_name = getattr(handler, "__fanest_process__", None)
             if job_name is not None:
-                queue_service.register_processor(queue, job_name, handler)
+                queue_service.register_processor(
+                    queue,
+                    job_name,
+                    FaNestFactory._lazy_job_handler(
+                        container,
+                        provider,
+                        handler.__name__,
+                        module_key,
+                    ),
+                )
 
     @staticmethod
     def _register_graphql_resolver(container: FaNestContainer, instance: object, *, module_key: Any | None = None) -> None:
@@ -481,6 +507,7 @@ class FaNestFactory:
                 payload,
             )
 
+        setattr(handler, "__fanest_registration_key__", (module_key, provider, method_name, "event"))
         return handler
 
     @staticmethod
@@ -504,7 +531,9 @@ class FaNestFactory:
                     message,
                 )
 
-        return LazyCqrsHandler()
+        handler = LazyCqrsHandler()
+        setattr(handler, "__fanest_registration_key__", (module_key, provider, "cqrs"))
+        return handler
 
     @staticmethod
     def _lazy_graphql_resolver(container: FaNestContainer, provider: type, module_key: Any | None):
@@ -530,9 +559,52 @@ class FaNestFactory:
                 return handler
 
             handler = make_handler(method.__name__)
+            setattr(
+                handler,
+                "__fanest_registration_key__",
+                (module_key, provider, method.__name__, "graphql"),
+            )
             setattr(handler, "__fanest_graphql__", metadata)
             setattr(resolver, method.__name__, handler)
         return resolver
+
+    @staticmethod
+    def _lazy_job_handler(
+        container: FaNestContainer,
+        provider: type,
+        method_name: str,
+        module_key: Any | None,
+    ):
+        async def handler(job: Any) -> Any:
+            return await FaNestFactory._call_lazy_provider_method(
+                container,
+                provider,
+                method_name,
+                module_key,
+                job,
+            )
+
+        setattr(handler, "__fanest_registration_key__", (module_key, provider, method_name, "queue"))
+        return handler
+
+    @staticmethod
+    def _lazy_task_handler(
+        container: FaNestContainer,
+        provider: type,
+        method_name: str,
+        module_key: Any | None,
+    ):
+        async def handler(payload: Any = None) -> Any:
+            return await FaNestFactory._call_lazy_provider_method(
+                container,
+                provider,
+                method_name,
+                module_key,
+                payload,
+            )
+
+        setattr(handler, "__fanest_registration_key__", (module_key, provider, method_name, "worker"))
+        return handler
 
     @staticmethod
     def _register_passport_strategy(container: FaNestContainer, instance: object, *, module_key: Any | None = None) -> None:
@@ -547,13 +619,30 @@ class FaNestFactory:
 
     @staticmethod
     def _register_worker_tasks(container: FaNestContainer, instance: object, *, module_key: Any | None = None) -> None:
+        FaNestFactory._register_worker_task_provider(container, instance.__class__, module_key=module_key)
+
+    @staticmethod
+    def _register_worker_task_provider(
+        container: FaNestContainer,
+        provider: type,
+        *,
+        module_key: Any | None = None,
+    ) -> None:
         from fanest.workers import WorkerService
 
         try:
             workers = container.resolve(WorkerService, module_key=module_key)
         except Exception:
             return
-        for _, handler in inspect.getmembers(instance, predicate=callable):
+        for _, handler in inspect.getmembers(provider, predicate=inspect.isfunction):
             task_name = getattr(handler, "__fanest_task_handler__", None)
             if task_name is not None:
-                workers.register(task_name, handler)
+                workers.register(
+                    task_name,
+                    FaNestFactory._lazy_task_handler(
+                        container,
+                        provider,
+                        handler.__name__,
+                        module_key,
+                    ),
+                )

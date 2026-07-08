@@ -68,7 +68,9 @@ class EventBus:
         self._handlers: dict[type, list[Any]] = {}
 
     def register(self, event: type, handler: Any) -> None:
-        self._handlers.setdefault(event, []).append(handler)
+        handlers = self._handlers.setdefault(event, [])
+        if self._handler_key(handler) not in {self._handler_key(item) for item in handlers}:
+            handlers.append(handler)
 
     async def publish(self, event: Any) -> None:
         for handler in self._handlers.get(type(event), []):
@@ -76,10 +78,18 @@ class EventBus:
             if inspect.isawaitable(result):
                 await result
 
+    def _handler_key(self, handler: Any) -> Any:
+        return getattr(handler, "__fanest_registration_key__", handler)
+
 
 class CqrsModule:
+    _root_modules: dict[bool, type] = {}
+
     @staticmethod
     def for_root(*, is_global: bool = False) -> type:
+        if is_global in CqrsModule._root_modules:
+            return CqrsModule._root_modules[is_global]
+
         @Module(
             providers=[CommandBus, QueryBus, EventBus],
             exports=[CommandBus, QueryBus, EventBus],
@@ -88,4 +98,5 @@ class CqrsModule:
         class DynamicCqrsModule:
             pass
 
+        CqrsModule._root_modules[is_global] = DynamicCqrsModule
         return DynamicCqrsModule

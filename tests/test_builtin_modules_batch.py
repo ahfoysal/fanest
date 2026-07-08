@@ -97,6 +97,18 @@ def test_event_listeners_resolve_inside_request_scope():
     assert RequestScopedEventService.seen == [1, 2]
 
 
+def test_event_listeners_are_not_duplicated_across_repeated_lifespan_startups():
+    EventsService.seen = []
+    app = FaNestFactory.create(EventsModule)
+
+    with TestClient(app) as client:
+        assert client.get("/events").json() == {"ok": True}
+    with TestClient(app) as client:
+        assert client.get("/events").json() == {"ok": True}
+
+    assert EventsService.seen == ["Ada", "Ada"]
+
+
 @pytest.mark.anyio
 async def test_event_emitter_supports_once_off_and_wildcard():
     emitter = EventEmitter()

@@ -17,6 +17,7 @@ class ScheduleRunner:
     def __init__(self, providers: Iterable[Any], registry: SchedulerRegistry | None = None) -> None:
         self.providers = providers
         self.tasks: list[asyncio.Task] = []
+        self.running_jobs: set[asyncio.Task] = set()
         self.registry = registry or SchedulerRegistry()
 
     def start(self) -> None:
@@ -37,9 +38,14 @@ class ScheduleRunner:
 
     async def stop(self) -> None:
         self.registry.clear()
+        for task in self.tasks:
+            task.cancel()
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
+        if self.running_jobs:
+            await asyncio.gather(*self.running_jobs, return_exceptions=True)
         self.tasks.clear()
+        self.running_jobs.clear()
 
     def _schedule(self, name: str, metadata: dict[str, Any], coroutine: Any) -> None:
         if metadata.get("disabled"):
@@ -57,7 +63,9 @@ class ScheduleRunner:
         next_run = time.monotonic() + delay
         while True:
             await asyncio.sleep(max(next_run - time.monotonic(), 0.0))
-            asyncio.create_task(self._safe_call(handler))
+            task = asyncio.create_task(self._safe_call(handler))
+            self.running_jobs.add(task)
+            task.add_done_callback(self.running_jobs.discard)
             next_run += delay
 
     async def _run_timeout(self, metadata: dict[str, Any], handler: Any) -> None:

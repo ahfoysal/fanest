@@ -86,6 +86,7 @@ class FaNestContainer:
         global_module: bool = False,
     ) -> None:
         module_providers = self._module_providers.setdefault(module_key, {})
+        module_providers[ModuleRef] = ValueProvider(provide=ModuleRef, use_value=ModuleRef(self, module_key))
         for provider in providers:
             token = self.provider_token(provider)
             if token in APP_ENHANCER_TOKENS:
@@ -260,6 +261,22 @@ class FaNestContainer:
         elif scope == "singleton":
             self._instances[cache_key] = instance
         return instance
+
+    def resolve_local(self, token: Any, module_key: Any | None) -> Any:
+        token = self._unwrap_token(token)
+        token = self._resolve_named_token(token, module_key)
+        provider = self._module_providers.get(module_key, {}).get(token)
+        if provider is None:
+            raise KeyError(token)
+        return self.resolve(token, module_key=module_key)
+
+    async def resolve_local_async(self, token: Any, module_key: Any | None) -> Any:
+        token = self._unwrap_token(token)
+        token = self._resolve_named_token(token, module_key)
+        provider = self._module_providers.get(module_key, {}).get(token)
+        if provider is None:
+            raise KeyError(token)
+        return await self.resolve_async(token, module_key=module_key)
 
     def provider_token(self, provider: ProviderDefinition) -> Any:
         if isinstance(provider, ForwardRef):

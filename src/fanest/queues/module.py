@@ -91,7 +91,9 @@ class QueueService:
         self._jobs: list[Job] = []
 
     def register_processor(self, queue: str, name: str, handler: Any) -> None:
-        self._handlers.setdefault((queue, name), []).append(handler)
+        handlers = self._handlers.setdefault((queue, name), [])
+        if self._handler_key(handler) not in {self._handler_key(item) for item in handlers}:
+            handlers.append(handler)
 
     async def add(
         self,
@@ -153,6 +155,17 @@ class QueueService:
 
     def queue(self, name: str) -> QueueRef:
         return QueueRef(self, name)
+
+    def _handler_key(self, handler: Any) -> Any:
+        return getattr(
+            handler,
+            "__fanest_registration_key__",
+            (
+                getattr(getattr(handler, "__self__", None), "__class__", None),
+                getattr(getattr(handler, "__func__", None), "__name__", None),
+                handler,
+            ),
+        )
 
 
 class QueueModule:

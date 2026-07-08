@@ -2,6 +2,7 @@ import asyncio
 import time
 from datetime import datetime, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Injectable, Module, UseGuards, UseInterceptors
@@ -176,6 +177,22 @@ def test_interval_jobs_do_not_drift_by_waiting_for_slow_handlers():
         time.sleep(0.075)
 
     assert len(SlowIntervalService.started) >= 3
+
+
+class InfiniteIntervalService:
+    @Interval(60)
+    async def interval(self):
+        pass
+
+
+@pytest.mark.anyio
+async def test_schedule_runner_stop_cancels_infinite_interval_loops():
+    runner = ScheduleRunner([InfiniteIntervalService()])
+    runner.start()
+
+    await asyncio.wait_for(runner.stop(), timeout=0.25)
+
+    assert runner.tasks == []
 
 
 @Controller("cached")

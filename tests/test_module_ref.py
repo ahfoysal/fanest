@@ -117,6 +117,33 @@ def test_module_ref_introspection_sees_root_visible_module_providers():
     assert after["resolved"] is True
 
 
+@Injectable()
+class PrivateModuleRefDependency:
+    value = "private"
+
+
+@Injectable()
+class UsesContextualModuleRef:
+    def __init__(self, module_ref: ModuleRef):
+        self.module_ref = module_ref
+
+    def read_private(self):
+        return self.module_ref.get(PrivateModuleRefDependency, strict=True).value
+
+
+@Module(providers=[PrivateModuleRefDependency, UsesContextualModuleRef])
+class ContextualModuleRefModule:
+    pass
+
+
+def test_module_ref_keeps_injected_module_context_for_private_providers():
+    app = FaNestFactory.create(ContextualModuleRefModule)
+
+    service = app.state.fanest_container.resolve(UsesContextualModuleRef)
+
+    assert service.read_private() == "private"
+
+
 @pytest.mark.anyio
 async def test_module_ref_resolve_supports_async_factories_and_request_scope():
     container = FaNestContainer()

@@ -92,6 +92,19 @@ def test_cqrs_command_query_and_event_buses():
     assert UserStore.events == ["Ada"]
 
 
+def test_cqrs_event_handlers_are_not_duplicated_across_repeated_lifespan_startups():
+    UserStore.users = []
+    UserStore.events = []
+    app = FaNestFactory.create(CqrsAppModule)
+
+    with TestClient(app) as client:
+        assert client.post("/cqrs").json() == {"name": "Ada"}
+    with TestClient(app) as client:
+        assert client.post("/cqrs").json() == {"name": "Ada"}
+
+    assert UserStore.events == ["Ada", "Ada"]
+
+
 @dataclass(frozen=True)
 class ScopedCommand:
     pass
@@ -143,3 +156,55 @@ def test_cqrs_handlers_resolve_inside_request_scope():
         assert client.post("/scoped-cqrs").json() == {"id": 2}
 
     assert ScopedCommandStore.created == [1, 2]
+
+
+class SharedBusStore:
+    command_bus_ids: list[int] = []
+
+
+@Controller("cqrs-a")
+class CqrsAController:
+    def __init__(self, commands: CommandBus):
+        self.commands = commands
+
+    @Get("/")
+    async def index(self):
+        SharedBusStore.command_bus_ids.append(id(self.commands))
+        return {"id": id(self.commands)}
+
+
+@Controller("cqrs-b")
+class CqrsBController:
+    def __init__(self, commands: CommandBus):
+        self.commands = commands
+
+    @Get("/")
+    async def index(self):
+        SharedBusStore.command_bus_ids.append(id(self.commands))
+        return {"id": id(self.commands)}
+
+
+@Module(imports=[CqrsModule.for_root()], controllers=[CqrsAController])
+class CqrsFeatureAModule:
+    pass
+
+
+@Module(imports=[CqrsModule.for_root()], controllers=[CqrsBController])
+class CqrsFeatureBModule:
+    pass
+
+
+@Module(imports=[CqrsFeatureAModule, CqrsFeatureBModule])
+class DuplicateCqrsImportModule:
+    pass
+
+
+def test_cqrs_for_root_reuses_single_bus_across_multiple_feature_imports():
+    SharedBusStore.command_bus_ids = []
+
+    with TestClient(FaNestFactory.create(DuplicateCqrsImportModule)) as client:
+        first = client.get("/cqrs-a").json()["id"]
+        second = client.get("/cqrs-b").json()["id"]
+
+    assert first == second
+    assert SharedBusStore.command_bus_ids == [first, second]

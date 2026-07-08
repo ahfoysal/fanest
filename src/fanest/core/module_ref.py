@@ -27,36 +27,43 @@ class StrictLookupError(ModuleRefError):
 
 
 class ModuleRef:
-    def __init__(self, container: "FaNestContainer"):
+    def __init__(self, container: "FaNestContainer", module_key: Any | None = None):
         self.container = container
+        self.module_key = module_key
 
     def get(self, token: Any, strict: bool = False, default: Any = _UNSET) -> Any:
-        if strict:
+        if strict and self.module_key is None:
             raise StrictLookupError()
         try:
-            return self.container.resolve(token)
+            if strict:
+                return self.container.resolve_local(token, self.module_key)
+            return self.container.resolve(token, module_key=self.module_key)
         except KeyError as exc:
             if default is not _UNSET:
                 return default
             raise UnknownProviderError(token) from exc
 
     async def resolve(self, token: Any, strict: bool = False) -> Any:
-        if strict:
+        if strict and self.module_key is None:
             raise StrictLookupError()
         request_scope = self.container.begin_request()
         try:
-            return await self.container.resolve_async(token)
+            if strict:
+                return await self.container.resolve_local_async(token, self.module_key)
+            return await self.container.resolve_async(token, module_key=self.module_key)
         except KeyError as exc:
             raise UnknownProviderError(token) from exc
         finally:
             self.container.end_request(request_scope)
 
     def resolve_sync(self, token: Any, strict: bool = False) -> Any:
-        if strict:
+        if strict and self.module_key is None:
             raise StrictLookupError()
         request_scope = self.container.begin_request()
         try:
-            return self.container.resolve(token)
+            if strict:
+                return self.container.resolve_local(token, self.module_key)
+            return self.container.resolve(token, module_key=self.module_key)
         except KeyError as exc:
             raise UnknownProviderError(token) from exc
         finally:

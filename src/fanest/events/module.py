@@ -20,10 +20,14 @@ class EventEmitter:
         self._once_handlers: dict[str, list[Callable[..., Any]]] = {}
 
     def on(self, event: str, handler: Callable[..., Any]) -> None:
-        self._handlers.setdefault(event, []).append(handler)
+        handlers = self._handlers.setdefault(event, [])
+        if self._handler_key(handler) not in {self._handler_key(item) for item in handlers}:
+            handlers.append(handler)
 
     def once(self, event: str, handler: Callable[..., Any]) -> None:
-        self._once_handlers.setdefault(event, []).append(handler)
+        handlers = self._once_handlers.setdefault(event, [])
+        if self._handler_key(handler) not in {self._handler_key(item) for item in handlers}:
+            handlers.append(handler)
 
     def off(self, event: str, handler: Callable[..., Any]) -> None:
         self._handlers[event] = [item for item in self._handlers.get(event, []) if item != handler]
@@ -42,6 +46,17 @@ class EventEmitter:
             result = handler(payload)
             if inspect.isawaitable(result):
                 await result
+
+    def _handler_key(self, handler: Callable[..., Any]) -> Any:
+        return getattr(
+            handler,
+            "__fanest_registration_key__",
+            (
+                getattr(getattr(handler, "__self__", None), "__class__", None),
+                getattr(getattr(handler, "__func__", None), "__name__", None),
+                handler,
+            ),
+        )
 
 
 class EventEmitterModule:
