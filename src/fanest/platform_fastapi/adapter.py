@@ -17,6 +17,7 @@ from fanest.core.metadata import (
     ParameterSource,
     RouteMetadata,
 )
+from fanest.websockets import WebSocketManager
 
 
 class FastApiAdapter:
@@ -141,6 +142,7 @@ class FastApiAdapter:
             except WebSocketDisconnect:
                 pass
             finally:
+                self.container.resolve(WebSocketManager).disconnect(websocket)
                 disconnect_hook = getattr(instance, "on_disconnect", None)
                 if disconnect_hook is not None:
                     result = disconnect_hook(websocket)

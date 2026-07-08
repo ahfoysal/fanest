@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Injectable, Module, UseGuards, UseInterceptors
 from fanest.cache import CacheInterceptor, CacheModule, CacheTTL
-from fanest.schedule import Cron, Interval
+from fanest.schedule import Cron, Interval, SchedulerRegistry, Timeout
 from fanest.schedule.runner import ScheduleRunner
 from fanest.throttler import Throttle, ThrottlerGuard, ThrottlerModule
 
@@ -45,6 +45,39 @@ def test_cron_delay_uses_full_expression_not_first_field_only():
     now = datetime(2026, 7, 8, 8, 59, 0, tzinfo=timezone.utc)
 
     assert runner.next_cron_delay("0 9 * * *", now) == 60
+
+
+@Injectable()
+class TimeoutJobsService:
+    runs = 0
+
+    @Timeout(0.01, name="warmup")
+    async def warmup(self):
+        type(self).runs += 1
+
+
+@Controller("scheduler")
+class SchedulerController:
+    def __init__(self, registry: SchedulerRegistry):
+        self.registry = registry
+
+    @Get("/")
+    async def index(self):
+        return {"jobs": [job.name for job in self.registry.list()]}
+
+
+@Module(providers=[TimeoutJobsService], controllers=[SchedulerController])
+class TimeoutModule:
+    pass
+
+
+def test_timeout_job_runs_once_and_registry_is_injectable():
+    TimeoutJobsService.runs = 0
+
+    with TestClient(FaNestFactory.create(TimeoutModule)) as client:
+        assert client.get("/scheduler").json() == {"jobs": ["warmup"]}
+        time.sleep(0.04)
+        assert TimeoutJobsService.runs == 1
 
 
 @Controller("cached")

@@ -1,41 +1,59 @@
 import asyncio
 import inspect
-from datetime import datetime, timezone
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from typing import Any
 
 from croniter import croniter
 
+from fanest.schedule.registry import SchedulerRegistry
+
 
 class ScheduleRunner:
-    def __init__(self, providers: Iterable[Any]) -> None:
+    def __init__(self, providers: Iterable[Any], registry: SchedulerRegistry | None = None) -> None:
         self.providers = providers
         self.tasks: list[asyncio.Task] = []
+        self.registry = registry or SchedulerRegistry()
 
     def start(self) -> None:
         for provider in self.providers:
-            for _, handler in inspect.getmembers(provider, predicate=callable):
+            for handler_name, handler in inspect.getmembers(provider, predicate=callable):
                 metadata = getattr(handler, "__fanest_schedule__", None)
                 if metadata is None:
                     continue
+                name = metadata.get("name") or self._default_name(provider, handler_name, metadata["type"])
                 if metadata["type"] == "interval":
-                    self.tasks.append(asyncio.create_task(self._run_interval(metadata, handler)))
+                    self._schedule(name, metadata, self._run_interval(metadata, handler))
                 elif metadata["type"] == "cron":
-                    self.tasks.append(asyncio.create_task(self._run_cron(metadata, handler)))
+                    self._schedule(name, metadata, self._run_cron(metadata, handler))
+                elif metadata["type"] == "timeout":
+                    self._schedule(name, metadata, self._run_timeout(metadata, handler))
                 else:
                     raise ValueError(f"Unknown schedule type: {metadata['type']}")
 
     async def stop(self) -> None:
-        for task in self.tasks:
-            task.cancel()
+        self.registry.clear()
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
+        self.tasks.clear()
+
+    def _schedule(self, name: str, metadata: dict[str, Any], coroutine: Any) -> None:
+        task = asyncio.create_task(coroutine, name=name)
+        self.tasks.append(task)
+        self.registry.add(name, metadata["type"], task, metadata)
+
+    def _default_name(self, provider: Any, handler_name: str, kind: str) -> str:
+        return f"{provider.__class__.__name__}.{handler_name}:{kind}"
 
     async def _run_interval(self, metadata: dict[str, Any], handler: Any) -> None:
         delay = float(metadata["seconds"])
         while True:
             await asyncio.sleep(delay)
             await self._call(handler)
+
+    async def _run_timeout(self, metadata: dict[str, Any], handler: Any) -> None:
+        await asyncio.sleep(float(metadata["seconds"]))
+        await self._call(handler)
 
     async def _run_cron(self, metadata: dict[str, Any], handler: Any) -> None:
         expression = metadata["expression"]

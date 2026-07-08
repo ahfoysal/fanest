@@ -1,4 +1,6 @@
 from enum import Enum
+import re
+from collections.abc import Callable, Iterable
 from typing import Any
 from uuid import UUID
 
@@ -92,4 +94,65 @@ class DefaultValuePipe:
     def transform(self, value: Any, metadata: dict[str, Any]) -> Any:
         if value is None:
             return self.default
+        return value
+
+
+class FileValidator:
+    def is_valid(self, file: Any) -> bool:
+        raise NotImplementedError
+
+    def build_error_message(self, file: Any) -> str:
+        return f"{getattr(file, 'filename', 'file')} failed validation"
+
+
+class MaxFileSizeValidator(FileValidator):
+    def __init__(self, max_size: int):
+        self.max_size = max_size
+
+    def is_valid(self, file: Any) -> bool:
+        size = getattr(file, "size", None)
+        return size is None or int(size) <= self.max_size
+
+    def build_error_message(self, file: Any) -> str:
+        return f"{getattr(file, 'filename', 'file')} exceeds {self.max_size} bytes"
+
+
+class FileTypeValidator(FileValidator):
+    def __init__(self, file_type: str | re.Pattern[str] | Callable[[Any], bool]):
+        self.file_type = file_type
+
+    def is_valid(self, file: Any) -> bool:
+        if callable(self.file_type):
+            return bool(self.file_type(file))
+        content_type = getattr(file, "content_type", None) or ""
+        filename = getattr(file, "filename", None) or ""
+        target = f"{content_type} {filename}"
+        if isinstance(self.file_type, re.Pattern):
+            return bool(self.file_type.search(target))
+        return content_type == self.file_type or filename.endswith(self.file_type)
+
+    def build_error_message(self, file: Any) -> str:
+        return f"{getattr(file, 'filename', 'file')} has an invalid file type"
+
+
+class ParseFilePipe:
+    def __init__(
+        self,
+        validators: Iterable[FileValidator] | None = None,
+        *,
+        file_is_required: bool = True,
+    ) -> None:
+        self.validators = list(validators or [])
+        self.file_is_required = file_is_required
+
+    def transform(self, value: Any, metadata: dict[str, Any]) -> Any:
+        if value is None:
+            if self.file_is_required:
+                raise BadRequestException(f"{metadata.get('name', 'file')} is required")
+            return value
+        files = value if isinstance(value, list) else [value]
+        for file in files:
+            for validator in self.validators:
+                if not validator.is_valid(file):
+                    raise BadRequestException(validator.build_error_message(file))
         return value

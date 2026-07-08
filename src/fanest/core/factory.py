@@ -12,6 +12,7 @@ from fanest.core.metadata import ProviderDefinition
 from fanest.core.scanner import ModuleScanner
 from fanest.common.middleware import FaNestMiddlewareAdapter
 from fanest.platform_fastapi.adapter import FastApiAdapter
+from fanest.schedule.registry import SchedulerRegistry
 from fanest.schedule.runner import ScheduleRunner
 
 
@@ -99,7 +100,7 @@ class FaNestFactory:
                     result = hook()
                     if hasattr(result, "__await__"):
                         await result
-            schedule_runner = ScheduleRunner(instances)
+            schedule_runner = ScheduleRunner(instances, registry=container.resolve(SchedulerRegistry))
             schedule_runner.start()
             yield
             await schedule_runner.stop()

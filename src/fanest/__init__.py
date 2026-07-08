@@ -51,9 +51,13 @@ from fanest.common.exceptions import (
 )
 from fanest.common.pipes import (
     DefaultValuePipe,
+    FileTypeValidator,
+    FileValidator,
+    MaxFileSizeValidator,
     ParseArrayPipe,
     ParseBoolPipe,
     ParseEnumPipe,
+    ParseFilePipe,
     ParseFloatPipe,
     ParseIntPipe,
     ParseUUIDPipe,
@@ -75,6 +79,7 @@ from fanest.core.providers import (
     use_value,
 )
 from fanest.mapped_types import IntersectionType, OmitType, PartialType, PickType
+from fanest.websockets import WebSocketManager
 
 __all__ = [
     "BadRequestException",
@@ -89,6 +94,8 @@ __all__ = [
     "FaNestFactory",
     "FaNestApplication",
     "FaNestHttpException",
+    "FileTypeValidator",
+    "FileValidator",
     "Form",
     "ForbiddenException",
     "Get",
@@ -103,6 +110,7 @@ __all__ = [
     "IntersectionType",
     "Module",
     "ModuleRef",
+    "MaxFileSizeValidator",
     "Optional",
     "Options",
     "OmitType",
@@ -114,6 +122,7 @@ __all__ = [
     "ParseArrayPipe",
     "ParseBoolPipe",
     "ParseEnumPipe",
+    "ParseFilePipe",
     "ParseFloatPipe",
     "ParseIntPipe",
     "ParseUUIDPipe",
@@ -143,6 +152,7 @@ __all__ = [
     "Version",
     "Body",
     "WebSocketGateway",
+    "WebSocketManager",
     "create_param_decorator",
     "forward_ref",
     "token",
