@@ -36,6 +36,10 @@ class FaNestContainer:
         _request_instances.reset(token)
 
     def override(self, token: Any, value: Any) -> None:
+        if isinstance(value, (ClassProvider, ValueProvider, FactoryProvider, ExistingProvider)):
+            self._providers[token] = value
+            self._instances.pop(token, None)
+            return
         if inspect.isclass(value):
             self._providers[token] = ClassProvider(provide=token, use_class=value)
             self._instances.pop(token, None)

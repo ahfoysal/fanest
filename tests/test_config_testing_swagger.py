@@ -49,6 +49,12 @@ def test_testing_module_provider_override():
     assert response.json() == {"message": "mock"}
 
 
+def test_testing_module_override_builder():
+    app = TestingModule.create(MessageModule).override(MessageService).use_value(MockMessageService()).compile()
+
+    assert TestClient(app).get("/messages").json() == {"message": "mock"}
+
+
 def test_swagger_tags_are_registered():
     app = FaNestFactory.create(MessageModule)
     schema = TestClient(app).get("/openapi.json").json()

@@ -5,6 +5,25 @@ from fastapi import FastAPI
 
 from fanest.core.container import FaNestContainer
 from fanest.core.factory import FaNestFactory
+from fanest.core.providers import use_class, use_factory
+
+
+class OverrideBuilder:
+    def __init__(self, module: "TestingModule", token: Any) -> None:
+        self.module = module
+        self.token = token
+
+    def use_value(self, value: Any) -> "TestingModule":
+        self.module.overrides[self.token] = value
+        return self.module
+
+    def use_class(self, cls: type) -> "TestingModule":
+        self.module.overrides[self.token] = use_class(self.token, cls)
+        return self.module
+
+    def use_factory(self, factory: Any, inject: list[Any] | None = None) -> "TestingModule":
+        self.module.overrides[self.token] = use_factory(self.token, factory, inject=inject or [])
+        return self.module
 
 
 @dataclass
@@ -22,6 +41,9 @@ class TestingModule:
     def override_provider(self, token: type, value: Any) -> "TestingModule":
         self.overrides[token] = value
         return self
+
+    def override(self, token: Any) -> OverrideBuilder:
+        return OverrideBuilder(self, token)
 
     def compile(self) -> FastAPI:
         self._app = FaNestFactory.create(self.root_module, overrides=self.overrides)
