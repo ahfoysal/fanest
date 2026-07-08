@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, Response
 from fanest.core.container import FaNestContainer
 from fanest.core.discovery import DiscoveryService
 from fanest.core.enhancers import APP_ENHANCER_TOKENS, APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE
-from fanest.core.metadata import ValueProvider
+from fanest.core.metadata import ClassProvider, ForwardRef, ValueProvider
 from fanest.core.scanner import ModuleScanner
 from fanest.common.middleware import FaNestMiddlewareAdapter
 from fanest.platform_fastapi.adapter import FastApiAdapter
@@ -149,7 +149,25 @@ class FaNestFactory:
             if inspect.isclass(component) and not container.has_provider(component):
                 container.register(component)
 
-        lifespan = FaNestFactory._lifespan(scanner.records, container)
+        resolved_global_guards = [*container.resolve_all_ready(APP_GUARD), *(global_guards or [])]
+        resolved_global_pipes = [*container.resolve_all_ready(APP_PIPE), *(global_pipes or [])]
+        resolved_global_interceptors = [
+            *container.resolve_all_ready(APP_INTERCEPTOR),
+            *(global_interceptors or []),
+        ]
+        resolved_global_filters = [*container.resolve_all_ready(APP_FILTER), *(global_filters or [])]
+        lifespan = FaNestFactory._lifespan(
+            scanner.records,
+            container,
+            global_guards=resolved_global_guards,
+            explicit_global_guards=list(global_guards or []),
+            global_pipes=resolved_global_pipes,
+            explicit_global_pipes=list(global_pipes or []),
+            global_interceptors=resolved_global_interceptors,
+            explicit_global_interceptors=list(global_interceptors or []),
+            global_filters=resolved_global_filters,
+            explicit_global_filters=list(global_filters or []),
+        )
         app_options: dict[str, Any] = {
             "title": title,
             "version": version,
@@ -186,10 +204,10 @@ class FaNestFactory:
             app=app,
             container=container,
             global_prefix=global_prefix,
-            global_guards=[*container.resolve_all(APP_GUARD), *(global_guards or [])],
-            global_pipes=[*container.resolve_all(APP_PIPE), *(global_pipes or [])],
-            global_interceptors=[*container.resolve_all(APP_INTERCEPTOR), *(global_interceptors or [])],
-            global_filters=[*container.resolve_all(APP_FILTER), *(global_filters or [])],
+            global_guards=resolved_global_guards,
+            global_pipes=resolved_global_pipes,
+            global_interceptors=resolved_global_interceptors,
+            global_filters=resolved_global_filters,
             controller_modules=scanner.controller_modules,
             gateway_modules=scanner.gateway_modules,
         )
@@ -210,23 +228,54 @@ class FaNestFactory:
             return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
     @staticmethod
-    def _lifespan(records: dict[Any, Any], container: FaNestContainer):
+    def _lifespan(
+        records: dict[Any, Any],
+        container: FaNestContainer,
+        *,
+        global_guards: list[Any],
+        explicit_global_guards: list[Any],
+        global_pipes: list[Any],
+        explicit_global_pipes: list[Any],
+        global_interceptors: list[Any],
+        explicit_global_interceptors: list[Any],
+        global_filters: list[Any],
+        explicit_global_filters: list[Any],
+    ):
         @asynccontextmanager
         async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+            global_guards[:] = [*await container.resolve_all_async(APP_GUARD), *explicit_global_guards]
+            global_pipes[:] = [*await container.resolve_all_async(APP_PIPE), *explicit_global_pipes]
+            global_interceptors[:] = [
+                *await container.resolve_all_async(APP_INTERCEPTOR),
+                *explicit_global_interceptors,
+            ]
+            global_filters[:] = [*await container.resolve_all_async(APP_FILTER), *explicit_global_filters]
             instances = []
             for module_key, record in records.items():
                 for provider in [*record.metadata.providers, *record.metadata.gateways]:
                     if container.provider_token(provider) in APP_ENHANCER_TOKENS:
+                        continue
+                    provider_type = FaNestFactory._provider_type(provider)
+                    if provider_type is not None:
+                        FaNestFactory._register_event_provider(container, provider_type, module_key=module_key)
+                        FaNestFactory._register_graphql_resolver_provider(
+                            container,
+                            provider_type,
+                            module_key=module_key,
+                        )
+                        FaNestFactory._register_cqrs_handler_provider(
+                            container,
+                            provider_type,
+                            module_key=module_key,
+                        )
+                    if FaNestFactory._is_request_scoped_provider(container, provider, module_key=module_key):
                         continue
                     instance = await container.resolve_async(
                         container.provider_token(provider),
                         module_key=module_key,
                     )
                     instances.append(instance)
-                    FaNestFactory._register_events(container, instance, module_key=module_key)
                     FaNestFactory._register_queue_processors(container, instance, module_key=module_key)
-                    FaNestFactory._register_graphql_resolver(container, instance, module_key=module_key)
-                    FaNestFactory._register_cqrs_handlers(container, instance, module_key=module_key)
                     FaNestFactory._register_passport_strategy(container, instance, module_key=module_key)
                     FaNestFactory._register_worker_tasks(container, instance, module_key=module_key)
                     hook = getattr(instance, "on_module_init", None)
@@ -262,17 +311,53 @@ class FaNestFactory:
             await result
 
     @staticmethod
-    def _register_events(container: FaNestContainer, instance: object, *, module_key: Any | None = None) -> None:
+    def _provider_type(provider: Any) -> type | None:
+        if isinstance(provider, ForwardRef):
+            return FaNestFactory._provider_type(provider.factory())
+        if isinstance(provider, ClassProvider):
+            return provider.use_class
+        if inspect.isclass(provider):
+            return provider
+        return None
+
+    @staticmethod
+    def _is_request_scoped_provider(
+        container: FaNestContainer,
+        provider: Any,
+        *,
+        module_key: Any | None = None,
+    ) -> bool:
+        token = container.provider_token(provider)
+        _, located_provider = container._locate_provider(token, module_key)
+        if located_provider is None:
+            return False
+        return container._effective_scope(token, located_provider, module_key=module_key) == "request"
+
+    @staticmethod
+    def _register_event_provider(
+        container: FaNestContainer,
+        provider: type,
+        *,
+        module_key: Any | None = None,
+    ) -> None:
         from fanest.events import EventEmitter
 
         try:
             emitter = container.resolve(EventEmitter, module_key=module_key)
         except Exception:
             return
-        for _, handler in inspect.getmembers(instance, predicate=callable):
+        for _, handler in inspect.getmembers(provider, predicate=inspect.isfunction):
             event = getattr(handler, "__fanest_event__", None)
             if event is not None:
-                emitter.on(event, handler)
+                emitter.on(
+                    event,
+                    FaNestFactory._lazy_dispatch_handler(
+                        container,
+                        provider,
+                        handler.__name__,
+                        module_key,
+                    ),
+                )
 
     @staticmethod
     def _register_queue_processors(container: FaNestContainer, instance: object, *, module_key: Any | None = None) -> None:
@@ -292,13 +377,22 @@ class FaNestFactory:
 
     @staticmethod
     def _register_graphql_resolver(container: FaNestContainer, instance: object, *, module_key: Any | None = None) -> None:
+        FaNestFactory._register_graphql_resolver_provider(container, instance.__class__, module_key=module_key)
+
+    @staticmethod
+    def _register_graphql_resolver_provider(
+        container: FaNestContainer,
+        provider: type,
+        *,
+        module_key: Any | None = None,
+    ) -> None:
         from fanest.graphql import GraphQLSchema
 
-        if getattr(instance.__class__, "__fanest_provider__", None) is None:
+        if getattr(provider, "__fanest_provider__", None) is None:
             return
         has_graphql_handlers = any(
             getattr(handler, "__fanest_graphql__", None) is not None
-            for _, handler in inspect.getmembers(instance, predicate=callable)
+            for _, handler in inspect.getmembers(provider, predicate=inspect.isfunction)
         )
         if not has_graphql_handlers:
             return
@@ -306,29 +400,139 @@ class FaNestFactory:
             schema = container.resolve(GraphQLSchema, module_key=module_key)
         except Exception:
             return
-        schema.register_resolver(instance)
+        schema.register_resolver(
+            FaNestFactory._lazy_graphql_resolver(container, provider, module_key)
+        )
 
     @staticmethod
     def _register_cqrs_handlers(container: FaNestContainer, instance: object, *, module_key: Any | None = None) -> None:
+        FaNestFactory._register_cqrs_handler_provider(container, instance.__class__, module_key=module_key)
+
+    @staticmethod
+    def _register_cqrs_handler_provider(
+        container: FaNestContainer,
+        provider: type,
+        *,
+        module_key: Any | None = None,
+    ) -> None:
         from fanest.cqrs import CommandBus, EventBus, QueryBus
 
-        command = getattr(instance.__class__, "__fanest_command_handler__", None)
+        command = getattr(provider, "__fanest_command_handler__", None)
         if command is not None:
             try:
-                container.resolve(CommandBus, module_key=module_key).register(command, instance)
+                container.resolve(CommandBus, module_key=module_key).register(
+                    command,
+                    FaNestFactory._lazy_cqrs_handler(container, provider, module_key),
+                )
             except Exception:
                 pass
-        query = getattr(instance.__class__, "__fanest_query_handler__", None)
+        query = getattr(provider, "__fanest_query_handler__", None)
         if query is not None:
             try:
-                container.resolve(QueryBus, module_key=module_key).register(query, instance)
+                container.resolve(QueryBus, module_key=module_key).register(
+                    query,
+                    FaNestFactory._lazy_cqrs_handler(container, provider, module_key),
+                )
             except Exception:
                 pass
-        for event in getattr(instance.__class__, "__fanest_event_handlers__", []):
+        for event in getattr(provider, "__fanest_event_handlers__", []):
             try:
-                container.resolve(EventBus, module_key=module_key).register(event, instance)
+                container.resolve(EventBus, module_key=module_key).register(
+                    event,
+                    FaNestFactory._lazy_cqrs_handler(container, provider, module_key),
+                )
             except Exception:
                 pass
+
+    @staticmethod
+    async def _call_lazy_provider_method(
+        container: FaNestContainer,
+        provider: type,
+        method_name: str,
+        module_key: Any | None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        owns_scope = container.current_request_instances() is None
+        request_scope = container.begin_request() if owns_scope else None
+        try:
+            instance = await container.resolve_async(provider, module_key=module_key)
+            result = getattr(instance, method_name)(*args, **kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        finally:
+            if owns_scope and request_scope is not None:
+                container.end_request(request_scope)
+
+    @staticmethod
+    def _lazy_dispatch_handler(
+        container: FaNestContainer,
+        provider: type,
+        method_name: str,
+        module_key: Any | None,
+    ):
+        async def handler(payload: Any = None) -> Any:
+            return await FaNestFactory._call_lazy_provider_method(
+                container,
+                provider,
+                method_name,
+                module_key,
+                payload,
+            )
+
+        return handler
+
+    @staticmethod
+    def _lazy_cqrs_handler(container: FaNestContainer, provider: type, module_key: Any | None):
+        class LazyCqrsHandler:
+            async def execute(self, message: Any) -> Any:
+                return await FaNestFactory._call_lazy_provider_method(
+                    container,
+                    provider,
+                    "execute",
+                    module_key,
+                    message,
+                )
+
+            async def handle(self, message: Any) -> Any:
+                return await FaNestFactory._call_lazy_provider_method(
+                    container,
+                    provider,
+                    "handle",
+                    module_key,
+                    message,
+                )
+
+        return LazyCqrsHandler()
+
+    @staticmethod
+    def _lazy_graphql_resolver(container: FaNestContainer, provider: type, module_key: Any | None):
+        class LazyGraphQLResolver:
+            pass
+
+        resolver = LazyGraphQLResolver()
+        for _, method in inspect.getmembers(provider, predicate=inspect.isfunction):
+            metadata = getattr(method, "__fanest_graphql__", None)
+            if metadata is None:
+                continue
+
+            def make_handler(method_name: str):
+                async def handler(**kwargs: Any) -> Any:
+                    return await FaNestFactory._call_lazy_provider_method(
+                        container,
+                        provider,
+                        method_name,
+                        module_key,
+                        **kwargs,
+                    )
+
+                return handler
+
+            handler = make_handler(method.__name__)
+            setattr(handler, "__fanest_graphql__", metadata)
+            setattr(resolver, method.__name__, handler)
+        return resolver
 
     @staticmethod
     def _register_passport_strategy(container: FaNestContainer, instance: object, *, module_key: Any | None = None) -> None:

@@ -23,6 +23,12 @@ class ResponseController:
     async def header(self):
         return {"ok": True}
 
+    @SetHeader("set-cookie", "session=abc; Path=/")
+    @SetHeader("set-cookie", "theme=dark; Path=/")
+    @Get("/duplicate-headers")
+    async def duplicate_headers(self):
+        return {"ok": True}
+
     @SetHeader("x-stream", "yes")
     @Get("/stream")
     async def stream(self):
@@ -77,6 +83,18 @@ def test_response_header_decorator_sets_headers():
 
     assert response.json() == {"ok": True}
     assert response.headers["x-powered-by"] == "fanest"
+
+
+def test_response_header_decorator_preserves_duplicate_header_names():
+    client = TestClient(FaNestFactory.create(ResponseModule))
+
+    response = client.get("/responses/duplicate-headers")
+
+    assert response.json() == {"ok": True}
+    assert response.headers.get_list("set-cookie") == [
+        "theme=dark; Path=/",
+        "session=abc; Path=/",
+    ]
 
 
 def test_streamable_file_returns_streaming_response_with_headers():

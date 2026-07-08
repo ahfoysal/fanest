@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from fanest import FaNestFactory, Module
+from fanest import FaNestFactory, Injectable, Module
 from fanest.graphql import GraphQLModule, Mutation, Query, Resolver, Subscription
 
 
@@ -42,3 +42,33 @@ def test_graphql_module_executes_queries_and_mutations():
     assert mutation.json() == {"data": {"create_user": {"name": "Grace"}}}
     assert second_query.json() == {"data": {"users_count": 2}}
     assert subscription.json() == {"data": {"user_created": "Grace"}}
+
+
+@Injectable(scope="request")
+@Resolver
+class RequestScopedResolver:
+    created = 0
+
+    def __init__(self):
+        type(self).created += 1
+        self.instance_id = type(self).created
+
+    @Query()
+    async def resolver_id(self):
+        return self.instance_id
+
+
+@Module(imports=[GraphQLModule.for_root(resolvers=[RequestScopedResolver])])
+class RequestScopedGraphQLModule:
+    pass
+
+
+def test_graphql_resolvers_resolve_inside_request_scope():
+    RequestScopedResolver.created = 0
+
+    with TestClient(FaNestFactory.create(RequestScopedGraphQLModule)) as client:
+        first = client.post("/graphql", json={"query": "{ resolver_id }"})
+        second = client.post("/graphql", json={"query": "{ resolver_id }"})
+
+    assert first.json() == {"data": {"resolver_id": 1}}
+    assert second.json() == {"data": {"resolver_id": 2}}

@@ -12,6 +12,7 @@ from fanest import (
     Module,
     Query,
     use_class,
+    use_factory,
 )
 
 
@@ -122,3 +123,36 @@ def test_multiple_app_enhancer_providers_in_module_are_not_overwritten():
 
     assert client.get("/multi-filters/key").json() == {"first": "'missing'"}
     assert client.get("/multi-filters/runtime").json() == {"second": "boom"}
+
+
+class AsyncFactoryGuard:
+    def can_activate(self, context):
+        return context.request.headers.get("x-async-auth") == "ok"
+
+
+async def async_guard_factory():
+    return AsyncFactoryGuard()
+
+
+@Controller("async-enhancer")
+class AsyncEnhancerController:
+    @Get("/")
+    async def index(self):
+        return {"ok": True}
+
+
+@Module(
+    controllers=[AsyncEnhancerController],
+    providers=[use_factory(APP_GUARD, async_guard_factory)],
+)
+class AsyncEnhancerModule:
+    pass
+
+
+def test_async_factory_app_enhancers_are_awaited_during_startup():
+    with TestClient(FaNestFactory.create(AsyncEnhancerModule)) as client:
+        blocked = client.get("/async-enhancer")
+        allowed = client.get("/async-enhancer", headers={"x-async-auth": "ok"})
+
+    assert blocked.status_code == 403
+    assert allowed.json() == {"ok": True}

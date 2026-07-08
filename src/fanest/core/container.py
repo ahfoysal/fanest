@@ -141,6 +141,25 @@ class FaNestContainer:
             for module_key, provider in self._multi_providers.get(token, [])
         ]
 
+    def resolve_all_ready(self, token: Any) -> list[Any]:
+        resolved = []
+        for module_key, provider in self._multi_providers.get(token, []):
+            if isinstance(provider, FactoryProvider) and inspect.iscoroutinefunction(provider.use_factory):
+                continue
+            result = self._resolve_provider(provider, module_key=module_key)
+            if inspect.isawaitable(result):
+                if inspect.iscoroutine(result):
+                    result.close()
+                continue
+            resolved.append(result)
+        return resolved
+
+    async def resolve_all_async(self, token: Any) -> list[Any]:
+        return [
+            await self._resolve_provider_async(provider, module_key=module_key)
+            for module_key, provider in self._multi_providers.get(token, [])
+        ]
+
     def has_provider(self, token: Any) -> bool:
         token = self._unwrap_token(token)
         token = self._resolve_named_token(token)

@@ -44,10 +44,10 @@ class FastApiAdapter:
         self.app = app
         self.container = container
         self.global_prefix = global_prefix
-        self.global_guards = global_guards or []
-        self.global_pipes = global_pipes or []
-        self.global_interceptors = global_interceptors or []
-        self.global_filters = global_filters or []
+        self.global_guards = global_guards if global_guards is not None else []
+        self.global_pipes = global_pipes if global_pipes is not None else []
+        self.global_interceptors = global_interceptors if global_interceptors is not None else []
+        self.global_filters = global_filters if global_filters is not None else []
         self.controller_modules = controller_modules or {}
         self.gateway_modules = gateway_modules or {}
         self._parameter_cache: dict[Any, dict[str, inspect.Parameter]] = {}
@@ -155,15 +155,26 @@ class FastApiAdapter:
             try:
                 await self._run_connection_guards(instance, connection_context)
             except Exception:
-                await websocket.close(code=1008)
+                await self._close_websocket_safely(websocket, code=1008)
                 return
-            await websocket.accept()
+            try:
+                await websocket.accept()
+            except (RuntimeError, WebSocketDisconnect):
+                return
             self.container.resolve(WebSocketManager).connect(websocket)
             connect_hook = getattr(instance, "on_connect", None)
             if connect_hook is not None:
-                result = connect_hook(websocket)
-                if inspect.isawaitable(result):
-                    await result
+                try:
+                    result = connect_hook(websocket)
+                    if inspect.isawaitable(result):
+                        await result
+                except WebSocketDisconnect:
+                    self.container.resolve(WebSocketManager).disconnect(websocket)
+                    return
+                except Exception:
+                    await self._close_websocket_safely(websocket, code=1011)
+                    self.container.resolve(WebSocketManager).disconnect(websocket)
+                    return
             try:
                 while True:
                     try:
@@ -297,16 +308,18 @@ class FastApiAdapter:
                         result = await result
                     if result is None and self._uses_manual_response(handler):
                         return response
-                    response_headers = dict(self._response_headers(controller, handler))
-                    for name, value in response_headers.items():
-                        response.headers[name] = value
+                    response_headers = self._response_headers(controller, handler)
+                    self._append_response_headers(response, response_headers)
                     if self._metadata(handler, "__fanest_sse__", False):
-                        return self._sse_response(result, response_headers)
+                        return self._with_response_headers(self._sse_response(result), response_headers)
                     if isinstance(result, StreamableFile):
-                        return result.to_response(response_headers)
+                        return self._with_response_headers(result.to_response(), response_headers)
                     render_template = self._metadata(handler, "__fanest_render_template__")
                     if render_template is not None:
-                        return self._render_response(render_template, result, response_headers)
+                        return self._with_response_headers(
+                            self._render_response(render_template, result),
+                            response_headers,
+                        )
                     redirect = self._metadata(handler, "__fanest_redirect__")
                     if redirect is not None:
                         if isinstance(result, dict) and result.get("url"):
@@ -775,6 +788,12 @@ class FastApiAdapter:
                 return text
         return text
 
+    async def _close_websocket_safely(self, websocket: WebSocket, *, code: int) -> None:
+        try:
+            await websocket.close(code=code)
+        except (RuntimeError, WebSocketDisconnect):
+            return
+
     async def handle_validation_error(self, request: Request, exc: RequestValidationError) -> Any:
         route = request.scope.get("route")
         endpoint = getattr(route, "endpoint", None)
@@ -807,6 +826,18 @@ class FastApiAdapter:
         controller_values = getattr(controller.__class__, "__fanest_response_headers__", [])
         handler_values = self._metadata(handler, "__fanest_response_headers__", [])
         return [*controller_values, *handler_values]
+
+    def _append_response_headers(self, response: StarletteResponse, headers: list[tuple[str, str]]) -> None:
+        for name, value in headers:
+            response.headers.append(name, value)
+
+    def _with_response_headers(
+        self,
+        response: StarletteResponse,
+        headers: list[tuple[str, str]],
+    ) -> StarletteResponse:
+        self._append_response_headers(response, headers)
+        return response
 
     def _sse_response(self, result: Any, headers: dict[str, str] | None = None) -> StreamingResponse:
         async def body():

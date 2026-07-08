@@ -51,6 +51,52 @@ def test_event_emitter_and_logger_module():
     assert EventsService.seen == ["Ada"]
 
 
+@Injectable(scope="request")
+class RequestScopedEventService:
+    created = 0
+    seen: list[int] = []
+
+    def __init__(self):
+        type(self).created += 1
+        self.instance_id = type(self).created
+
+    @OnEvent("request.event")
+    async def handle_request_event(self, payload):
+        self.seen.append(self.instance_id)
+
+
+@Controller("request-events")
+class RequestEventsController:
+    def __init__(self, emitter: EventEmitter):
+        self.emitter = emitter
+
+    @Get("/")
+    async def emit(self):
+        await self.emitter.emit("request.event", {})
+        return {"ok": True}
+
+
+@Module(
+    imports=[EventEmitterModule.for_root()],
+    controllers=[RequestEventsController],
+    providers=[RequestScopedEventService],
+)
+class RequestScopedEventsModule:
+    pass
+
+
+def test_event_listeners_resolve_inside_request_scope():
+    RequestScopedEventService.created = 0
+    RequestScopedEventService.seen = []
+
+    with TestClient(FaNestFactory.create(RequestScopedEventsModule)) as client:
+        assert client.get("/request-events").json() == {"ok": True}
+        assert client.get("/request-events").json() == {"ok": True}
+
+    assert RequestScopedEventService.created == 2
+    assert RequestScopedEventService.seen == [1, 2]
+
+
 @pytest.mark.anyio
 async def test_event_emitter_supports_once_off_and_wildcard():
     emitter = EventEmitter()
