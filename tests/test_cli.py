@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 from typer.testing import CliRunner
 
@@ -92,6 +93,46 @@ def test_cli_registers_generated_module_in_parent_module(tmp_path, monkeypatch):
     content = app_module.read_text(encoding="utf-8")
     assert "from .users.users_module import UsersModule" in content
     assert "@Module(imports=[UsersModule], controllers=[])" in content
+
+
+def test_cli_registers_generated_module_in_root_main(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    Path("main.py").write_text(
+        "from fanest import Controller, FaNestFactory, Get, Injectable, Module\n\n\n"
+        "@Injectable()\n"
+        "class AppService:\n"
+        "    def info(self):\n"
+        "        return {'status': 'running'}\n\n\n"
+        "@Controller('/')\n"
+        "class AppController:\n"
+        "    def __init__(self, app_service: AppService):\n"
+        "        self.app_service = app_service\n\n"
+        "    @Get('/')\n"
+        "    async def index(self):\n"
+        "        return self.app_service.info()\n\n\n"
+        "@Module(controllers=[AppController], providers=[AppService])\n"
+        "class AppModule:\n"
+        "    pass\n\n\n"
+        "app = FaNestFactory.create(AppModule)\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["generate", "resource", "users", "--module", "main.py"])
+
+    assert result.exit_code == 0
+    content = Path("main.py").read_text(encoding="utf-8")
+    assert "from src.users.users_module import UsersModule" in content
+    assert "@Module(imports=[UsersModule], controllers=[AppController]" in content
+    assert (tmp_path / "src/__init__.py").exists()
+
+    namespace: dict[str, object] = {}
+    sys.path.insert(0, str(tmp_path))
+    try:
+        exec(compile(content, "main.py", "exec"), namespace)
+    finally:
+        sys.path.remove(str(tmp_path))
+    assert "app" in namespace
 
 
 def test_cli_register_module_dry_run_does_not_mutate_parent(tmp_path, monkeypatch):
@@ -199,6 +240,6 @@ def test_cli_info_and_build(tmp_path, monkeypatch):
     build = runner.invoke(app, ["build", "src"])
 
     assert info.exit_code == 0
-    assert "FaNest 0.1.0" in info.output
+    assert "FaNest 0.1.1" in info.output
     assert build.exit_code == 0
     assert "Build OK: src" in build.output

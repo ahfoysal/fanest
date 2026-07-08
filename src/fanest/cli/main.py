@@ -319,6 +319,8 @@ def _class_name(name: str) -> str:
 
 
 def _ensure_resource_dir(name: str, *, exist_ok: bool = True) -> Path:
+    Path("src").mkdir(exist_ok=True)
+    (Path("src") / "__init__.py").touch()
     resource = Path("src") / name
     resource.mkdir(parents=True, exist_ok=exist_ok)
     (resource / "__init__.py").touch()
@@ -369,7 +371,7 @@ def _register_module_import(parent_module: str, child_name: str, child_class: st
     target = Path(parent_module)
     if not target.exists():
         target = Path("src") / parent_module
-    import_line = f"from .{child_name}.{child_name}_module import {child_class}Module\n"
+    import_line = _module_import_line(target, child_name, child_class)
     if dry_run:
         typer.echo(f"Would update {target} with {child_class}Module")
         return
@@ -383,6 +385,15 @@ def _register_module_import(parent_module: str, child_name: str, child_class: st
         content = re.sub(r"@Module\((?P<body>[^)]*)\)", _module_with_import(module_name), content, count=1)
     target.write_text(content, encoding="utf-8")
     typer.echo(f"Updated {target} with {module_name}")
+
+
+def _module_import_line(target: Path, child_name: str, child_class: str) -> str:
+    child_module = f"{child_name}.{child_name}_module"
+    try:
+        target.relative_to(Path("src"))
+    except ValueError:
+        return f"from src.{child_module} import {child_class}Module\n"
+    return f"from .{child_module} import {child_class}Module\n"
 
 
 def _module_with_import(module_name: str):
