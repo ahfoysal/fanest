@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+from typing import Any
 
 import typer
 
@@ -51,6 +52,30 @@ def start(
     import uvicorn
 
     uvicorn.run(app_path, host=host, port=port, reload=reload)
+
+
+@app.command()
+def dev(
+    path: str = typer.Argument("main.py"),
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    app_name: str = typer.Option("app", "--app"),
+) -> None:
+    _run_uvicorn(_resolve_app_path(path, app_name), host=host, port=port, reload=True)
+
+
+@app.command()
+def run(
+    path: str = typer.Argument("main.py"),
+    host: str = "0.0.0.0",
+    port: int = 8000,
+    app_name: str = typer.Option("app", "--app"),
+    workers: int | None = typer.Option(None, "--workers"),
+) -> None:
+    options: dict[str, Any] = {}
+    if workers is not None:
+        options["workers"] = workers
+    _run_uvicorn(_resolve_app_path(path, app_name), host=host, port=port, reload=False, **options)
 
 
 @generate_app.command("resource")
@@ -196,6 +221,23 @@ def _write_file(path: Path, content: str, dry_run: bool) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _resolve_app_path(path: str, app_name: str = "app") -> str:
+    if ":" in path:
+        return path
+    source = Path(path)
+    if source.suffix == ".py":
+        source = source.with_suffix("")
+    parts = [part for part in source.parts if part not in {".", ""}]
+    module_path = ".".join(parts)
+    return f"{module_path}:{app_name}"
+
+
+def _run_uvicorn(app_path: str, **options: Any) -> None:
+    import uvicorn
+
+    uvicorn.run(app_path, **options)
 
 
 def _register_module_import(parent_module: str, child_name: str, child_class: str, dry_run: bool) -> None:

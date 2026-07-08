@@ -40,7 +40,7 @@ Small APIs should stay small. Bigger APIs should not become a pile of unrelated 
 
 ```bash
 uv sync --extra dev
-uv run uvicorn examples.basic.main:app --reload
+uv run fanest dev examples/basic/main.py
 ```
 
 Open:
@@ -135,6 +135,7 @@ It shows:
 - GraphQL resolvers and subscriptions
 - health endpoint
 - SQLAlchemy module wiring
+- TypeORM-style repository injection over SQLAlchemy
 - Mongo-style document collections
 - Mongoose-style module aliases
 - interval jobs
@@ -148,6 +149,7 @@ It shows:
 - named microservice transports
 - WebSocket gateway with rooms, broadcasting, guards, pipes, filters, message-body decorators, connected-socket decorators, and Socket.IO-style emitters
 - global prefix, CORS, and global pipes
+- `APP_GUARD`, `APP_PIPE`, `APP_INTERCEPTOR`, and `APP_FILTER` global providers
 
 Run it:
 
@@ -173,6 +175,9 @@ WS   /api/chat
 fanest new blog-api
 fanest workspace acme-platform
 fanest start main:app --reload
+fanest dev main.py
+fanest run main.py
+fanest run src/main.py --app application --workers 2
 
 fanest generate resource users
 fanest generate module users
@@ -275,7 +280,7 @@ fanest.i18n              translations and I18nLang helper
 fanest.config            ConfigModule and ConfigService
 fanest.swagger           decorators, DocumentBuilder, SwaggerModule
 fanest.auth              JWT service, passport strategies, auth guard, roles guard
-fanest.sqlalchemy        async SQLAlchemy module and repositories
+fanest.sqlalchemy        async SQLAlchemy module, repositories, TypeOrmModule alias
 fanest.mongodb           Mongo/Mongoose-style document service and collections
 fanest.cache             cache service, interceptor, and store adapters
 fanest.throttler         throttling module and guard
@@ -390,6 +395,37 @@ UpdateUserDto = PartialType(CreateUserDto)
 PublicUserDto = PickType(UserDto, ["id", "name"])
 ```
 
+## ORM
+
+FaNest ships with an async SQLAlchemy package and Nest-style repository injection:
+
+```python
+from fanest import Injectable, Module
+from fanest.sqlalchemy import InjectRepository, SqlAlchemyRepository, TypeOrmModule
+
+
+@Injectable()
+class UsersService:
+    def __init__(self, users: SqlAlchemyRepository = InjectRepository(User)):
+        self.users = users
+
+
+@Module(
+    imports=[
+        TypeOrmModule.for_root(database_url="sqlite+aiosqlite:///app.db"),
+        TypeOrmModule.for_feature([User]),
+    ],
+    providers=[UsersService],
+)
+class UsersModule:
+    pass
+```
+
+Repositories include `find_all`, `find_by`, `find_one`, `find_one_by`, `count`, `save`,
+`update`, `delete`, and `delete_by`. `SqlAlchemyModule` and `TypeOrmModule` point to the same
+Python-native SQLAlchemy integration, so Nest users can keep the familiar module shape while
+still using SQLAlchemy models.
+
 ## Middleware
 
 ```python
@@ -458,6 +494,7 @@ Current:
 
 - modules, controllers, providers
 - DI with custom, async, scoped, optional, and aliased providers
+- `APP_GUARD`, `APP_PIPE`, `APP_INTERCEPTOR`, and `APP_FILTER` global enhancer provider tokens
 - global modules and exported module boundaries
 - REST decorators
 - request binding
@@ -489,6 +526,7 @@ Current:
 - microservice message/event patterns and named transports
 - lightweight GraphQL module with queries, mutations, and subscriptions
 - SQLAlchemy package start
+- TypeOrmModule and InjectRepository aliases over SQLAlchemy
 - migration template helper
 - Mongo-style package start
 - MongooseModule and InjectModel aliases
@@ -518,7 +556,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 87 passed
+# 90 passed
 ```
 
 ## License

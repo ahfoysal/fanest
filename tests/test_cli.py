@@ -2,6 +2,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from fanest.cli import main as cli_main
 from fanest.cli.main import app
 
 
@@ -85,3 +86,24 @@ def test_cli_generates_workspace_and_library(tmp_path, monkeypatch):
     assert library.exit_code == 0
     assert (tmp_path / "acme/apps/api/main.py").exists()
     assert (tmp_path / "acme/libs/common/common_module.py").exists()
+
+
+def test_cli_dev_and_run_accept_file_paths(monkeypatch):
+    calls = []
+
+    def fake_run_uvicorn(app_path, **options):
+        calls.append((app_path, options))
+
+    monkeypatch.setattr(cli_main, "_run_uvicorn", fake_run_uvicorn)
+    runner = CliRunner()
+
+    dev = runner.invoke(app, ["dev", "main.py", "--port", "9000"])
+    run = runner.invoke(app, ["run", "src/main.py", "--app", "application", "--workers", "2"])
+
+    assert dev.exit_code == 0
+    assert run.exit_code == 0
+    assert calls[0] == ("main:app", {"host": "127.0.0.1", "port": 9000, "reload": True})
+    assert calls[1] == (
+        "src.main:application",
+        {"host": "0.0.0.0", "port": 8000, "reload": False, "workers": 2},
+    )

@@ -11,6 +11,7 @@ from fanest.core.metadata import (
     ProviderDefinition,
     ValueProvider,
 )
+from fanest.core.enhancers import APP_ENHANCER_TOKENS
 from fanest.core.module_ref import ModuleRef
 from fanest.core.reflector import Reflector
 from fanest.websockets import SocketIoServer, WebSocketManager
@@ -23,6 +24,7 @@ _request_instances: ContextVar[dict[Any, Any] | None] = ContextVar(
 class FaNestContainer:
     def __init__(self) -> None:
         self._providers: dict[Any, ProviderDefinition] = {}
+        self._multi_providers: dict[Any, list[ProviderDefinition]] = {}
         self._instances: dict[Any, Any] = {}
         self._resolving: set[Any] = set()
         self.register(ValueProvider(provide=ModuleRef, use_value=ModuleRef(self)))
@@ -33,6 +35,9 @@ class FaNestContainer:
 
     def register(self, provider: ProviderDefinition) -> None:
         token = self.provider_token(provider)
+        if token in APP_ENHANCER_TOKENS:
+            self._multi_providers.setdefault(token, []).append(provider)
+            return
         self._providers[token] = provider
 
     def begin_request(self):
@@ -42,6 +47,11 @@ class FaNestContainer:
         _request_instances.reset(token)
 
     def override(self, token: Any, value: Any) -> None:
+        if token in APP_ENHANCER_TOKENS:
+            self._multi_providers[token] = [
+                value if isinstance(value, (ClassProvider, ValueProvider, FactoryProvider, ExistingProvider)) else ValueProvider(provide=token, use_value=value)
+            ]
+            return
         if isinstance(value, (ClassProvider, ValueProvider, FactoryProvider, ExistingProvider)):
             self._providers[token] = value
             self._instances.pop(token, None)
@@ -51,6 +61,9 @@ class FaNestContainer:
             self._instances.pop(token, None)
             return
         self._instances[token] = value
+
+    def resolve_all(self, token: Any) -> list[Any]:
+        return [self._resolve_provider(provider) for provider in self._multi_providers.get(token, [])]
 
     def resolve(self, token: Any) -> Any:
         provider = self._providers.get(token)

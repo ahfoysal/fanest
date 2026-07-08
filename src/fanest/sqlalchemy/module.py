@@ -4,7 +4,9 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
-from sqlalchemy import select
+from sqlalchemy import delete as sqlalchemy_delete
+from sqlalchemy import func, select
+from sqlalchemy import update as sqlalchemy_update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from fanest import Inject, Injectable, Module, use_value
@@ -43,6 +45,12 @@ class SqlAlchemyService:
     def create_repository(self, model: type) -> "SqlAlchemyRepository":
         return SqlAlchemyRepository(self, model)
 
+    async def close(self) -> None:
+        await self._engine.dispose()
+
+    async def on_application_shutdown(self) -> None:
+        await self.close()
+
 
 class SqlAlchemyRepository:
     def __init__(self, service: SqlAlchemyService, model: type):
@@ -55,10 +63,31 @@ class SqlAlchemyRepository:
             return list(result.scalars().all())
         return []
 
+    async def find_by(self, **criteria: Any) -> list[Any]:
+        async for session in self.service.session():
+            result = await session.execute(select(self.model).where(*self._filters(criteria)))
+            return list(result.scalars().all())
+        return []
+
     async def find_one(self, primary_key: Any) -> Any | None:
         async for session in self.service.session():
             return await session.get(self.model, primary_key)
         return None
+
+    async def find_one_by(self, **criteria: Any) -> Any | None:
+        async for session in self.service.session():
+            result = await session.execute(select(self.model).where(*self._filters(criteria)).limit(1))
+            return result.scalars().first()
+        return None
+
+    async def count(self, **criteria: Any) -> int:
+        async for session in self.service.session():
+            statement = select(func.count()).select_from(self.model)
+            if criteria:
+                statement = statement.where(*self._filters(criteria))
+            result = await session.execute(statement)
+            return int(result.scalar_one())
+        return 0
 
     async def save(self, entity: Any) -> Any:
         async for session in self.service.session():
@@ -68,14 +97,37 @@ class SqlAlchemyRepository:
             return entity
         return entity
 
+    async def update(self, criteria: dict[str, Any], values: dict[str, Any]) -> int:
+        async for session in self.service.session():
+            result = await session.execute(
+                sqlalchemy_update(self.model).where(*self._filters(criteria)).values(**values)
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+        return 0
+
     async def delete(self, entity: Any) -> None:
         async for session in self.service.session():
             await session.delete(entity)
             await session.commit()
 
+    async def delete_by(self, **criteria: Any) -> int:
+        async for session in self.service.session():
+            result = await session.execute(sqlalchemy_delete(self.model).where(*self._filters(criteria)))
+            await session.commit()
+            return int(result.rowcount or 0)
+        return 0
+
+    def _filters(self, criteria: dict[str, Any]) -> list[Any]:
+        return [getattr(self.model, key) == value for key, value in criteria.items()]
+
 
 def repository_token(model: type):
     return token(f"SQLALCHEMY_REPOSITORY:{model.__module__}.{model.__name__}")
+
+
+def InjectRepository(model: type):
+    return Inject(repository_token(model))
 
 
 def Transactional(service_attr: str = "db"):
@@ -166,3 +218,6 @@ class SqlAlchemyModule:
             pass
 
         return DynamicSqlAlchemyFeatureModule
+
+
+TypeOrmModule = SqlAlchemyModule

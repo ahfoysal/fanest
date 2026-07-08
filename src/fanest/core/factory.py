@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from fanest.core.container import FaNestContainer
 from fanest.core.discovery import DiscoveryService
+from fanest.core.enhancers import APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE
 from fanest.core.metadata import ProviderDefinition, ValueProvider
 from fanest.core.scanner import ModuleScanner
 from fanest.common.middleware import FaNestMiddlewareAdapter
@@ -90,10 +91,10 @@ class FaNestFactory:
             app=app,
             container=container,
             global_prefix=global_prefix,
-            global_guards=global_guards or [],
-            global_pipes=global_pipes or [],
-            global_interceptors=global_interceptors or [],
-            global_filters=global_filters or [],
+            global_guards=[*container.resolve_all(APP_GUARD), *(global_guards or [])],
+            global_pipes=[*container.resolve_all(APP_PIPE), *(global_pipes or [])],
+            global_interceptors=[*container.resolve_all(APP_INTERCEPTOR), *(global_interceptors or [])],
+            global_filters=[*container.resolve_all(APP_FILTER), *(global_filters or [])],
         )
         adapter.register_controllers(scanner.controllers)
         adapter.register_gateways(scanner.gateways)

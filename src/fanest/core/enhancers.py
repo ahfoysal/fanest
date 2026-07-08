@@ -1,0 +1,10 @@
+from fanest.core.metadata import InjectionToken
+
+APP_GUARD = InjectionToken("APP_GUARD")
+APP_PIPE = InjectionToken("APP_PIPE")
+APP_INTERCEPTOR = InjectionToken("APP_INTERCEPTOR")
+APP_FILTER = InjectionToken("APP_FILTER")
+
+APP_ENHANCER_TOKENS = {APP_GUARD, APP_PIPE, APP_INTERCEPTOR, APP_FILTER}
+
+__all__ = ["APP_FILTER", "APP_GUARD", "APP_INTERCEPTOR", "APP_PIPE", "APP_ENHANCER_TOKENS"]
