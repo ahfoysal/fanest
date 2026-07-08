@@ -14,6 +14,7 @@ from starlette.background import BackgroundTasks as StarletteBackgroundTasks
 from starlette.responses import Response as StarletteResponse
 from starlette.websockets import WebSocketDisconnect
 
+from fanest.common.pipes import DefaultValuePipe
 from fanest.common.responses import StreamableFile
 from fanest.core.container import FaNestContainer
 from fanest.core.metadata import (
@@ -454,24 +455,35 @@ class FastApiAdapter:
             return False
         return parameter.annotation in {Request, Response, FastBackgroundTasks}
 
+    def _source_default(self, source: ParameterSource) -> Any:
+        # NestJS-style: a `DefaultValuePipe` makes the parameter optional and
+        # supplies its default, so callers don't also have to pass `default=...`.
+        default = source.default
+        if default is ... or default is inspect.Parameter.empty:
+            for pipe in source.pipes or ():
+                if isinstance(pipe, DefaultValuePipe):
+                    return pipe.default
+        return default
+
     def _fastapi_default(self, source: ParameterSource, fallback_name: str) -> Any:
         alias = source.name or fallback_name
+        default = self._source_default(source)
         if source.source == "body":
-            return FastBody(source.default, alias=source.name)
+            return FastBody(default, alias=source.name)
         if source.source == "path":
             return Path(source.default, alias=alias)
         if source.source == "query":
-            return Query(source.default, alias=source.name)
+            return Query(default, alias=source.name)
         if source.source == "header":
-            return Header(source.default, alias=source.name)
+            return Header(default, alias=source.name)
         if source.source == "cookie":
-            return Cookie(source.default, alias=source.name)
+            return Cookie(default, alias=source.name)
         if source.source == "file":
             return File(..., alias=source.name)
         if source.source == "files":
-            return File(source.default, alias=source.name)
+            return File(default, alias=source.name)
         if source.source == "form":
-            return FastForm(source.default, alias=source.name)
+            return FastForm(default, alias=source.name)
         if source.source == "request":
             return inspect.Parameter.empty
         if source.source == "state":
