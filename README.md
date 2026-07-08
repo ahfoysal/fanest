@@ -118,17 +118,20 @@ It shows:
 - JWT auth
 - role guards
 - cache interceptor
+- cache stores
 - throttling guard
-- Swagger document setup
+- Swagger document setup and security schemes
+- GraphQL resolvers
 - health endpoint
 - SQLAlchemy module wiring
+- Mongo-style document collections
 - interval jobs
 - cron jobs
 - timeout jobs and scheduler registry
 - queue processors
 - mailer service
-- microservice message/event patterns
-- WebSocket gateway with rooms/broadcasting
+- named microservice transports
+- WebSocket gateway with rooms, broadcasting, guards, and pipes
 - global prefix, CORS, and global pipes
 
 Run it:
@@ -250,13 +253,15 @@ fanest.config            ConfigModule and ConfigService
 fanest.swagger           decorators, DocumentBuilder, SwaggerModule
 fanest.auth              JWT service, auth guard, roles guard
 fanest.sqlalchemy        async SQLAlchemy module and repositories
-fanest.cache             cache service and cache interceptor
+fanest.mongodb           Mongo-style document service and collections
+fanest.cache             cache service, interceptor, and store adapters
 fanest.throttler         throttling module and guard
 fanest.schedule          interval, cron, timeout jobs, scheduler registry
 fanest.websockets        connection manager, rooms, broadcasting
 fanest.queues            in-memory queue service, processors, jobs
 fanest.mailer            mail service with outbox and SMTP handoff
-fanest.microservices     in-memory client/server, message and event patterns
+fanest.graphql           resolvers, queries, mutations, GraphQL endpoint
+fanest.microservices     message/event patterns and named transports
 fanest.mapped_types      PartialType, PickType, OmitType, IntersectionType
 fanest.health            health endpoint module
 fanest.testing           TestingModule and provider overrides
@@ -309,8 +314,8 @@ SwaggerModule.setup("/docs", app, document)
 ```
 
 Swagger decorators include `ApiTags`, `ApiOperation`, `ApiParam`, `ApiQuery`, `ApiHeader`,
-`ApiBody`, `ApiResponse`, `ApiConsumes`, `ApiProduces`, `ApiBearerAuth`, `ApiExcludeEndpoint`,
-and `ApiProperty`.
+`ApiBody`, `ApiResponse`, `ApiConsumes`, `ApiProduces`, `ApiBearerAuth`, `ApiBasicAuth`,
+`ApiCookieAuth`, `ApiSecurity`, `ApiExcludeEndpoint`, and `ApiProperty`.
 
 ## Mapped Types
 
@@ -334,6 +339,15 @@ class RequestIdMiddleware:
 @Module(controllers=[UsersController], middlewares=[RequestIdMiddleware])
 class AppModule:
     pass
+```
+
+Modules can also expose a Nest-style `configure(consumer)` method for route-scoped
+middleware with exclusions:
+
+```python
+class AppModule:
+    def configure(self, consumer):
+        consumer.apply(RequestIdMiddleware).exclude("/health").for_routes("/users*")
 ```
 
 ## Microservices
@@ -385,34 +399,34 @@ Current:
 - request binding
 - versioned routes, status codes, redirects, response headers, SSE, streaming files
 - middleware
+- route-scoped middleware with exclusions
 - file upload binding
 - file validation
 - custom param decorators
 - mapped DTO helpers
 - response serialization
 - guards, pipes, interceptors, filters
-- Swagger helpers
+- Swagger helpers and security schemes
 - JWT auth and roles
 - cache and throttling
-- WebSocket gateways and room broadcasting
+- WebSocket gateways, room broadcasting, guards, and pipes
 - cron, interval, timeout jobs, and scheduler registry
 - in-memory queue processors
 - mailer package
-- microservice message/event patterns
+- microservice message/event patterns and named transports
+- lightweight GraphQL module
 - SQLAlchemy package start
+- Mongo-style package start
+- cache store adapters
 - health checks
 - testing utilities
 - CLI generators
 
 Still to deepen:
 
-- middleware consumer API with route exclusions
-- GraphQL module
-- more microservice transports
 - Redis-backed queues
 - SMTP templates and provider adapters
 - advanced SQLAlchemy migrations/templates
-- MongoDB package
 - CLI auto-registration into modules
 - workspace/monorepo mode
 
@@ -424,7 +438,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 15 passed
+# 61 passed
 ```
 
 ## License
