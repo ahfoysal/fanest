@@ -99,22 +99,35 @@ class FaNestFactory:
                 FaNestFactory._register_graphql_resolver(container, instance)
                 hook = getattr(instance, "on_module_init", None)
                 if hook is not None:
-                    result = hook()
-                    if hasattr(result, "__await__"):
-                        await result
+                    await FaNestFactory._call_lifecycle_hook(hook)
+            for instance in instances:
+                hook = getattr(instance, "on_application_bootstrap", None)
+                if hook is not None:
+                    await FaNestFactory._call_lifecycle_hook(hook)
             schedule_runner = ScheduleRunner(instances, registry=container.resolve(SchedulerRegistry))
             schedule_runner.start()
             yield
             await schedule_runner.stop()
-            for provider in providers:
-                instance = await container.resolve_async(container.provider_token(provider))
+            for instance in reversed(instances):
+                hook = getattr(instance, "before_application_shutdown", None)
+                if hook is not None:
+                    await FaNestFactory._call_lifecycle_hook(hook)
+            for instance in reversed(instances):
+                hook = getattr(instance, "on_module_destroy", None)
+                if hook is not None:
+                    await FaNestFactory._call_lifecycle_hook(hook)
+            for instance in reversed(instances):
                 hook = getattr(instance, "on_application_shutdown", None)
                 if hook is not None:
-                    result = hook()
-                    if hasattr(result, "__await__"):
-                        await result
+                    await FaNestFactory._call_lifecycle_hook(hook)
 
         return lifespan
+
+    @staticmethod
+    async def _call_lifecycle_hook(hook):
+        result = hook()
+        if hasattr(result, "__await__"):
+            await result
 
     @staticmethod
     def _register_events(container: FaNestContainer, instance: object) -> None:
