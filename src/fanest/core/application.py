@@ -36,6 +36,18 @@ class FaNestApplication:
         self.options["cors"] = options
         return self
 
+    def enable_compression(self, *, minimum_size: int = 500) -> "FaNestApplication":
+        from fanest.platform_fastapi.modules import enable_compression
+
+        enable_compression(self.build(), minimum_size=minimum_size)
+        return self
+
+    def serve_static(self, path: str, directory: str, *, name: str = "static") -> "FaNestApplication":
+        from fanest.platform_fastapi.modules import serve_static
+
+        serve_static(self.build(), path, directory, name=name)
+        return self
+
     def use_global_guards(self, *guards: Any) -> "FaNestApplication":
         self._ensure_not_built()
         self.global_guards.extend(guards)

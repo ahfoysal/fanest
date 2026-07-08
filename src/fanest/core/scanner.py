@@ -102,6 +102,8 @@ class ModuleScanner:
                 continue
             if getattr(default, "optional", False):
                 continue
+            if default is not inspect.Parameter.empty:
+                continue
             if inspect.isclass(dependency) and dependency not in self._all_provider_tokens():
                 continue
             if dependency not in visible_tokens:

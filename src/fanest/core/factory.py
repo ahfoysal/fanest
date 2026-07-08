@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -92,6 +93,7 @@ class FaNestFactory:
             for provider in providers:
                 instance = container.resolve(container.provider_token(provider))
                 instances.append(instance)
+                FaNestFactory._register_events(container, instance)
                 hook = getattr(instance, "on_module_init", None)
                 if hook is not None:
                     result = hook()
@@ -110,3 +112,16 @@ class FaNestFactory:
                         await result
 
         return lifespan
+
+    @staticmethod
+    def _register_events(container: FaNestContainer, instance: object) -> None:
+        from fanest.events import EventEmitter
+
+        try:
+            emitter = container.resolve(EventEmitter)
+        except Exception:
+            return
+        for _, handler in inspect.getmembers(instance, predicate=callable):
+            event = getattr(handler, "__fanest_event__", None)
+            if event is not None:
+                emitter.on(event, handler)

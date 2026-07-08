@@ -139,6 +139,9 @@ class FaNestContainer:
             if isinstance(parameter.default, InjectMarker):
                 kwargs[name] = self._resolve_injected_token(parameter.default)
                 continue
+            if parameter.default is not inspect.Parameter.empty:
+                kwargs[name] = parameter.default
+                continue
             annotation = type_hints.get(name, parameter.annotation)
             if annotation is inspect.Parameter.empty:
                 raise TypeError(
