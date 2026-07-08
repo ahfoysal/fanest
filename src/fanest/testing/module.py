@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from fanest.core.container import FaNestContainer
+from fanest.core.enhancers import APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE
 from fanest.core.factory import FaNestFactory
 from fanest.core.providers import use_class, use_factory
 
@@ -32,7 +33,7 @@ class TestingModule:
     __test__ = False
 
     root_module: type
-    overrides: dict[type, Any] = field(default_factory=dict)
+    overrides: dict[Any, Any] = field(default_factory=dict)
     _app: FastAPI | None = None
 
     @classmethod
@@ -45,6 +46,21 @@ class TestingModule:
 
     def override(self, token: Any) -> OverrideBuilder:
         return OverrideBuilder(self, token)
+
+    def override_guard(self, token: Any = APP_GUARD) -> OverrideBuilder:
+        return self.override(token)
+
+    def override_interceptor(self, token: Any = APP_INTERCEPTOR) -> OverrideBuilder:
+        return self.override(token)
+
+    def override_filter(self, token: Any = APP_FILTER) -> OverrideBuilder:
+        return self.override(token)
+
+    def override_pipe(self, token: Any = APP_PIPE) -> OverrideBuilder:
+        return self.override(token)
+
+    def override_controller(self, token: Any) -> OverrideBuilder:
+        return self.override(token)
 
     def compile(self) -> FastAPI:
         self._app = FaNestFactory.create(self.root_module, overrides=self.overrides)

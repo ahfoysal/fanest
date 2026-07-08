@@ -3,8 +3,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import Response
 
 from fanest.core.container import FaNestContainer
 
@@ -48,9 +48,9 @@ class MiddlewareConsumer:
         return self
 
 
-class FaNestMiddlewareAdapter(BaseHTTPMiddleware):
+class FaNestMiddlewareAdapter:
     def __init__(self, app: Any, *, middleware: Any, container: FaNestContainer) -> None:
-        super().__init__(app)
+        self.app = app
         if isinstance(middleware, MiddlewareRoute):
             self.middleware = middleware.middleware
             self.routes = middleware.routes
@@ -63,17 +63,45 @@ class FaNestMiddlewareAdapter(BaseHTTPMiddleware):
             self.methods = None
         self.container = container
 
-    async def dispatch(self, request: Request, call_next: Callable[..., Any]) -> Any:
+    async def __call__(self, scope: dict[str, Any], receive: Callable[..., Any], send: Callable[..., Any]) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope, receive=receive)
         if not self._matches(request):
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
         instance = self.container.resolve(self.middleware) if inspect.isclass(self.middleware) else self.middleware
         if hasattr(instance, "use"):
-            result = instance.use(request, call_next)
+            result = instance.use(request, self._call_next(scope, receive))
         else:
-            result = instance(request, call_next)
+            result = instance(request, self._call_next(scope, receive))
         if inspect.isawaitable(result):
-            return await result
-        return result
+            result = await result
+        await result(scope, receive, send)
+
+    def _call_next(self, scope: dict[str, Any], receive: Callable[..., Any]) -> Callable[[Request], Any]:
+        async def call_next(request: Request) -> Response:
+            messages: list[dict[str, Any]] = []
+
+            async def send_capture(message: dict[str, Any]) -> None:
+                messages.append(message)
+
+            request_receive = getattr(request, "_receive", receive)
+            await self.app(scope, request_receive, send_capture)
+            return self._response_from_messages(messages)
+
+        return call_next
+
+    def _response_from_messages(self, messages: list[dict[str, Any]]) -> Response:
+        start = next((message for message in messages if message["type"] == "http.response.start"), None)
+        body_messages = [message for message in messages if message["type"] == "http.response.body"]
+        body = b"".join(message.get("body", b"") for message in body_messages)
+        status_code = start.get("status", 200) if start else 200
+        raw_headers = start.get("headers", []) if start else []
+        response = Response(content=body, status_code=status_code)
+        response.raw_headers = list(raw_headers)
+        return response
 
     def _matches(self, request: Request) -> bool:
         if self.methods is not None and request.method.upper() not in self.methods:

@@ -87,6 +87,18 @@ class ModuleMetadata:
 
 
 @dataclass(frozen=True)
+class DynamicModule:
+    module: type
+    imports: list[Any] = field(default_factory=list)
+    controllers: list[type] = field(default_factory=list)
+    providers: list[ProviderDefinition] = field(default_factory=list)
+    gateways: list[type] = field(default_factory=list)
+    middlewares: list[Any] = field(default_factory=list)
+    exports: list[Any] = field(default_factory=list)
+    global_module: bool = False
+
+
+@dataclass(frozen=True)
 class ParameterSource:
     source: str
     name: str | None = None

@@ -1,12 +1,14 @@
 from fastapi.testclient import TestClient
 
-from fanest import Controller, FaNestFactory, Get, Global, Inject, Module, UseGuards, token, use_factory
+from fanest import Controller, FaNestFactory, Get, Global, Inject, Module, UseGuards, dynamic_module, token, use_factory
 from fanest.auth import AuthModule, JwtAuthGuard, JwtService
 from fanest.config import ConfigModule, ConfigService
 from fanest.throttler import Throttle, ThrottlerGuard, ThrottlerModule
 
 ASYNC_MESSAGE = token("ASYNC_MESSAGE")
 GLOBAL_MESSAGE = token("GLOBAL_MESSAGE")
+DYNAMIC_MESSAGE = token("DYNAMIC_MESSAGE")
+DICT_DYNAMIC_MESSAGE = token("DICT_DYNAMIC_MESSAGE")
 
 
 async def async_message_factory():
@@ -151,3 +153,90 @@ def test_throttler_module_for_root_async():
     with TestClient(FaNestFactory.create(AsyncThrottlerModule)) as client:
         assert client.get("/throttler-async").status_code == 200
         assert client.get("/throttler-async").status_code == 429
+
+
+@Module()
+class DynamicFeatureModule:
+    @staticmethod
+    def for_root(message: str):
+        return dynamic_module(
+            DynamicFeatureModule,
+            providers=[use_factory(DYNAMIC_MESSAGE, lambda: message)],
+            exports=[DYNAMIC_MESSAGE],
+        )
+
+
+class UsesDynamicMessage:
+    def __init__(self, message: str = Inject(DYNAMIC_MESSAGE)):
+        self.message = message
+
+
+@Controller("dynamic-module")
+class DynamicModuleController:
+    def __init__(self, service: UsesDynamicMessage):
+        self.service = service
+
+    @Get("/")
+    async def index(self):
+        return {"message": self.service.message}
+
+
+@Module(
+    imports=[DynamicFeatureModule.for_root("dynamic-ready")],
+    controllers=[DynamicModuleController],
+    providers=[UsesDynamicMessage],
+)
+class DynamicModuleRoot:
+    pass
+
+
+def test_dynamic_module_helper_merges_runtime_metadata():
+    client = TestClient(FaNestFactory.create(DynamicModuleRoot))
+
+    assert client.get("/dynamic-module").json() == {"message": "dynamic-ready"}
+
+
+@Module()
+class DictDynamicFeatureModule:
+    pass
+
+
+class UsesGlobalDynamicMessage:
+    def __init__(self, message: str = Inject(DICT_DYNAMIC_MESSAGE)):
+        self.message = message
+
+
+@Controller("dict-dynamic-module")
+class DictDynamicModuleController:
+    def __init__(self, service: UsesGlobalDynamicMessage):
+        self.service = service
+
+    @Get("/")
+    async def index(self):
+        return {"message": self.service.message}
+
+
+@Module(controllers=[DictDynamicModuleController], providers=[UsesGlobalDynamicMessage])
+class DictDynamicConsumerModule:
+    pass
+
+
+@Module(
+    imports=[
+        {
+            "module": DictDynamicFeatureModule,
+            "providers": [use_factory(DICT_DYNAMIC_MESSAGE, lambda: "dict-dynamic-ready")],
+            "exports": [DICT_DYNAMIC_MESSAGE],
+            "global": True,
+        },
+        DictDynamicConsumerModule,
+    ]
+)
+class DictDynamicModuleRoot:
+    pass
+
+
+def test_nest_style_dynamic_module_dict_can_be_global():
+    client = TestClient(FaNestFactory.create(DictDynamicModuleRoot))
+
+    assert client.get("/dict-dynamic-module").json() == {"message": "dict-dynamic-ready"}

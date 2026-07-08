@@ -1,8 +1,8 @@
 from collections.abc import Callable
 from dataclasses import replace
-from typing import TypeVar
+from typing import Any, TypeVar
 
-from fanest.core.metadata import ModuleMetadata, ProviderDefinition
+from fanest.core.metadata import DynamicModule, ModuleMetadata, ProviderDefinition
 
 T = TypeVar("T")
 
@@ -42,3 +42,27 @@ def Global(cls: type[T]) -> type[T]:
         raise TypeError(f"{cls.__name__} is not a FaNest module. Add @Module(...) before @Global.")
     setattr(cls, "__fanest_module__", replace(metadata, global_module=True))
     return cls
+
+
+def dynamic_module(
+    module: type,
+    *,
+    imports: list[Any] | None = None,
+    controllers: list[type] | None = None,
+    providers: list[ProviderDefinition] | None = None,
+    gateways: list[type] | None = None,
+    middlewares: list[type] | None = None,
+    exports: list[Any] | None = None,
+    global_module: bool = False,
+    global_: bool | None = None,
+) -> DynamicModule:
+    return DynamicModule(
+        module=module,
+        imports=imports or [],
+        controllers=controllers or [],
+        providers=providers or [],
+        gateways=gateways or [],
+        middlewares=middlewares or [],
+        exports=exports or [],
+        global_module=global_module if global_ is None else global_,
+    )

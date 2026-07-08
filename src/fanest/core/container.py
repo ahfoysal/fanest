@@ -65,11 +65,43 @@ class FaNestContainer:
     def resolve_all(self, token: Any) -> list[Any]:
         return [self._resolve_provider(provider) for provider in self._multi_providers.get(token, [])]
 
+    def has_provider(self, token: Any) -> bool:
+        token = self._unwrap_token(token)
+        return token in self._providers or token in self._multi_providers
+
+    def provider_tokens(self) -> tuple[Any, ...]:
+        return tuple([*self._providers.keys(), *self._multi_providers.keys()])
+
+    def describe_provider(self, token: Any) -> dict[str, Any]:
+        token = self._unwrap_token(token)
+        provider = self._providers.get(token)
+        multi = self._multi_providers.get(token)
+        if provider is None and multi is None:
+            raise KeyError(token)
+        if multi is not None:
+            return {
+                "token": token,
+                "scope": "singleton",
+                "type": "multi",
+                "multi": True,
+                "count": len(multi),
+            }
+        assert provider is not None
+        return {
+            "token": token,
+            "scope": self._effective_scope(token, provider),
+            "type": self._provider_kind(provider),
+            "multi": False,
+            "dependencies": tuple(self._unwrap_token(dependency) for dependency in self._provider_dependencies(provider)),
+            "resolved": token in self._instances,
+        }
+
     def resolve(self, token: Any) -> Any:
+        token = self._unwrap_token(token)
         provider = self._providers.get(token)
         if provider is None:
             if not inspect.isclass(token):
-                raise KeyError(f"No provider registered for token {token!r}")
+                raise KeyError(token)
             provider = token
 
         scope = self._effective_scope(token, provider)
@@ -94,10 +126,11 @@ class FaNestContainer:
         return instance
 
     async def resolve_async(self, token: Any) -> Any:
+        token = self._unwrap_token(token)
         provider = self._providers.get(token)
         if provider is None:
             if not inspect.isclass(token):
-                raise KeyError(f"No provider registered for token {token!r}")
+                raise KeyError(token)
             provider = token
 
         scope = self._effective_scope(token, provider)
@@ -170,6 +203,21 @@ class FaNestContainer:
         if inspect.isclass(provider):
             return self._class_scope(provider)
         return "singleton"
+
+    def _provider_kind(self, provider: ProviderDefinition) -> str:
+        if isinstance(provider, ForwardRef):
+            return self._provider_kind(provider.factory())
+        if isinstance(provider, ClassProvider):
+            return "class"
+        if isinstance(provider, ValueProvider):
+            return "value"
+        if isinstance(provider, ExistingProvider):
+            return "existing"
+        if isinstance(provider, FactoryProvider):
+            return "factory"
+        if inspect.isclass(provider):
+            return "class"
+        return "value"
 
     def _effective_scope(
         self,
@@ -257,6 +305,9 @@ class FaNestContainer:
 
     def instantiate(self, provider: type) -> Any:
         return self._instantiate(provider)
+
+    async def instantiate_async(self, provider: type) -> Any:
+        return await self._instantiate_async(provider)
 
     def _instantiate(self, provider: type) -> Any:
         signature = inspect.signature(provider.__init__)
