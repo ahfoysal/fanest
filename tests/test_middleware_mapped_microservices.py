@@ -7,7 +7,9 @@ from fanest import (
     Controller,
     FaNestFactory,
     Get,
+    MiddlewareConsumer,
     Module,
+    Post,
     PartialType,
     Serialize,
     UseInterceptors,
@@ -46,6 +48,55 @@ def test_middleware_and_serializer_interceptor():
 
     assert response.headers["x-fanest"] == "yes"
     assert response.json() == {"name": "Ada"}
+
+
+class ScopedHeaderMiddleware:
+    async def use(self, request, call_next):
+        response = await call_next(request)
+        response.headers["x-scoped"] = "yes"
+        return response
+
+
+class PostOnlyMiddleware:
+    async def use(self, request, call_next):
+        response = await call_next(request)
+        response.headers["x-post-only"] = "yes"
+        return response
+
+
+@Controller("scoped")
+class ScopedMiddlewareController:
+    @Get("/")
+    async def index(self):
+        return {"route": "index"}
+
+    @Get("/skip")
+    async def skip(self):
+        return {"route": "skip"}
+
+    @Post("/post-only")
+    async def post_only(self):
+        return {"route": "post"}
+
+    @Get("/post-only")
+    async def get_post_only(self):
+        return {"route": "get"}
+
+
+@Module(controllers=[ScopedMiddlewareController])
+class ScopedMiddlewareModule:
+    def configure(self, consumer: MiddlewareConsumer):
+        consumer.apply(ScopedHeaderMiddleware).exclude("/scoped/skip").for_routes("/scoped*")
+        consumer.apply(PostOnlyMiddleware).for_routes("/scoped/post-only", methods=["POST"])
+
+
+def test_middleware_consumer_supports_routes_exclusions_and_methods():
+    client = TestClient(FaNestFactory.create(ScopedMiddlewareModule))
+
+    assert client.get("/scoped").headers["x-scoped"] == "yes"
+    assert "x-scoped" not in client.get("/scoped/skip").headers
+    assert client.post("/scoped/post-only").headers["x-post-only"] == "yes"
+    assert "x-post-only" not in client.get("/scoped/post-only").headers
 
 
 def test_partial_type_makes_fields_optional():

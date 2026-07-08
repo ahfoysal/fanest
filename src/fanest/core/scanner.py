@@ -2,6 +2,7 @@ import inspect
 from dataclasses import dataclass
 from typing import Any, get_type_hints
 
+from fanest.common.middleware import MiddlewareConsumer
 from fanest.core.metadata import ModuleMetadata, ProviderDefinition
 
 
@@ -66,6 +67,7 @@ class ModuleScanner:
         self.controllers.extend(metadata.controllers)
         self.gateways.extend(metadata.gateways)
         self.middlewares.extend(metadata.middlewares)
+        self.middlewares.extend(self._configured_middlewares(module))
 
     def _validate_module_boundaries(self) -> None:
         for record in self.records.values():
@@ -128,3 +130,12 @@ class ModuleScanner:
         for record in self.records.values():
             tokens.update(record.local_tokens)
         return tokens
+
+    def _configured_middlewares(self, module: type) -> list[Any]:
+        configure = getattr(module, "configure", None)
+        if configure is None:
+            return []
+        consumer = MiddlewareConsumer()
+        instance = module()
+        instance.configure(consumer)
+        return consumer.middlewares

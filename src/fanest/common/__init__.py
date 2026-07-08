@@ -65,6 +65,7 @@ from fanest.common.pipes import (
     ParseUUIDPipe,
     ValidationPipe,
 )
+from fanest.common.middleware import MiddlewareConsumer
 from fanest.common.responses import StreamableFile
 from fanest.common.serialization import ClassSerializerInterceptor, Serialize
 
@@ -93,6 +94,7 @@ __all__ = [
     "InternalServerErrorException",
     "Injectable",
     "MaxFileSizeValidator",
+    "MiddlewareConsumer",
     "NotFoundException",
     "Options",
     "Param",

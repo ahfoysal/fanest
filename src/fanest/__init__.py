@@ -65,6 +65,7 @@ from fanest.common.pipes import (
     ParseUUIDPipe,
     ValidationPipe,
 )
+from fanest.common.middleware import MiddlewareConsumer
 from fanest.common.responses import StreamableFile
 from fanest.common.serialization import ClassSerializerInterceptor, Serialize
 from fanest.core.application import FaNestApplication
@@ -115,6 +116,7 @@ __all__ = [
     "Module",
     "ModuleRef",
     "MaxFileSizeValidator",
+    "MiddlewareConsumer",
     "Optional",
     "Options",
     "OmitType",
