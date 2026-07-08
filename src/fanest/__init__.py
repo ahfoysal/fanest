@@ -37,6 +37,7 @@ from fanest.common.exceptions import (
 )
 from fanest.common.pipes import DefaultValuePipe, ParseBoolPipe, ParseIntPipe, ValidationPipe
 from fanest.common.serialization import ClassSerializerInterceptor, Serialize
+from fanest.core.application import FaNestApplication
 from fanest.core.factory import FaNestFactory
 from fanest.core.module import Module
 from fanest.core.providers import Inject, Optional, token, use_class, use_existing, use_factory, use_value
@@ -51,6 +52,7 @@ __all__ = [
     "Delete",
     "DefaultValuePipe",
     "FaNestFactory",
+    "FaNestApplication",
     "FaNestHttpException",
     "ForbiddenException",
     "Get",

@@ -33,20 +33,14 @@ Work needed:
 
 ### 3. Application Abstraction
 
-Current state: `FaNestFactory.create()` returns a FastAPI app directly.
+Current state: `FaNestFactory.create()` still returns a FastAPI app for compatibility, and `FaNestFactory.create_application()` now returns a `FaNestApplication` wrapper for framework-owned configuration.
 
 Why this blocks completeness: Nest has an application object that owns global pipes, middleware, lifecycle, microservices, shutdown hooks, and adapters.
 
 Work needed:
 
-- `FaNestApplication`
-- `use_global_pipes`
-- `use_global_guards`
-- `use_global_interceptors`
-- `use_global_filters`
-- `enable_cors`
-- `set_global_prefix`
-- `connect_microservice`
+- deeper `FaNestApplication` lifecycle APIs
+- richer `connect_microservice`
 - `listen`
 
 ### 4. Adapter Boundary

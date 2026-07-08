@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -13,6 +15,12 @@ from fanest.schedule.runner import ScheduleRunner
 
 
 class FaNestFactory:
+    @staticmethod
+    def create_application(root_module: type, **options):
+        from fanest.core.application import FaNestApplication
+
+        return FaNestApplication(root_module, **options)
+
     @staticmethod
     def create(
         root_module: type,
