@@ -38,12 +38,49 @@ Small APIs should stay small. Bigger APIs should not become a pile of unrelated 
 
 ## Getting Started
 
+Install FaNest from PyPI:
+
+```bash
+pip install fanest
+```
+
+That installs the framework, FastAPI, Uvicorn, Pydantic, Typer, SQLAlchemy, and the core runtime dependencies.
+
+For the recommended server extras, use:
+
+```bash
+pip install "fanest[standard]"
+```
+
+Create and run a new app:
+
+```bash
+fanest new blog-api
+cd blog-api
+fanest dev main.py
+```
+
+Open:
+
+```txt
+http://127.0.0.1:8000/docs
+```
+
+For an existing app:
+
+```bash
+fanest dev main.py
+fanest run main.py
+```
+
+For local framework development:
+
 ```bash
 uv sync --extra dev
 uv run fanest dev examples/basic/main.py
 ```
 
-Open:
+Then open:
 
 ```txt
 http://127.0.0.1:8000/docs
