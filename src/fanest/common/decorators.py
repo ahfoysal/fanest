@@ -189,6 +189,10 @@ def Header(name: str | None = None, default: Any = None) -> ParameterSource:
     return ParameterSource(source="header", name=name, default=default)
 
 
+def Headers(name: str | None = None, default: Any = None) -> ParameterSource:
+    return Header(name, default)
+
+
 def Cookie(name: str | None = None, default: Any = None) -> ParameterSource:
     return ParameterSource(source="cookie", name=name, default=default)
 
@@ -217,12 +221,24 @@ def Ip() -> ParameterSource:
     return ParameterSource(source="ip")
 
 
+def HostParam(name: str | None = None, default: Any = None) -> ParameterSource:
+    return ParameterSource(source="host", name=name, default=default)
+
+
 def Session(default: Any = None) -> ParameterSource:
     return ParameterSource(source="session", default=default)
 
 
 def BackgroundTasks() -> ParameterSource:
     return ParameterSource(source="background_tasks")
+
+
+def MessageBody(name: str | None = None, default: Any = None) -> ParameterSource:
+    return ParameterSource(source="message_body", name=name, default=default)
+
+
+def ConnectedSocket() -> ParameterSource:
+    return ParameterSource(source="connected_socket")
 
 
 def create_param_decorator(factory: Callable[[Any, Any], Any]):

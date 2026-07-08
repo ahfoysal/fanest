@@ -1,4 +1,6 @@
 import inspect
+import resource
+import shutil
 from typing import Any, Callable
 
 from fanest import Controller, Get, Injectable, Module, Optional, use_value
@@ -17,6 +19,47 @@ class HealthIndicator:
         if inspect.isawaitable(result):
             result = await result
         return {self.name: result}
+
+
+class DiskHealthIndicator(HealthIndicator):
+    def __init__(self, name: str = "disk", *, path: str = ".", threshold_percent: float = 90.0) -> None:
+        self.path = path
+        self.threshold_percent = threshold_percent
+        super().__init__(name, self._check)
+
+    def _check(self) -> dict[str, Any]:
+        usage = shutil.disk_usage(self.path)
+        used_percent = (usage.used / usage.total) * 100 if usage.total else 0
+        return {
+            "status": "ok" if used_percent <= self.threshold_percent else "error",
+            "path": self.path,
+            "used_percent": round(used_percent, 2),
+            "threshold_percent": self.threshold_percent,
+        }
+
+
+class MemoryHealthIndicator(HealthIndicator):
+    def __init__(
+        self,
+        name: str = "memory",
+        *,
+        heap_threshold_mb: float | None = None,
+        rss_threshold_mb: float | None = None,
+    ) -> None:
+        self.heap_threshold_mb = heap_threshold_mb
+        self.rss_threshold_mb = rss_threshold_mb
+        super().__init__(name, self._check)
+
+    def _check(self) -> dict[str, Any]:
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
+        thresholds = [value for value in [self.heap_threshold_mb, self.rss_threshold_mb] if value is not None]
+        status = "ok" if not thresholds or all(rss_mb <= threshold for threshold in thresholds) else "error"
+        return {
+            "status": status,
+            "rss_mb": round(rss_mb, 2),
+            "heap_threshold_mb": self.heap_threshold_mb,
+            "rss_threshold_mb": self.rss_threshold_mb,
+        }
 
 
 @Injectable()

@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Module, UseGuards
 from fanest.auth import AuthModule, CurrentUser, JwtAuthGuard, JwtService
-from fanest.health import HealthModule
+from fanest.health import DiskHealthIndicator, HealthIndicator, HealthModule, MemoryHealthIndicator
 
 
 @Controller("profile")
@@ -41,3 +41,22 @@ def test_health_module_registers_health_endpoint():
     response = TestClient(app).get("/health")
 
     assert response.json() == {"status": "ok"}
+
+
+RichHealthModule = HealthModule.register(
+    [
+        HealthIndicator("database", lambda: {"status": "ok"}),
+        DiskHealthIndicator(path="."),
+        MemoryHealthIndicator(rss_threshold_mb=10_000),
+    ]
+)
+
+
+def test_health_module_runs_reusable_indicators():
+    app = FaNestFactory.create(RichHealthModule)
+    payload = TestClient(app).get("/health").json()
+
+    assert payload["status"] == "ok"
+    assert payload["details"]["database"]["status"] == "ok"
+    assert payload["details"]["disk"]["status"] == "ok"
+    assert payload["details"]["memory"]["status"] == "ok"

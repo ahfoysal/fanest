@@ -129,9 +129,10 @@ It shows:
 - typed exception filters
 - Reflector and discovery services
 - health indicators
+- disk and memory health checks
 - metrics counters
 - worker task handlers
-- GraphQL resolvers
+- GraphQL resolvers and subscriptions
 - health endpoint
 - SQLAlchemy module wiring
 - Mongo-style document collections
@@ -145,7 +146,7 @@ It shows:
 - CQRS command/query/event buses
 - event emitter wildcard, once, and off helpers
 - named microservice transports
-- WebSocket gateway with rooms, broadcasting, guards, pipes, filters, and Socket.IO-style emitters
+- WebSocket gateway with rooms, broadcasting, guards, pipes, filters, message-body decorators, connected-socket decorators, and Socket.IO-style emitters
 - global prefix, CORS, and global pipes
 
 Run it:
@@ -198,7 +199,7 @@ FaNest currently includes:
 - `@Controller`
 - `@Injectable`
 - `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`, `@Options`, `@Head`, `@All`
-- `Body`, `Param`, `Query`, `Header`, `Cookie`, `Req`, `Res`, `Ip`, `Session`
+- `Body`, `Param`, `Query`, `Header`, `Headers`, `Cookie`, `Req`, `Res`, `Ip`, `HostParam`, `Session`
 - `UploadedFile`, `UploadedFiles`, `BackgroundTasks`, custom param decorators
 - `HttpCode`, `Redirect`, `SetHeader`, `SetMetadata`, `Version`, `ResponseModel`
 - `Sse` and `StreamableFile`
@@ -208,6 +209,8 @@ FaNest currently includes:
 - `UseFilters`
 - `WebSocketGateway`
 - `SubscribeMessage`
+- `MessageBody`
+- `ConnectedSocket`
 - `Interval`
 - `Cron`
 - `Timeout`
@@ -277,16 +280,16 @@ fanest.mongodb           Mongo/Mongoose-style document service and collections
 fanest.cache             cache service, interceptor, and store adapters
 fanest.throttler         throttling module and guard
 fanest.schedule          interval, cron, timeout jobs, scheduler registry
-fanest.websockets        connection manager, rooms, broadcasting
+fanest.websockets        connection manager, rooms, broadcasting, Socket.IO-style server
 fanest.serve_static      static asset module
 fanest.queues            QueueModule/BullModule, processors, jobs
 fanest.mailer            mail service with outbox and SMTP handoff
 fanest.cqrs              command, query, and event buses
 fanest.events            event emitter and OnEvent decorators
-fanest.graphql           resolvers, queries, mutations, GraphQL endpoint
+fanest.graphql           resolvers, queries, mutations, subscriptions, GraphQL endpoint
 fanest.microservices     message/event patterns and named transports
 fanest.mapped_types      PartialType, PickType, OmitType, IntersectionType
-fanest.health            health endpoint module
+fanest.health            health endpoint module with reusable indicators
 fanest.metrics           counters and metrics endpoint
 fanest.workers           task handler registry
 fanest.discovery/core    Reflector and DiscoveryService
@@ -341,10 +344,42 @@ SwaggerModule.setup("/docs", app, document)
 
 Swagger decorators include `ApiTags`, `ApiOperation`, `ApiParam`, `ApiQuery`, `ApiHeader`,
 `ApiBody`, `ApiResponse`, `ApiConsumes`, `ApiProduces`, `ApiBearerAuth`, `ApiBasicAuth`,
-`ApiCookieAuth`, `ApiSecurity`, response shortcuts such as `ApiOkResponse`,
-`ApiCreatedResponse`, `ApiNotFoundResponse`, `ApiExcludeEndpoint`, and `ApiProperty`.
+`ApiCookieAuth`, `ApiSecurity`, `ApiExtraModels`, `ApiExtension`, response shortcuts such as
+`ApiOkResponse`, `ApiCreatedResponse`, `ApiNotFoundResponse`, `ApiExcludeEndpoint`,
+`ApiProperty`, `ApiPropertyOptional`, and `ApiHideProperty`.
 `SwaggerModule.generate_typescript_client(document)` can emit a small fetch client from the
 generated OpenAPI document.
+
+## WebSockets
+
+```python
+from fanest import ConnectedSocket, MessageBody, SubscribeMessage, WebSocketGateway
+
+
+@WebSocketGateway("/chat")
+class ChatGateway:
+    @SubscribeMessage("rename")
+    async def rename(self, name: str = MessageBody("name"), socket=ConnectedSocket()):
+        return {"name": name}
+```
+
+Gateways can use guards, pipes, filters, rooms, broadcast helpers, and `SocketIoServer` for
+the familiar `server.to("room").emit(...)` shape.
+
+## Health Checks
+
+```python
+from fanest.health import DiskHealthIndicator, HealthIndicator, HealthModule, MemoryHealthIndicator
+
+
+HealthModule.register(
+    [
+        HealthIndicator("database", lambda: {"status": "ok"}),
+        DiskHealthIndicator(path="/"),
+        MemoryHealthIndicator(rss_threshold_mb=512),
+    ]
+)
+```
 
 ## Mapped Types
 
@@ -443,7 +478,7 @@ Current:
 - JWT auth and roles
 - Passport-style strategy guards
 - cache and throttling
-- WebSocket gateways, Socket.IO-style room emitters, guards, pipes, and filters
+- WebSocket gateways, Socket.IO-style room emitters, guards, pipes, filters, `MessageBody`, and `ConnectedSocket`
 - cron, interval, timeout jobs, and scheduler registry
 - in-memory queue processors
 - queue retries and delayed jobs
@@ -452,7 +487,7 @@ Current:
 - CQRS package
 - event emitter wildcard/once/off helpers
 - microservice message/event patterns and named transports
-- lightweight GraphQL module
+- lightweight GraphQL module with queries, mutations, and subscriptions
 - SQLAlchemy package start
 - migration template helper
 - Mongo-style package start
@@ -460,7 +495,7 @@ Current:
 - i18n package
 - cache store adapters
 - health checks
-- health indicators
+- health indicators with disk and memory helpers
 - metrics module
 - worker task handlers
 - testing utilities
@@ -472,8 +507,8 @@ Still to deepen:
 - Redis-backed queue transport
 - advanced SMTP provider adapters
 - full migration runner
-- CLI auto-registration into modules
-- workspace/monorepo mode
+- deeper GraphQL schema generation
+- networked microservice drivers beyond the in-process transport contract
 
 The plan is to keep closing that gap package by package, without losing the Python feel.
 
@@ -483,7 +518,7 @@ This is an early framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 85 passed
+# 87 passed
 ```
 
 ## License

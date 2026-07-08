@@ -25,11 +25,20 @@ def Mutation(name: str | None = None):
     return decorator
 
 
+def Subscription(name: str | None = None):
+    def decorator(handler):
+        setattr(handler, "__fanest_graphql__", {"kind": "subscription", "name": name or handler.__name__})
+        return handler
+
+    return decorator
+
+
 @Injectable()
 class GraphQLSchema:
     def __init__(self):
         self.queries: dict[str, Any] = {}
         self.mutations: dict[str, Any] = {}
+        self.subscriptions: dict[str, Any] = {}
 
     def register_resolver(self, resolver: Any) -> None:
         for _, handler in inspect.getmembers(resolver, predicate=callable):
@@ -38,14 +47,26 @@ class GraphQLSchema:
                 continue
             if metadata["kind"] == "query":
                 self.queries[metadata["name"]] = handler
-            else:
+            elif metadata["kind"] == "mutation":
                 self.mutations[metadata["name"]] = handler
+            else:
+                self.subscriptions[metadata["name"]] = handler
 
     async def execute(self, document: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         variables = variables or {}
-        operation = "mutation" if document.lstrip().startswith("mutation") else "query"
+        stripped = document.lstrip()
+        if stripped.startswith("subscription"):
+            operation = "subscription"
+        elif stripped.startswith("mutation"):
+            operation = "mutation"
+        else:
+            operation = "query"
         names = self._operation_names(document)
-        handlers = self.mutations if operation == "mutation" else self.queries
+        handlers = {
+            "query": self.queries,
+            "mutation": self.mutations,
+            "subscription": self.subscriptions,
+        }[operation]
         data: dict[str, Any] = {}
         for name in names:
             handler = handlers.get(name)

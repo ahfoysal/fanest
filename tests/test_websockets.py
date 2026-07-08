@@ -1,7 +1,9 @@
 from fastapi.testclient import TestClient
 
 from fanest import (
+    ConnectedSocket,
     FaNestFactory,
+    MessageBody,
     Module,
     SubscribeMessage,
     Catch,
@@ -159,3 +161,24 @@ def test_websocket_gateway_uses_exception_filters():
             "event": "error",
             "data": {"kind": "value", "message": "bad socket"},
         }
+
+
+@WebSocketGateway("/decorated-socket")
+class DecoratedSocketGateway:
+    @SubscribeMessage("rename")
+    async def rename(self, name: str = MessageBody("name"), websocket=ConnectedSocket()):
+        assert websocket is not None
+        return {"name": name}
+
+
+@Module(gateways=[DecoratedSocketGateway])
+class DecoratedSocketModule:
+    pass
+
+
+def test_websocket_gateway_supports_message_body_and_connected_socket_decorators():
+    client = TestClient(FaNestFactory.create(DecoratedSocketModule))
+
+    with client.websocket_connect("/decorated-socket") as websocket:
+        websocket.send_json({"event": "rename", "data": {"name": "Ada"}})
+        assert websocket.receive_json() == {"event": "rename", "data": {"name": "Ada"}}

@@ -1,9 +1,12 @@
 from collections.abc import Callable
+import inspect
 from typing import Any, TypeVar
 
 from pydantic import Field
 
 T = TypeVar("T")
+
+_FANEST_EXTRA_MODELS: list[type] = []
 
 
 def ApiTags(*tags: str) -> Callable[[T], T]:
@@ -190,6 +193,34 @@ def ApiCookieAuth(name: str = "cookie") -> Callable[[T], T]:
     return ApiSecurity(name)
 
 
+def ApiExtraModels(*models: type) -> Callable[[T], T]:
+    def decorator(target: T) -> T:
+        existing = list(getattr(target, "__fanest_extra_models__", []))
+        existing.extend(models)
+        setattr(target, "__fanest_extra_models__", existing)
+        for model in models:
+            if model not in _FANEST_EXTRA_MODELS:
+                _FANEST_EXTRA_MODELS.append(model)
+        return target
+
+    return decorator
+
+
+def ApiExtension(name: str, value: Any) -> Callable[[T], T]:
+    extension_name = name if name.startswith("x-") else f"x-{name}"
+
+    def decorator(target: T) -> T:
+        if inspect.isfunction(target) or hasattr(target, "__fanest_route__"):
+            _merge_openapi_extra(target, {extension_name: value})
+        else:
+            extensions = dict(getattr(target, "__fanest_openapi_extensions__", {}))
+            extensions[extension_name] = value
+            setattr(target, "__fanest_openapi_extensions__", extensions)
+        return target
+
+    return decorator
+
+
 def ApiProperty(
     default: Any = ...,
     *,
@@ -209,6 +240,29 @@ def ApiProperty(
     if deprecated is not None:
         kwargs["deprecated"] = deprecated
     return Field(default, **kwargs)
+
+
+def ApiPropertyOptional(
+    default: Any = None,
+    *,
+    description: str | None = None,
+    example: Any = None,
+    examples: list[Any] | None = None,
+    deprecated: bool | None = None,
+    **extra: Any,
+) -> Any:
+    return ApiProperty(
+        default,
+        description=description,
+        example=example,
+        examples=examples,
+        deprecated=deprecated,
+        **extra,
+    )
+
+
+def ApiHideProperty(default: Any = None) -> Any:
+    return Field(default, exclude=True, json_schema_extra={"hidden": True})
 
 
 def _set_route_option(handler: Any, key: str, value: Any) -> None:

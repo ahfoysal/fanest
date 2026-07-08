@@ -155,6 +155,8 @@ class FastApiAdapter:
                     try:
                         await self._run_guards(instance, handler, context)
                         data = await self._run_websocket_pipes(instance, handler, data, context)
+                        context.kwargs.clear()
+                        context.kwargs.update(self._bind_websocket_parameters(handler, data, websocket, context))
                     except Exception as exc:
                         handled = await self._run_filters(instance, handler, context, exc)
                         await websocket.send_json(
@@ -162,7 +164,7 @@ class FastApiAdapter:
                         )
                         continue
                     try:
-                        result = handler(data, websocket)
+                        result = handler(**context.kwargs)
                         if inspect.isawaitable(result):
                             result = await result
                     except Exception as exc:
@@ -217,6 +219,7 @@ class FastApiAdapter:
                     context.kwargs.update(
                         self._bind_session_parameters(handler, request, context.kwargs)
                     )
+                    context.kwargs.update(self._bind_host_parameters(handler, request, context.kwargs))
                     context.kwargs.update(self._bind_state_parameters(handler, request, kwargs))
                     context.kwargs.update(self._bind_custom_parameters(handler, context, kwargs))
                     kwargs = await self._run_pipes(controller, handler, context)
@@ -288,6 +291,7 @@ class FastApiAdapter:
                     "response",
                     "custom",
                     "ip",
+                    "host",
                     "session",
                     "background_tasks",
                 }:
@@ -326,6 +330,8 @@ class FastApiAdapter:
         if source.source == "request":
             return inspect.Parameter.empty
         if source.source == "state":
+            return None
+        if source.source == "host":
             return None
         return source.default
 
@@ -453,6 +459,23 @@ class FastApiAdapter:
                 bound[name] = request.client.host if request.client else None
         return bound
 
+    def _bind_host_parameters(
+        self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        bound = dict(kwargs)
+        hostname = request.url.hostname
+        parts = hostname.split(".") if hostname else []
+        for name, parameter in inspect.signature(handler).parameters.items():
+            source = parameter.default
+            if isinstance(source, ParameterSource) and source.source == "host":
+                if source.name is None:
+                    bound[name] = hostname
+                elif source.name.isdigit():
+                    bound[name] = parts[int(source.name)] if int(source.name) < len(parts) else source.default
+                else:
+                    bound[name] = source.default
+        return bound
+
     def _bind_session_parameters(
         self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
@@ -485,6 +508,39 @@ class FastApiAdapter:
                 data = source.default.get("data")
                 bound[name] = factory(data, context)
         return bound
+
+    def _bind_websocket_parameters(
+        self,
+        handler: Callable[..., Any],
+        data: Any,
+        websocket: WebSocket,
+        context: ExecutionContext,
+    ) -> dict[str, Any]:
+        bound: dict[str, Any] = {}
+        for name, parameter in inspect.signature(handler).parameters.items():
+            source = parameter.default
+            if isinstance(source, ParameterSource):
+                if source.source == "message_body":
+                    bound[name] = self._select_message_body(data, source)
+                elif source.source == "connected_socket":
+                    bound[name] = websocket
+                elif source.source == "custom":
+                    factory = source.default["factory"]
+                    custom_data = source.default.get("data")
+                    bound[name] = factory(custom_data, context)
+                continue
+            if name == "data":
+                bound[name] = data
+            elif name == "websocket":
+                bound[name] = websocket
+        return bound
+
+    def _select_message_body(self, data: Any, source: ParameterSource) -> Any:
+        if source.name is None:
+            return data
+        if isinstance(data, dict):
+            return data.get(source.name, source.default)
+        return source.default
 
     async def _run_filters(
         self,

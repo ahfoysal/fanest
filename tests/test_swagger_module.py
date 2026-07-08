@@ -8,12 +8,16 @@ from fanest.swagger import (
     ApiConsumes,
     ApiCreatedResponse,
     ApiExcludeEndpoint,
+    ApiExtension,
+    ApiExtraModels,
+    ApiHideProperty,
     ApiHeader,
     ApiNotFoundResponse,
     ApiOperation,
     ApiParam,
     ApiProduces,
     ApiProperty,
+    ApiPropertyOptional,
     ApiQuery,
     ApiSecurity,
     ApiTags,
@@ -24,6 +28,12 @@ from fanest.swagger import (
 
 class CreateDocDto(BaseModel):
     title: str = ApiProperty(description="Document title", example="Plan")
+    draft: bool = ApiPropertyOptional(description="Draft flag")
+    internal_note: str = ApiHideProperty()
+
+
+class ErrorDto(BaseModel):
+    message: str
 
 
 @ApiBearerAuth()
@@ -36,6 +46,7 @@ class DocsController:
         return {"hidden": True}
 
     @ApiHeader("x-request-id", "Request id")
+    @ApiExtension("rate-limit", {"bucket": "docs"})
     @ApiSecurity("api_key")
     @ApiConsumes("application/json")
     @ApiProduces("application/json")
@@ -54,6 +65,7 @@ class DocsController:
         return {"ok": True}
 
 
+@ApiExtraModels(ErrorDto)
 @Module(controllers=[DocsController])
 class DocsModule:
     pass
@@ -79,6 +91,7 @@ def test_swagger_decorators_and_module_setup():
     operation = client.get("/api-docs/openapi.json").json()["paths"]["/docs/{doc_id}"]["get"]
 
     assert operation["summary"] == "Find a document"
+    assert operation["x-rate-limit"] == {"bucket": "docs"}
     assert operation["tags"] == ["docs"]
     assert operation["security"] == [{"bearer": []}, {"api_key": []}]
     assert any(parameter["name"] == "x-request-id" for parameter in operation["parameters"])
@@ -86,6 +99,7 @@ def test_swagger_decorators_and_module_setup():
     assert "application/json" in operation["responses"]["200"]["content"]
     assert document["components"]["securitySchemes"]["basic"]["scheme"] == "basic"
     assert document["components"]["securitySchemes"]["api_key"]["name"] == "x-api-key"
+    assert "ErrorDto" in document["components"]["schemas"]
     assert "export class ApiClient" in client_source
     assert "fetch(`${this.baseUrl}/docs/{doc_id}`" in client_source
     basic_operation = client.get("/api-docs/openapi.json").json()["paths"]["/docs/basic"]["get"]
@@ -94,4 +108,5 @@ def test_swagger_decorators_and_module_setup():
     assert basic_operation["responses"]["404"]["description"] == "Missing"
     assert "/docs/internal" not in client.get("/api-docs/openapi.json").json()["paths"]
     assert CreateDocDto.model_json_schema()["properties"]["title"]["description"] == "Document title"
+    assert CreateDocDto.model_json_schema()["properties"]["draft"]["description"] == "Draft flag"
     assert client.get("/api-docs").status_code == 200

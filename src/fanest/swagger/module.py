@@ -3,6 +3,8 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.docs import get_swagger_ui_html
 
+from fanest.swagger.decorators import _FANEST_EXTRA_MODELS
+
 
 class DocumentBuilder:
     def __init__(self) -> None:
@@ -101,6 +103,7 @@ class SwaggerModule:
                     schema_components[key] = value
         if config.get("security"):
             schema["security"] = config["security"]
+        SwaggerModule._add_extra_model_schemas(schema)
         return schema
 
     @staticmethod
@@ -140,3 +143,12 @@ class SwaggerModule:
     def _operation_name(method: str, path: str) -> str:
         suffix = "".join(part.title() for part in path.strip("/").replace("{", "").replace("}", "").split("/"))
         return f"{method.lower()}{suffix or 'Root'}"
+
+    @staticmethod
+    def _add_extra_model_schemas(schema: dict[str, Any]) -> None:
+        if not _FANEST_EXTRA_MODELS:
+            return
+        schemas = schema.setdefault("components", {}).setdefault("schemas", {})
+        for model in _FANEST_EXTRA_MODELS:
+            if hasattr(model, "model_json_schema"):
+                schemas[model.__name__] = model.model_json_schema()
