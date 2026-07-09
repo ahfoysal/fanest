@@ -205,7 +205,9 @@ class FastApiAdapter:
                         await self._run_guards(instance, handler, context)
                         data = await self._run_websocket_pipes(instance, handler, data, context)
                         context.kwargs.clear()
-                        context.kwargs.update(self._bind_websocket_parameters(handler, data, websocket, context))
+                        context.kwargs.update(
+                            await self._bind_websocket_parameters(handler, data, websocket, context)
+                        )
                     except Exception as exc:
                         handled = await self._run_filters_safe(instance, handler, context, exc)
                         await websocket.send_json(
@@ -231,11 +233,7 @@ class FastApiAdapter:
                 pass
             finally:
                 self.container.resolve(WebSocketManager).disconnect(websocket)
-                disconnect_hook = getattr(instance, "on_disconnect", None)
-                if disconnect_hook is not None:
-                    result = disconnect_hook(websocket)
-                    if inspect.isawaitable(result):
-                        await result
+                await self._run_websocket_disconnect_hook(instance, websocket)
 
         self.app.add_api_websocket_route(path, websocket_endpoint)
 
@@ -290,6 +288,7 @@ class FastApiAdapter:
                         context.kwargs,
                     )
                 )
+                context.kwargs.update(self._bind_header_parameters(handler, request, context.kwargs))
                 context.kwargs.update(
                     self._bind_background_tasks_parameters(
                         handler, background_tasks, context.kwargs
@@ -301,7 +300,7 @@ class FastApiAdapter:
                     self._bind_host_parameters(controller, handler, request, context.kwargs)
                 )
                 context.kwargs.update(self._bind_state_parameters(handler, request, kwargs))
-                context.kwargs.update(self._bind_custom_parameters(handler, context, kwargs))
+                context.kwargs.update(await self._bind_custom_parameters(handler, context, kwargs))
                 kwargs = await self._run_pipes(controller, handler, context)
 
                 async def call_handler() -> Any:
@@ -325,11 +324,17 @@ class FastApiAdapter:
                     redirect = self._metadata(handler, "__fanest_redirect__")
                     if redirect is not None:
                         if isinstance(result, dict) and result.get("url"):
-                            return RedirectResponse(
-                                result["url"],
-                                status_code=result.get("status_code", redirect["status_code"]),
+                            return self._with_response_headers(
+                                RedirectResponse(
+                                    result["url"],
+                                    status_code=result.get("status_code", redirect["status_code"]),
+                                ),
+                                response_headers,
                             )
-                        return RedirectResponse(redirect["url"], status_code=redirect["status_code"])
+                        return self._with_response_headers(
+                            RedirectResponse(redirect["url"], status_code=redirect["status_code"]),
+                            response_headers,
+                        )
                     return result
 
                 result = await self._run_interceptors(controller, handler, context, call_handler)
@@ -479,7 +484,7 @@ class FastApiAdapter:
         if source.source == "cookie":
             return Cookie(default, alias=source.name)
         if source.source == "file":
-            return File(..., alias=source.name)
+            return File(default, alias=source.name)
         if source.source == "files":
             return File(default, alias=source.name)
         if source.source == "form":
@@ -621,6 +626,16 @@ class FastApiAdapter:
                 bound[name] = request
         return bound
 
+    def _bind_header_parameters(
+        self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        bound = dict(kwargs)
+        for name, parameter in self._parameters(handler).items():
+            source = parameter.default
+            if isinstance(source, ParameterSource) and source.source == "header" and source.name is None:
+                bound[name] = dict(request.headers)
+        return bound
+
     def _bind_response_parameters(
         self, handler: Callable[..., Any], response: Response, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
@@ -744,7 +759,7 @@ class FastApiAdapter:
                 bound[name] = getattr(request.state, state_name, source.default)
         return bound
 
-    def _bind_custom_parameters(
+    async def _bind_custom_parameters(
         self, handler: Callable[..., Any], context: ExecutionContext, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
         bound = dict(kwargs)
@@ -753,10 +768,13 @@ class FastApiAdapter:
             if isinstance(source, ParameterSource) and source.source == "custom":
                 factory = source.default["factory"]
                 data = source.default.get("data")
-                bound[name] = factory(data, context)
+                result = factory(data, context)
+                if inspect.isawaitable(result):
+                    result = await result
+                bound[name] = result
         return bound
 
-    def _bind_websocket_parameters(
+    async def _bind_websocket_parameters(
         self,
         handler: Callable[..., Any],
         data: Any,
@@ -774,13 +792,27 @@ class FastApiAdapter:
                 elif source.source == "custom":
                     factory = source.default["factory"]
                     custom_data = source.default.get("data")
-                    bound[name] = factory(custom_data, context)
+                    value = factory(custom_data, context)
+                    if inspect.isawaitable(value):
+                        value = await value
+                    bound[name] = value
                 continue
             if name == "data":
                 bound[name] = data
             elif name == "websocket":
                 bound[name] = websocket
         return bound
+
+    async def _run_websocket_disconnect_hook(self, instance: Any, websocket: WebSocket) -> None:
+        disconnect_hook = getattr(instance, "on_disconnect", None)
+        if disconnect_hook is None:
+            return
+        try:
+            result = disconnect_hook(websocket)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return
 
     def _select_message_body(self, data: Any, source: ParameterSource) -> Any:
         if source.name is None:
@@ -887,6 +919,8 @@ class FastApiAdapter:
         }.get(key, [])
         controller_values = getattr(controller.__class__, key, [])
         handler_values = self._metadata(handler, key, [])
+        if key == "__fanest_filters__":
+            return [*handler_values, *controller_values, *global_values]
         return [*global_values, *controller_values, *handler_values]
 
     def _response_headers(self, controller: Any, handler: Callable[..., Any]) -> list[tuple[str, str]]:

@@ -1,5 +1,6 @@
+import inspect
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import jwt
 
@@ -10,6 +11,17 @@ from fanest.core.providers import token
 from fanest.core.providers import use_factory as provider_factory
 
 JWT_OPTIONS = token("JWT_OPTIONS")
+UNSAFE_JWT_ALGORITHMS = {"none"}
+
+
+def _validate_jwt_options(options: dict[str, Any]) -> dict[str, Any]:
+    secret = options.get("secret")
+    algorithm = str(options.get("algorithm", "HS256"))
+    if not isinstance(secret, str) or not secret.strip():
+        raise ValueError("AuthModule requires a non-empty JWT secret")
+    if algorithm.lower() in UNSAFE_JWT_ALGORITHMS:
+        raise ValueError("AuthModule does not allow unsigned JWT algorithms")
+    return options
 
 
 @Injectable()
@@ -61,7 +73,9 @@ class JwtAuthGuard:
         authorization = context.request.headers.get("authorization")
         if not authorization or not authorization.lower().startswith("bearer "):
             raise UnauthorizedException("Missing bearer token")
-        token = authorization.split(" ", 1)[1]
+        token = authorization.split(" ", 1)[1].strip()
+        if not token:
+            raise UnauthorizedException("Missing bearer token")
         try:
             context.request.state.user = self.jwt_service.verify(token)
         except jwt.PyJWTError as exc:
@@ -154,11 +168,11 @@ class AuthModule:
         is_global: bool = False,
         global_guard: bool = False,
     ) -> type:
-        options = {
+        options = _validate_jwt_options({
             "secret": secret,
             "algorithm": algorithm,
             "expires_in_seconds": expires_in_seconds,
-        }
+        })
 
         providers = [use_value(JWT_OPTIONS, options), JwtService]
         if global_guard:
@@ -182,7 +196,13 @@ class AuthModule:
         is_global: bool = False,
         global_guard: bool = False,
     ) -> type:
-        providers = [provider_factory(JWT_OPTIONS, use_factory, inject=inject or []), JwtService]
+        async def load_options(*dependencies: Any) -> dict[str, Any]:
+            result = use_factory(*dependencies)
+            if inspect.isawaitable(result):
+                result = await result
+            return _validate_jwt_options(dict(cast(dict[str, Any], result or {})))
+
+        providers = [provider_factory(JWT_OPTIONS, load_options, inject=inject or []), JwtService]
         if global_guard:
             providers.extend([use_class(APP_GUARD, JwtAuthGuard), RolesGuard])
 

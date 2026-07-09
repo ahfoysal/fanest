@@ -45,7 +45,12 @@ class ThrottlerGuard:
 
     def can_activate(self, context):
         options = getattr(context.handler, "__fanest_throttle__", {})
-        key = context.request.client.host if context.request.client else "anonymous"
+        tracker = context.request.client.host if context.request.client else "anonymous"
+        route = getattr(context.handler, "__qualname__", repr(context.handler))
+        method = getattr(context.request, "method", "")
+        path_template = getattr(getattr(context.request, "scope", {}), "get", lambda *_: None)("route")
+        route_path = getattr(path_template, "path", None) or getattr(getattr(context.request, "url", None), "path", "")
+        key = f"{tracker}:{method}:{route_path}:{route}"
         if self.throttler_service.hit(
             key,
             limit=options.get("limit"),

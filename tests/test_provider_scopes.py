@@ -1,6 +1,9 @@
+import asyncio
+
+import httpx
 from fastapi.testclient import TestClient
 
-from fanest import Controller, FaNestFactory, Get, Injectable, Module
+from fanest import Controller, FaNestFactory, Get, Inject, Injectable, Module, token, use_factory
 
 
 @Injectable()
@@ -121,3 +124,77 @@ def test_request_scope_bubbles_to_singletons_that_depend_on_request_providers():
     assert second["same_request"] is True
     assert second["service_created"] == 2
     assert second["request_created"] == 2
+
+
+SLOW_DEPENDENCY = token("SLOW_DEPENDENCY")
+ASYNC_FACTORY_TOKEN = token("ASYNC_FACTORY_TOKEN")
+
+
+async def slow_dependency_factory():
+    await asyncio.sleep(0.02)
+    return {"ready": True}
+
+
+async def async_factory_value():
+    await asyncio.sleep(0)
+    return {"ready": True}
+
+
+@Injectable(scope="request")
+class SlowRequestService:
+    def __init__(self, slow=Inject(SLOW_DEPENDENCY)):
+        self.slow = slow
+
+
+@Controller("concurrent-scopes")
+class ConcurrentScopeController:
+    def __init__(self, service: SlowRequestService):
+        self.service = service
+
+    @Get("/")
+    async def index(self):
+        return {"ready": self.service.slow["ready"]}
+
+
+@Module(
+    controllers=[ConcurrentScopeController],
+    providers=[use_factory(SLOW_DEPENDENCY, slow_dependency_factory), SlowRequestService],
+)
+class ConcurrentScopeModule:
+    pass
+
+
+@Module(providers=[use_factory(ASYNC_FACTORY_TOKEN, async_factory_value)])
+class AsyncFactoryModule:
+    pass
+
+
+async def _concurrent_get(client: httpx.AsyncClient):
+    return await client.get("/concurrent-scopes")
+
+
+def test_concurrent_request_scoped_resolution_does_not_false_positive_circular_dependency():
+    app = FaNestFactory.create(ConcurrentScopeModule)
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await asyncio.gather(*[_concurrent_get(client) for _ in range(12)])
+
+    responses = asyncio.run(run())
+
+    assert [response.status_code for response in responses] == [200] * 12
+    assert [response.json() for response in responses] == [{"ready": True}] * 12
+
+
+def test_sync_resolve_rejects_async_factory_without_caching_coroutine():
+    container = FaNestFactory.create(AsyncFactoryModule).state.fanest_container
+
+    try:
+        container.resolve(ASYNC_FACTORY_TOKEN)
+    except RuntimeError as exc:
+        assert "resolve_async" in str(exc)
+    else:  # pragma: no cover - explicit failure text
+        raise AssertionError("sync resolve should reject async factory providers")
+
+    assert asyncio.run(container.resolve_async(ASYNC_FACTORY_TOKEN)) == {"ready": True}

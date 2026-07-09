@@ -1,3 +1,4 @@
+import hashlib
 import json
 import time
 from typing import Any, Protocol
@@ -87,6 +88,7 @@ class RedisCacheStore:
 class CacheService:
     def __init__(self, options: dict[str, Any] | None = Optional(CACHE_OPTIONS)):
         options = options or {}
+        self.default_ttl: int | None = options.get("ttl", 60)
         store = options.get("store")
         if store is not None:
             self.store: CacheStore = store
@@ -126,15 +128,34 @@ class CacheInterceptor:
             return cached
         result = await call_next()
         ttl = getattr(context.handler, "__fanest_cache_ttl__", None)
+        if ttl is None:
+            ttl = self.cache_service.default_ttl
         self.cache_service.set(key, result, ttl)
         return result
 
     def _cache_key(self, context) -> str:
         custom_key = getattr(context.handler, "__fanest_cache_key__", None)
-        if custom_key is not None:
-            return custom_key
         request = context.request
-        return f"{request.method}:{request.url.path}?{request.url.query}"
+        identity = self._identity_fragment(request)
+        if custom_key is not None:
+            parts = [custom_key]
+            if request.url.query:
+                parts.append(f"query:{request.url.query}")
+            if identity:
+                parts.append(f"identity:{identity}")
+            return "|".join(parts)
+        parts = [request.method, request.url.path, request.url.query]
+        if identity:
+            parts.append(identity)
+        return ":".join(parts)
+
+    def _identity_fragment(self, request) -> str | None:
+        authorization = request.headers.get("authorization")
+        cookie = request.headers.get("cookie")
+        if authorization is None and cookie is None:
+            return None
+        raw = f"{authorization or ''}\0{cookie or ''}".encode()
+        return hashlib.sha256(raw).hexdigest()[:16]
 
 
 def CacheTTL(seconds: int):

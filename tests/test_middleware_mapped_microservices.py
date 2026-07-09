@@ -1,6 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from fanest import (
     ClassSerializerInterceptor,
@@ -12,6 +12,7 @@ from fanest import (
     Post,
     Injectable,
     PartialType,
+    PickType,
     Serialize,
     UseInterceptors,
 )
@@ -35,6 +36,18 @@ class HeaderMiddleware:
 class UserDto(BaseModel):
     name: str
     password: str
+
+
+class StrictUserDto(BaseModel):
+    name: str = Field(min_length=3)
+    tags: list[str] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def no_root(cls, value: str) -> str:
+        if value == "root":
+            raise ValueError("reserved")
+        return value
 
 
 @Controller("serialize")
@@ -113,6 +126,20 @@ def test_partial_type_makes_fields_optional():
 
     assert dto.name == "Ada"
     assert dto.password is None
+
+
+def test_mapped_types_preserve_validation_and_default_factory():
+    PartialStrictUser = PartialType(StrictUserDto)
+    PickStrictUser = PickType(StrictUserDto, ["name", "tags"])
+
+    assert PartialStrictUser().tags is None
+    assert PickStrictUser(name="Ada").tags == []
+
+    with pytest.raises(ValueError):
+        PickStrictUser(name="Al")
+
+    with pytest.raises(ValueError):
+        PickStrictUser(name="root")
 
 
 class MathService:

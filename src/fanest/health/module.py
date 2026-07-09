@@ -1,7 +1,10 @@
 import inspect
 import resource
 import shutil
+import sys
 from typing import Any, Callable
+
+from fastapi.responses import JSONResponse
 
 from fanest import Controller, Get, Injectable, Module, Optional, use_value
 from fanest.core.providers import token
@@ -51,7 +54,7 @@ class MemoryHealthIndicator(HealthIndicator):
         super().__init__(name, self._check)
 
     def _check(self) -> dict[str, Any]:
-        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
+        rss_mb = self._rss_mb()
         thresholds = [value for value in [self.heap_threshold_mb, self.rss_threshold_mb] if value is not None]
         status = "ok" if not thresholds or all(rss_mb <= threshold for threshold in thresholds) else "error"
         return {
@@ -60,6 +63,12 @@ class MemoryHealthIndicator(HealthIndicator):
             "heap_threshold_mb": self.heap_threshold_mb,
             "rss_threshold_mb": self.rss_threshold_mb,
         }
+
+    def _rss_mb(self) -> float:
+        max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform == "darwin":
+            return max_rss / 1024 / 1024
+        return max_rss / 1024
 
 
 @Injectable()
@@ -87,7 +96,10 @@ class HealthController:
 
     @Get("/")
     async def check(self):
-        return await self.health_service.check()
+        result = await self.health_service.check()
+        if result.get("status") == "error":
+            return JSONResponse(status_code=503, content=result)
+        return result
 
 
 class HealthModule:

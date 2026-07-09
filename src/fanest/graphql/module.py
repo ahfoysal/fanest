@@ -1,5 +1,4 @@
 import inspect
-import re
 from typing import Any
 
 from fanest import Body, Controller, Injectable, Module, Post
@@ -82,11 +81,75 @@ class GraphQLSchema:
         return {"data": data}
 
     def _operation_names(self, document: str) -> list[str]:
-        match = re.search(r"\{(?P<body>.*)\}", document, flags=re.DOTALL)
-        if match is None:
+        start = document.find("{")
+        if start < 0:
             return []
-        body = re.sub(r"\([^)]*\)", "", match.group("body"))
-        return re.findall(r"[A-Za-z_][A-Za-z0-9_]*", body)
+        names: list[str] = []
+        index = start + 1
+        depth = 1
+        while index < len(document) and depth > 0:
+            char = document[index]
+            if char == "{":
+                depth += 1
+                index += 1
+                continue
+            if char == "}":
+                depth -= 1
+                index += 1
+                continue
+            if depth != 1:
+                index += 1
+                continue
+            if char.isspace() or char == ",":
+                index += 1
+                continue
+            if not (char.isalpha() or char == "_"):
+                index += 1
+                continue
+            first_name, index = self._read_name(document, index)
+            cursor = self._skip_ws(document, index)
+            name = first_name
+            if cursor < len(document) and document[cursor] == ":":
+                cursor = self._skip_ws(document, cursor + 1)
+                if cursor < len(document) and (document[cursor].isalpha() or document[cursor] == "_"):
+                    name, cursor = self._read_name(document, cursor)
+            names.append(name)
+            index = self._skip_selection(document, cursor)
+        return names
+
+    def _read_name(self, document: str, index: int) -> tuple[str, int]:
+        start = index
+        while index < len(document) and (document[index].isalnum() or document[index] == "_"):
+            index += 1
+        return document[start:index], index
+
+    def _skip_ws(self, document: str, index: int) -> int:
+        while index < len(document) and document[index].isspace():
+            index += 1
+        return index
+
+    def _skip_selection(self, document: str, index: int) -> int:
+        index = self._skip_ws(document, index)
+        if index < len(document) and document[index] == "(":
+            paren_depth = 1
+            index += 1
+            while index < len(document) and paren_depth > 0:
+                if document[index] == "(":
+                    paren_depth += 1
+                elif document[index] == ")":
+                    paren_depth -= 1
+                index += 1
+        index = self._skip_ws(document, index)
+        if index < len(document) and document[index] == "{":
+            brace_depth = 1
+            index += 1
+            while index < len(document) and brace_depth > 0:
+                if document[index] == "{":
+                    brace_depth += 1
+                elif document[index] == "}":
+                    brace_depth -= 1
+                index += 1
+        return index
 
 
 class GraphQLModule:

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,57 @@ def test_event_listeners_resolve_inside_request_scope():
 
     assert RequestScopedEventService.created == 2
     assert RequestScopedEventService.seen == [1, 2]
+
+
+@Injectable(scope="request")
+class BackgroundRequestScopedEventService:
+    created = 0
+    seen: list[int] = []
+
+    def __init__(self):
+        type(self).created += 1
+        self.instance_id = type(self).created
+
+    @OnEvent("request.background")
+    async def handle_request_event(self, payload):
+        await asyncio.sleep(0)
+        self.seen.append(self.instance_id)
+
+
+@Controller("background-request-events")
+class BackgroundRequestEventsController:
+    def __init__(self, emitter: EventEmitter):
+        self.emitter = emitter
+
+    @Get("/fire")
+    async def fire(self):
+        self.emitter.emit("request.background", {})
+        return {"ok": True}
+
+    @Get("/seen")
+    async def seen(self):
+        await asyncio.sleep(0.01)
+        return {"seen": BackgroundRequestScopedEventService.seen}
+
+
+@Module(
+    imports=[EventEmitterModule.for_root()],
+    controllers=[BackgroundRequestEventsController],
+    providers=[BackgroundRequestScopedEventService],
+)
+class BackgroundRequestScopedEventsModule:
+    pass
+
+
+def test_event_fire_and_forget_preserves_request_scope_for_background_handlers():
+    BackgroundRequestScopedEventService.created = 0
+    BackgroundRequestScopedEventService.seen = []
+
+    with TestClient(FaNestFactory.create(BackgroundRequestScopedEventsModule)) as client:
+        assert client.get("/background-request-events/fire").json() == {"ok": True}
+        assert client.get("/background-request-events/seen").json() == {"seen": [1]}
+
+    assert BackgroundRequestScopedEventService.created == 1
 
 
 def test_event_listeners_are_not_duplicated_across_repeated_lifespan_startups():

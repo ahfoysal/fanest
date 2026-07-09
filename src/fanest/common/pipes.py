@@ -1,4 +1,5 @@
 from enum import Enum
+import math
 import re
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -48,9 +49,12 @@ class ParseBoolPipe:
 class ParseFloatPipe:
     def transform(self, value: Any, metadata: dict[str, Any]) -> float:
         try:
-            return float(value)
+            parsed = float(value)
         except (TypeError, ValueError) as exc:
             raise BadRequestException(f"{metadata.get('name', 'value')} must be a float") from exc
+        if not math.isfinite(parsed):
+            raise BadRequestException(f"{metadata.get('name', 'value')} must be a finite float")
+        return parsed
 
 
 class ParseUUIDPipe:

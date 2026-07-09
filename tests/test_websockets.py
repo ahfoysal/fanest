@@ -15,6 +15,7 @@ from fanest import (
     WebSocketGateway,
     WebSocketManager,
     SocketIoServer,
+    create_param_decorator,
     forward_ref,
     use_factory,
 )
@@ -427,3 +428,87 @@ def test_websocket_filter_exception_returns_error_without_closing_connection():
         assert websocket.receive_json() == {"event": "error", "data": "filter failed"}
         websocket.send_json({"event": "echo", "data": "still-open"})
         assert websocket.receive_json() == {"event": "echo", "data": "still-open"}
+
+
+async def async_ws_param_factory(data, context):
+    return {"marker": data, "path": context.request.url.path}
+
+
+AsyncSocketParam = create_param_decorator(async_ws_param_factory)
+
+
+@WebSocketGateway("/async-param-socket")
+class AsyncParamGateway:
+    @SubscribeMessage("inspect")
+    async def inspect_param(self, resolved=AsyncSocketParam("socket")):
+        return resolved
+
+
+@Module(gateways=[AsyncParamGateway])
+class AsyncParamModule:
+    pass
+
+
+def test_websocket_gateway_awaits_async_custom_parameter_decorators():
+    client = TestClient(FaNestFactory.create(AsyncParamModule))
+
+    with client.websocket_connect("/async-param-socket") as websocket:
+        websocket.send_json({"event": "inspect", "data": None})
+        assert websocket.receive_json() == {
+            "event": "inspect",
+            "data": {"marker": "socket", "path": "/async-param-socket"},
+        }
+
+
+@WebSocketGateway("/disconnect-hook-socket")
+class DisconnectHookGateway:
+    disconnected = 0
+
+    async def on_disconnect(self, websocket):
+        type(self).disconnected += 1
+        raise RuntimeError("cleanup failed")
+
+    @SubscribeMessage("echo")
+    async def echo(self, data):
+        return data
+
+
+@Module(gateways=[DisconnectHookGateway])
+class DisconnectHookModule:
+    pass
+
+
+def test_websocket_disconnect_hook_exception_does_not_escape_teardown():
+    DisconnectHookGateway.disconnected = 0
+    client = TestClient(FaNestFactory.create(DisconnectHookModule))
+
+    with client.websocket_connect("/disconnect-hook-socket") as websocket:
+        websocket.send_json({"event": "echo", "data": "ok"})
+        assert websocket.receive_json() == {"event": "echo", "data": "ok"}
+
+    assert DisconnectHookGateway.disconnected == 1
+
+
+class RecordingSocket:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.messages = []
+
+    async def send_json(self, payload):
+        if self.fail:
+            raise RuntimeError("closed")
+        self.messages.append(payload)
+
+
+@pytest.mark.anyio
+async def test_websocket_manager_prunes_failed_connections_during_broadcast():
+    manager = WebSocketManager()
+    healthy = RecordingSocket()
+    broken = RecordingSocket(fail=True)
+    manager.connect(healthy)
+    manager.connect(broken)
+
+    await manager.broadcast_all("notice", {"ok": True})
+
+    assert healthy.messages == [{"event": "notice", "data": {"ok": True}}]
+    assert manager.connections() == [healthy]

@@ -12,6 +12,10 @@ class UserResolver:
     async def users_count(self):
         return len(self.users)
 
+    @Query()
+    async def viewer(self):
+        return {"id": "1", "name": self.users[0]}
+
     @Mutation("create_user")
     async def create(self, name: str):
         self.users.append(name)
@@ -36,11 +40,13 @@ def test_graphql_module_executes_queries_and_mutations():
             json={"query": "mutation { create_user }", "variables": {"name": "Grace"}},
         )
         second_query = client.post("/graphql", json={"query": "{ users_count }"})
+        nested_query = client.post("/graphql", json={"query": "{ viewer { id name } }"})
         subscription = client.post("/graphql", json={"query": "subscription { user_created }"})
 
     assert query.json() == {"data": {"users_count": 1}}
     assert mutation.json() == {"data": {"create_user": {"name": "Grace"}}}
     assert second_query.json() == {"data": {"users_count": 2}}
+    assert nested_query.json() == {"data": {"viewer": {"id": "1", "name": "Ada"}}}
     assert subscription.json() == {"data": {"user_created": "Grace"}}
 
 

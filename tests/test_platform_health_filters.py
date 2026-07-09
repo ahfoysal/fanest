@@ -1,8 +1,10 @@
 from fastapi.testclient import TestClient
 from fastapi.responses import JSONResponse
+from types import SimpleNamespace
 
 from fanest import BackgroundTasks, Catch, Controller, FaNestFactory, Get, Module, Req, Session, UseFilters
-from fanest.health import HealthIndicator, HealthModule
+from fanest.health import HealthIndicator, HealthModule, MemoryHealthIndicator
+import fanest.health.module as health_module
 from fanest.security import HelmetModule
 from fanest.session import SessionModule
 
@@ -125,3 +127,44 @@ def test_health_module_runs_named_indicators():
         "status": "ok",
         "details": {"db": {"status": "ok"}, "cache": {"status": "ok"}},
     }
+
+
+@Module(
+    imports=[
+        HealthModule.register(
+            indicators=[HealthIndicator("db", lambda: {"status": "error"})],
+        )
+    ]
+)
+class FailingHealthModule:
+    pass
+
+
+def test_health_module_returns_503_when_any_indicator_errors():
+    response = TestClient(FaNestFactory.create(FailingHealthModule)).get("/health")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "error",
+        "details": {"db": {"status": "error"}},
+    }
+
+
+def test_memory_health_indicator_uses_platform_ru_maxrss_units(monkeypatch):
+    monkeypatch.setattr(health_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        health_module.resource,
+        "getrusage",
+        lambda _: SimpleNamespace(ru_maxrss=2048),
+    )
+
+    assert MemoryHealthIndicator()._check()["rss_mb"] == 2
+
+    monkeypatch.setattr(health_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        health_module.resource,
+        "getrusage",
+        lambda _: SimpleNamespace(ru_maxrss=2 * 1024 * 1024),
+    )
+
+    assert MemoryHealthIndicator()._check()["rss_mb"] == 2

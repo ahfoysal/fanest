@@ -61,3 +61,34 @@ def test_mongoose_alias_and_inject_model_helper():
     created = TestClient(FaNestFactory.create(MongooseAppModule)).post("/mongoose-users").json()
 
     assert created["name"] == "Grace"
+
+
+async def _exercise_mongo_update_operators():
+    collection = MongoCollection("users")
+    created = await collection.insert_one({"email": "lin@example.com", "name": "Lin", "logins": 1})
+
+    updated = await collection.update_one({"_id": created["_id"]}, {"$set": {"name": "Linus"}, "$inc": {"logins": 2}})
+    assert updated is not None
+    assert updated["name"] == "Linus"
+    assert updated["logins"] == 3
+
+    updated = await collection.update_one({"_id": created["_id"]}, {"$unset": {"email": ""}})
+    assert updated is not None
+    assert "email" not in updated
+
+    try:
+        await collection.update_one({"_id": created["_id"]}, {"$push": {"roles": "admin"}})
+    except ValueError:
+        pass
+    else:  # pragma: no cover - makes the assertion message clearer on failure
+        raise AssertionError("unsupported Mongo update operator should raise")
+
+    stored = await collection.find_one({"_id": created["_id"]})
+    assert stored is not None
+    assert "$push" not in stored
+
+
+def test_in_memory_mongo_update_operators_are_safe():
+    import asyncio
+
+    asyncio.run(_exercise_mongo_update_operators())

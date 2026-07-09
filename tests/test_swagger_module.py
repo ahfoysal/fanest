@@ -1,10 +1,12 @@
+from fastapi import UploadFile
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from fanest import Controller, FaNestFactory, Get, Module, Param
+from fanest import Controller, FaNestFactory, Get, Module, Param, Post, UploadedFile
 from fanest.swagger import (
     ApiBearerAuth,
     ApiBasicAuth,
+    ApiBadRequestResponse,
     ApiConsumes,
     ApiCreatedResponse,
     ApiExcludeEndpoint,
@@ -36,6 +38,10 @@ class ErrorDto(BaseModel):
     message: str
 
 
+class ValidationErrorDto(BaseModel):
+    errors: list[str]
+
+
 @ApiBearerAuth()
 @ApiTags("docs")
 @Controller("docs")
@@ -54,7 +60,7 @@ class DocsController:
     @ApiParam("doc_id", "Document id")
     @ApiQuery("verbose", "Verbose response")
     @Get("/{doc_id}")
-    async def find_one(self, doc_id: str = Param()):
+    async def find_one(self, doc_id: str = Param()):  # type: ignore[assignment]
         return {"id": doc_id}
 
     @ApiBasicAuth()
@@ -63,6 +69,24 @@ class DocsController:
     @Get("/basic")
     async def basic(self):
         return {"ok": True}
+
+    @Get("/mixed")
+    @ApiCreatedResponse("Created below route")
+    @ApiBadRequestResponse("Bad request below route", ValidationErrorDto)
+    async def mixed_order(self):
+        return {"ok": True}
+
+    @ApiCreatedResponse("Created above route")
+    @ApiBadRequestResponse("Bad request above route", ValidationErrorDto)
+    @Get("/stacked")
+    async def stacked_order(self):
+        return {"ok": True}
+
+    @ApiBearerAuth()
+    @ApiConsumes("multipart/form-data")
+    @Post("/upload")
+    async def upload(self, file: UploadFile = UploadedFile("avatar")):  # type: ignore[assignment]
+        return {"filename": file.filename}
 
 
 @ApiExtraModels(ErrorDto)
@@ -107,6 +131,22 @@ def test_swagger_decorators_and_module_setup():
     assert {"basic": []} in basic_operation["security"]
     assert basic_operation["responses"]["201"]["description"] == "Created"
     assert basic_operation["responses"]["404"]["description"] == "Missing"
+    mixed_operation = client.get("/api-docs/openapi.json").json()["paths"]["/docs/mixed"]["get"]
+    assert mixed_operation["responses"]["201"]["description"] == "Created below route"
+    assert mixed_operation["responses"]["400"]["description"] == "Bad request below route"
+    assert "ValidationErrorDto" in str(mixed_operation["responses"]["400"])
+    stacked_operation = client.get("/api-docs/openapi.json").json()["paths"]["/docs/stacked"]["get"]
+    assert stacked_operation["responses"]["201"]["description"] == "Created above route"
+    assert stacked_operation["responses"]["400"]["description"] == "Bad request above route"
+    upload_operation = client.get("/api-docs/openapi.json").json()["paths"]["/docs/upload"]["post"]
+    assert {"bearer": []} in upload_operation["security"]
+    assert "multipart/form-data" in upload_operation["requestBody"]["content"]
+    upload_schema_ref = upload_operation["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
+    upload_schema_name = upload_schema_ref.rsplit("/", 1)[-1]
+    upload_schema = document["components"]["schemas"][upload_schema_name]
+    assert upload_schema["required"] == ["avatar"]
+    assert upload_schema["properties"]["avatar"]["type"] == "string"
+    assert upload_schema["properties"]["avatar"]["contentMediaType"] == "application/octet-stream"
     assert "/docs/internal" not in client.get("/api-docs/openapi.json").json()["paths"]
     assert CreateDocDto.model_json_schema()["properties"]["title"]["description"] == "Document title"
     assert CreateDocDto.model_json_schema()["properties"]["draft"]["description"] == "Draft flag"

@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import Any
 
 from fastapi import WebSocket
+from starlette.websockets import WebSocketDisconnect
 
 
 class WebSocketManager:
@@ -49,7 +50,8 @@ class WebSocketManager:
         for websocket in list(self._connections):
             if websocket is exclude:
                 continue
-            await websocket.send_json({"event": event, "data": data})
+            if not await self._send_json(websocket, {"event": event, "data": data}):
+                self.disconnect(websocket)
 
     async def broadcast(
         self,
@@ -62,7 +64,15 @@ class WebSocketManager:
         for websocket in list(self._rooms.get(room, set())):
             if websocket is exclude:
                 continue
-            await websocket.send_json({"event": event, "data": data})
+            if not await self._send_json(websocket, {"event": event, "data": data}):
+                self.disconnect(websocket)
+
+    async def _send_json(self, websocket: WebSocket, payload: dict[str, Any]) -> bool:
+        try:
+            await websocket.send_json(payload)
+            return True
+        except (RuntimeError, WebSocketDisconnect):
+            return False
 
 
 class SocketIoRoomEmitter:
@@ -90,7 +100,8 @@ class SocketIoServer:
     async def emit(self, *args: Any, exclude: WebSocket | None = None) -> None:
         if len(args) == 3:
             websocket, event, data = args
-            await websocket.send_json({"event": event, "data": data})
+            if not await self.manager._send_json(websocket, {"event": event, "data": data}):
+                self.manager.disconnect(websocket)
             return
         if len(args) == 2:
             event, data = args

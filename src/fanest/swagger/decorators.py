@@ -19,21 +19,17 @@ def ApiTags(*tags: str) -> Callable[[T], T]:
 
 def ApiResponse(status_code: int, description: str | None = None, model: type | None = None):
     def decorator(handler):
-        route = getattr(handler, "__fanest_route__", None)
-        if route is None:
-            responses: dict[int, dict[str, Any]] = {}
-        else:
-            responses = dict(route.options.get("responses", {}))
+        responses = _response_metadata(handler)
         response: dict[str, Any] = {}
         if description:
             response["description"] = description
         if model:
             response["model"] = model
         responses[status_code] = response
+        route = getattr(handler, "__fanest_route__", None)
         if route is not None:
             route.options["responses"] = responses
-        else:
-            setattr(handler, "__fanest_pending_responses__", responses)
+        setattr(handler, "__fanest_pending_responses__", responses)
         return handler
 
     return decorator
@@ -307,6 +303,17 @@ def _openapi_extra(handler: Any) -> dict[str, Any]:
     if route is not None:
         return dict(route.options.get("openapi_extra", {}))
     return dict(getattr(handler, "__fanest_pending_openapi_extra__", {}))
+
+
+def _response_metadata(handler: Any) -> dict[int, dict[str, Any]]:
+    responses: dict[int, dict[str, Any]] = {}
+    pending = getattr(handler, "__fanest_pending_responses__", None)
+    if pending:
+        responses.update(pending)
+    route = getattr(handler, "__fanest_route__", None)
+    if route is not None:
+        responses.update(route.options.get("responses", {}))
+    return responses
 
 
 def _deep_update(target: dict[str, Any], source: dict[str, Any]) -> None:

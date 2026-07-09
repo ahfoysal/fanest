@@ -201,8 +201,8 @@ def Form(name: str | None = None, *pipes: Any, default: Any = ...) -> ParameterS
     return ParameterSource(source="form", name=name, default=default, pipes=pipes)
 
 
-def UploadedFile(name: str = "file") -> ParameterSource:
-    return ParameterSource(source="file", name=name)
+def UploadedFile(name: str = "file", *, default: Any = ...) -> ParameterSource:
+    return ParameterSource(source="file", name=name, default=default)
 
 
 def UploadedFiles(name: str = "files") -> ParameterSource:

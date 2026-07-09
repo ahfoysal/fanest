@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 
+import pytest
 from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Injectable, Module, Post
 from fanest.cqrs import (
     CommandBus,
     CommandHandler,
+    CqrsHandlerNotFoundError,
     CqrsModule,
     EventBus,
     EventsHandler,
@@ -21,6 +23,16 @@ class CreateUserCommand:
 
 @dataclass(frozen=True)
 class CountUsersQuery:
+    pass
+
+
+@dataclass(frozen=True)
+class UnhandledCommand:
+    pass
+
+
+@dataclass(frozen=True)
+class UnhandledQuery:
     pass
 
 
@@ -90,6 +102,22 @@ def test_cqrs_command_query_and_event_buses():
         assert client.get("/cqrs").json() == {"count": 1}
 
     assert UserStore.events == ["Ada"]
+
+
+@pytest.mark.anyio
+async def test_cqrs_buses_raise_clean_error_when_handler_missing():
+    command_bus = CommandBus()
+    query_bus = QueryBus()
+
+    with pytest.raises(CqrsHandlerNotFoundError) as command_error:
+        await command_bus.execute(UnhandledCommand())
+    with pytest.raises(CqrsHandlerNotFoundError) as query_error:
+        await query_bus.execute(UnhandledQuery())
+
+    assert "No command handler registered" in str(command_error.value)
+    assert "UnhandledCommand" in str(command_error.value)
+    assert "No query handler registered" in str(query_error.value)
+    assert "UnhandledQuery" in str(query_error.value)
 
 
 def test_cqrs_event_handlers_are_not_duplicated_across_repeated_lifespan_startups():

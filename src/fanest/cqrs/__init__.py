@@ -1,6 +1,7 @@
 from fanest.cqrs.module import (
     CommandBus,
     CommandHandler,
+    CqrsHandlerNotFoundError,
     CqrsModule,
     EventBus,
     EventsHandler,
@@ -11,6 +12,7 @@ from fanest.cqrs.module import (
 __all__ = [
     "CommandBus",
     "CommandHandler",
+    "CqrsHandlerNotFoundError",
     "CqrsModule",
     "EventBus",
     "EventsHandler",

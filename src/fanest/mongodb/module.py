@@ -41,7 +41,19 @@ class MongoCollection:
         if match is None:
             return None
         stored = self._documents[str(match["_id"])]
-        stored.update(update.get("$set", update))
+        if any(str(key).startswith("$") for key in update):
+            allowed = {"$set", "$unset", "$inc"}
+            unsupported = set(update) - allowed
+            if unsupported:
+                raise ValueError(f"Unsupported Mongo update operator(s): {', '.join(sorted(unsupported))}")
+            for key, value in update.get("$set", {}).items():
+                stored[key] = value
+            for key in update.get("$unset", {}):
+                stored.pop(key, None)
+            for key, value in update.get("$inc", {}).items():
+                stored[key] = stored.get(key, 0) + value
+        else:
+            stored.update(update)
         return deepcopy(stored)
 
     async def delete_one(self, query: dict[str, Any]) -> bool:

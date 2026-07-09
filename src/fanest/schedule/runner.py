@@ -3,8 +3,9 @@ import inspect
 import logging
 import time
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
@@ -42,6 +43,8 @@ class ScheduleRunner:
             task.cancel()
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
+        for task in list(self.running_jobs):
+            task.cancel()
         if self.running_jobs:
             await asyncio.gather(*self.running_jobs, return_exceptions=True)
         self.tasks.clear()
@@ -74,16 +77,81 @@ class ScheduleRunner:
 
     async def _run_cron(self, metadata: dict[str, Any], handler: Any) -> None:
         expression = metadata["expression"]
+        wait_for_completion = bool(metadata.get("wait_for_completion"))
+        running_task: asyncio.Task[Any] | None = None
+        next_run = self.next_cron_datetime(
+            expression,
+            time_zone=metadata.get("time_zone"),
+            utc_offset=metadata.get("utc_offset"),
+        )
         while True:
-            delay = self.next_cron_delay(expression)
+            delay = self._delay_until(next_run)
             await asyncio.sleep(delay)
-            await self._safe_call(handler)
+            if not wait_for_completion or running_task is None or running_task.done():
+                running_task = asyncio.create_task(self._safe_call(handler))
+                self.running_jobs.add(running_task)
+                running_task.add_done_callback(self.running_jobs.discard)
+            next_run = self.next_cron_datetime(
+                expression,
+                next_run,
+                time_zone=metadata.get("time_zone"),
+                utc_offset=metadata.get("utc_offset"),
+            )
 
-    def next_cron_delay(self, expression: str, now: datetime | None = None) -> float:
-        now = now or datetime.now(timezone.utc)
-        iterator = croniter(expression, now, second_at_beginning=len(expression.split()) == 6)
+    def next_cron_delay(
+        self,
+        expression: str,
+        now: datetime | None = None,
+        *,
+        time_zone: str | None = None,
+        utc_offset: int | None = None,
+    ) -> float:
+        base = self._cron_now(now, time_zone=time_zone, utc_offset=utc_offset)
+        next_run = self.next_cron_datetime(expression, base, time_zone=time_zone, utc_offset=utc_offset)
+        return max((next_run - base).total_seconds(), 0.0)
+
+    def next_cron_datetime(
+        self,
+        expression: str,
+        now: datetime | None = None,
+        *,
+        time_zone: str | None = None,
+        utc_offset: int | None = None,
+    ) -> datetime:
+        base = self._cron_now(now, time_zone=time_zone, utc_offset=utc_offset)
+        second_at_beginning = len(expression.split()) == 6
+        iterator = croniter(expression, base, second_at_beginning=second_at_beginning)
         next_run = iterator.get_next(datetime)
-        return max((next_run - now).total_seconds(), 0.0)
+        if next_run.tzinfo is None:
+            return next_run.replace(tzinfo=base.tzinfo)
+        return next_run
+
+    def _cron_now(
+        self,
+        now: datetime | None = None,
+        *,
+        time_zone: str | None = None,
+        utc_offset: int | None = None,
+    ) -> datetime:
+        cron_tz = self._cron_timezone(time_zone=time_zone, utc_offset=utc_offset)
+        if now is None:
+            return datetime.now(cron_tz)
+        if now.tzinfo is None:
+            return now.replace(tzinfo=cron_tz)
+        return now.astimezone(cron_tz)
+
+    def _cron_timezone(self, *, time_zone: str | None = None, utc_offset: int | None = None) -> tzinfo:
+        if time_zone and utc_offset is not None:
+            raise ValueError("CronJob cannot define both time_zone and utc_offset.")
+        if time_zone:
+            return ZoneInfo(time_zone)
+        if utc_offset is not None:
+            return timezone(timedelta(minutes=utc_offset))
+        return timezone.utc
+
+    def _delay_until(self, run_at: datetime) -> float:
+        now = datetime.now(run_at.tzinfo or timezone.utc)
+        return max((run_at - now).total_seconds(), 0.0)
 
     async def _call(self, handler: Any) -> None:
         result = handler()

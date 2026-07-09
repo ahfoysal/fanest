@@ -11,6 +11,7 @@ from fanest import (
     Get,
     Module,
     Query,
+    UseFilters,
     use_class,
     use_factory,
 )
@@ -123,6 +124,47 @@ def test_multiple_app_enhancer_providers_in_module_are_not_overwritten():
 
     assert client.get("/multi-filters/key").json() == {"first": "'missing'"}
     assert client.get("/multi-filters/runtime").json() == {"second": "boom"}
+
+
+class MethodOnlyError(Exception):
+    pass
+
+
+@Catch(Exception)
+class CatchAllGlobalFilter:
+    def catch(self, exc, context):
+        return {"scope": "global", "error": str(exc)}
+
+
+@Catch(MethodOnlyError)
+class MethodScopedFilter:
+    def catch(self, exc, context):
+        return {"scope": "method", "error": str(exc)}
+
+
+@Controller("filter-precedence")
+class FilterPrecedenceController:
+    @UseFilters(MethodScopedFilter)
+    @Get("/")
+    async def index(self):
+        raise MethodOnlyError("method wins")
+
+
+@Module(
+    controllers=[FilterPrecedenceController],
+    providers=[use_class(APP_FILTER, CatchAllGlobalFilter)],
+)
+class FilterPrecedenceModule:
+    pass
+
+
+def test_method_exception_filters_take_precedence_over_global_filters():
+    client = TestClient(FaNestFactory.create(FilterPrecedenceModule))
+
+    assert client.get("/filter-precedence").json() == {
+        "scope": "method",
+        "error": "method wins",
+    }
 
 
 class AsyncFactoryGuard:

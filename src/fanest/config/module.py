@@ -57,6 +57,20 @@ class ConfigService:
 
 class ConfigModule:
     @staticmethod
+    def _load_values(
+        *,
+        env_file: str | list[str] | None,
+        values: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        config_values: dict[str, Any] = {}
+        env_files = [env_file] if isinstance(env_file, str) else env_file or []
+        for file in env_files:
+            config_values.update(ConfigService.read_env_file(file))
+        config_values.update(os.environ)
+        config_values.update(values or {})
+        return config_values
+
+    @staticmethod
     def for_root(
         *,
         env_file: str | list[str] | None = ".env",
@@ -64,11 +78,7 @@ class ConfigModule:
         values: dict[str, Any] | None = None,
         is_global: bool = False,
     ) -> type:
-        config_values: dict[str, Any] = dict(os.environ)
-        env_files = [env_file] if isinstance(env_file, str) else env_file or []
-        for file in env_files:
-            config_values.update(ConfigService.read_env_file(file))
-        config_values.update(values or {})
+        config_values = ConfigModule._load_values(env_file=env_file, values=values)
         if schema is not None:
             config_values = schema.model_validate(config_values).model_dump()
 
@@ -92,10 +102,7 @@ class ConfigModule:
         is_global: bool = False,
     ) -> type:
         async def load_values(*dependencies: Any) -> dict[str, Any]:
-            config_values: dict[str, Any] = dict(os.environ)
-            env_files = [env_file] if isinstance(env_file, str) else env_file or []
-            for file in env_files:
-                config_values.update(ConfigService.read_env_file(file))
+            config_values = ConfigModule._load_values(env_file=env_file)
             result = use_factory(*dependencies)
             if inspect.isawaitable(result):
                 result = await result

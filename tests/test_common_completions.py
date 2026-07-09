@@ -2,6 +2,7 @@ from enum import Enum
 from uuid import UUID
 
 from fanest import (
+    BadRequestException,
     GoneException,
     ParseArrayPipe,
     ParseEnumPipe,
@@ -27,6 +28,14 @@ def test_additional_parse_pipes():
     )
     assert ParseEnumPipe(Status).transform("active", metadata) is Status.ACTIVE
     assert ParseArrayPipe().transform("a,b", metadata) == ["a", "b"]
+
+    for value in ["inf", "-inf", "nan"]:
+        try:
+            ParseFloatPipe().transform(value, metadata)
+        except BadRequestException:
+            pass
+        else:  # pragma: no cover - clearer failure than a bare assert
+            raise AssertionError(f"{value} should not be accepted as a finite float")
 
 
 def test_additional_http_exceptions():

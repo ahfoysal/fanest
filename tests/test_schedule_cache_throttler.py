@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Injectable, Module, UseGuards, UseInterceptors
-from fanest.cache import CacheInterceptor, CacheModule, CacheService, CacheTTL, MemoryCacheStore
+from fanest.cache import CacheInterceptor, CacheKey, CacheModule, CacheService, CacheTTL, MemoryCacheStore
 from fanest.schedule import Cron, CronExpression, CronJob, Interval, SchedulerRegistry, Timeout
 from fanest.schedule.runner import ScheduleRunner
 from fanest.throttler import Throttle, ThrottlerGuard, ThrottlerModule
@@ -206,6 +206,19 @@ class CachedController:
         type(self).calls += 1
         return {"calls": type(self).calls}
 
+    @CacheTTL(60)
+    @Get("/secure")
+    async def secure(self):
+        type(self).calls += 1
+        return {"calls": type(self).calls}
+
+    @CacheKey("cached:custom")
+    @CacheTTL(60)
+    @Get("/custom")
+    async def custom(self):
+        type(self).calls += 1
+        return {"calls": type(self).calls}
+
 
 @Module(imports=[CacheModule.register()], controllers=[CachedController])
 class CachedModule:
@@ -218,6 +231,24 @@ def test_cache_interceptor_reuses_response():
 
     assert client.get("/cached").json() == {"calls": 1}
     assert client.get("/cached").json() == {"calls": 1}
+
+
+def test_cache_interceptor_varies_authenticated_requests():
+    CachedController.calls = 0
+    client = TestClient(FaNestFactory.create(CachedModule))
+
+    assert client.get("/cached/secure", headers={"authorization": "Bearer one"}).json() == {"calls": 1}
+    assert client.get("/cached/secure", headers={"authorization": "Bearer one"}).json() == {"calls": 1}
+    assert client.get("/cached/secure", headers={"authorization": "Bearer two"}).json() == {"calls": 2}
+
+
+def test_custom_cache_key_keeps_query_variance():
+    CachedController.calls = 0
+    client = TestClient(FaNestFactory.create(CachedModule))
+
+    assert client.get("/cached/custom", params={"page": "1"}).json() == {"calls": 1}
+    assert client.get("/cached/custom", params={"page": "1"}).json() == {"calls": 1}
+    assert client.get("/cached/custom", params={"page": "2"}).json() == {"calls": 2}
 
 
 def test_cache_service_isolated_per_application_instance():
@@ -253,6 +284,11 @@ class LimitedController:
     async def index(self):
         return {"ok": True}
 
+    @Throttle(limit=1, ttl=60)
+    @Get("/other")
+    async def other(self):
+        return {"other": True}
+
 
 @Module(imports=[ThrottlerModule.for_root(limit=10, ttl=60)], controllers=[LimitedController])
 class LimitedModule:
@@ -264,3 +300,12 @@ def test_throttler_guard_blocks_after_limit():
 
     assert client.get("/limited").status_code == 200
     assert client.get("/limited").status_code == 429
+
+
+def test_throttler_guard_uses_separate_buckets_per_route():
+    client = TestClient(FaNestFactory.create(LimitedModule))
+
+    assert client.get("/limited").status_code == 200
+    assert client.get("/limited/other").status_code == 200
+    assert client.get("/limited").status_code == 429
+    assert client.get("/limited/other").status_code == 429

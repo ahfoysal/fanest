@@ -4,6 +4,15 @@ from typing import Any
 from fanest import Injectable, Module
 
 
+class CqrsHandlerNotFoundError(LookupError):
+    def __init__(self, bus_name: str, message_type: type) -> None:
+        self.bus_name = bus_name
+        self.message_type = message_type
+        super().__init__(
+            f"No {bus_name} handler registered for {message_type.__module__}.{message_type.__qualname__}."
+        )
+
+
 def CommandHandler(command: type):
     def decorator(cls):
         setattr(cls, "__fanest_command_handler__", command)
@@ -39,7 +48,10 @@ class CommandBus:
         self._handlers[command] = handler
 
     async def execute(self, command: Any) -> Any:
-        handler = self._handlers[type(command)]
+        command_type = type(command)
+        handler = self._handlers.get(command_type)
+        if handler is None:
+            raise CqrsHandlerNotFoundError("command", command_type)
         result = handler.execute(command)
         if inspect.isawaitable(result):
             return await result
@@ -55,7 +67,10 @@ class QueryBus:
         self._handlers[query] = handler
 
     async def execute(self, query: Any) -> Any:
-        handler = self._handlers[type(query)]
+        query_type = type(query)
+        handler = self._handlers.get(query_type)
+        if handler is None:
+            raise CqrsHandlerNotFoundError("query", query_type)
         result = handler.execute(query)
         if inspect.isawaitable(result):
             return await result

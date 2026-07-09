@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from fanest import FaNestFactory, Injectable, Module
+from fanest import FaNestFactory, Injectable, Module, token, use_existing
 
 
 events: list[str] = []
@@ -47,6 +47,14 @@ class LifecycleModule:
     pass
 
 
+LIFECYCLE_ALIAS = token("LIFECYCLE_ALIAS")
+
+
+@Module(providers=[FirstLifecycleService, use_existing(LIFECYCLE_ALIAS, FirstLifecycleService)])
+class LifecycleAliasModule:
+    pass
+
+
 def test_lifecycle_hooks_run_in_nest_style_order():
     events.clear()
 
@@ -68,5 +76,20 @@ def test_lifecycle_hooks_run_in_nest_style_order():
         "second:destroy",
         "first:destroy",
         "second:shutdown",
+        "first:shutdown",
+    ]
+
+
+def test_use_existing_alias_does_not_duplicate_lifecycle_hooks():
+    events.clear()
+
+    with TestClient(FaNestFactory.create(LifecycleAliasModule)):
+        assert events == ["first:init", "first:bootstrap"]
+
+    assert events == [
+        "first:init",
+        "first:bootstrap",
+        "first:before_shutdown",
+        "first:destroy",
         "first:shutdown",
     ]

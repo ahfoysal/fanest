@@ -20,6 +20,9 @@ from fanest.websockets import SocketIoServer, WebSocketManager
 _request_instances: ContextVar[dict[Any, Any] | None] = ContextVar(
     "fanest_request_instances", default=None
 )
+_resolving_instances: ContextVar[set[Any] | None] = ContextVar(
+    "fanest_resolving_instances", default=None
+)
 
 
 class ForwardRefProxy:
@@ -57,7 +60,6 @@ class FaNestContainer:
         self._dependency_cache: dict[type, tuple[dict[str, inspect.Parameter], dict[str, Any]]] = {}
         self._provider_dependency_cache: dict[Any, list[Any]] = {}
         self._scope_cache: dict[Any, str] = {}
-        self._resolving: set[Any] = set()
         self.register(ValueProvider(provide=ModuleRef, use_value=ModuleRef(self)))
         self.register(ValueProvider(provide=Reflector, use_value=Reflector()))
         self.register(ValueProvider(provide=SchedulerRegistry, use_value=SchedulerRegistry()))
@@ -215,15 +217,19 @@ class FaNestContainer:
         if scope == "singleton" and cache_key in self._instances:
             return self._instances[cache_key]
 
-        if cache_key in self._resolving and lazy_forward_ref:
+        resolving, resolving_token = self._begin_resolving_scope()
+        if cache_key in resolving and lazy_forward_ref:
+            self._end_resolving_scope(resolving_token)
             return ForwardRefProxy(self, token, module_key=owner_key)
-        if cache_key in self._resolving:
+        if cache_key in resolving:
+            self._end_resolving_scope(resolving_token)
             raise RuntimeError(f"Circular dependency detected while resolving {token!r}")
-        self._resolving.add(cache_key)
+        resolving.add(cache_key)
         try:
             instance = self._resolve_provider(provider, module_key=owner_key)
         finally:
-            self._resolving.remove(cache_key)
+            resolving.remove(cache_key)
+            self._end_resolving_scope(resolving_token)
         if scope == "request" and request_cache is not None:
             request_cache[cache_key] = instance
         elif scope == "singleton":
@@ -247,15 +253,19 @@ class FaNestContainer:
         if scope == "singleton" and cache_key in self._instances:
             return self._instances[cache_key]
 
-        if cache_key in self._resolving and lazy_forward_ref:
+        resolving, resolving_token = self._begin_resolving_scope()
+        if cache_key in resolving and lazy_forward_ref:
+            self._end_resolving_scope(resolving_token)
             return ForwardRefProxy(self, token, module_key=owner_key)
-        if cache_key in self._resolving:
+        if cache_key in resolving:
+            self._end_resolving_scope(resolving_token)
             raise RuntimeError(f"Circular dependency detected while resolving {token!r}")
-        self._resolving.add(cache_key)
+        resolving.add(cache_key)
         try:
             instance = await self._resolve_provider_async(provider, module_key=owner_key)
         finally:
-            self._resolving.remove(cache_key)
+            resolving.remove(cache_key)
+            self._end_resolving_scope(resolving_token)
         if scope == "request" and request_cache is not None:
             request_cache[cache_key] = instance
         elif scope == "singleton":
@@ -297,6 +307,12 @@ class FaNestContainer:
         if isinstance(provider, FactoryProvider):
             dependencies = [self._resolve_injected_token(token, module_key=module_key) for token in provider.inject]
             result = provider.use_factory(*dependencies)
+            if inspect.isawaitable(result):
+                if inspect.iscoroutine(result):
+                    result.close()
+                raise RuntimeError(
+                    "Async factory providers must be resolved with resolve_async(), not resolve()."
+                )
             return result
         if inspect.isclass(provider):
             return self._instantiate(provider, module_key=module_key)
@@ -434,7 +450,7 @@ class FaNestContainer:
                 token = self._unwrap_token(marker.token)
                 token = self._resolve_named_token(token, module_key)
                 owner_key, _ = self._locate_provider(token, module_key)
-                if self._cache_key(owner_key, token) in self._resolving:
+                if self._cache_key(owner_key, token) in self._current_resolving():
                     return ForwardRefProxy(self, token, module_key=owner_key)
                 return self.resolve(token, module_key=module_key)
             except Exception:
@@ -451,7 +467,7 @@ class FaNestContainer:
                 token = self._unwrap_token(marker.token)
                 token = self._resolve_named_token(token, module_key)
                 owner_key, _ = self._locate_provider(token, module_key)
-                if self._cache_key(owner_key, token) in self._resolving:
+                if self._cache_key(owner_key, token) in self._current_resolving():
                     return ForwardRefProxy(self, token, module_key=owner_key)
                 return await self.resolve_async(token, module_key=module_key)
             except Exception:
@@ -557,6 +573,20 @@ class FaNestContainer:
         token = self._unwrap_token(token)
         self._provider_dependency_cache.pop(token, None)
         self._scope_cache.clear()
+
+    def _begin_resolving_scope(self) -> tuple[set[Any], Any | None]:
+        resolving = _resolving_instances.get()
+        if resolving is not None:
+            return resolving, None
+        resolving = set()
+        return resolving, _resolving_instances.set(resolving)
+
+    def _end_resolving_scope(self, token: Any | None) -> None:
+        if token is not None:
+            _resolving_instances.reset(token)
+
+    def _current_resolving(self) -> set[Any]:
+        return _resolving_instances.get() or set()
 
     def _locate_provider(
         self,

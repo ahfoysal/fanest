@@ -186,7 +186,7 @@ class FaNestFactory:
         for middleware in scanner.app_middlewares:
             app.add_middleware(middleware["class"], **middleware["options"])
         if cors:
-            options = cors if isinstance(cors, dict) else {"allow_origins": []}
+            options = FaNestFactory._cors_options(cors)
             app.add_middleware(
                 CORSMiddleware,
                 allow_origins=cast(list[str], options.get("allow_origins", [])),
@@ -215,6 +215,15 @@ class FaNestFactory:
         adapter.register_gateways(scanner.gateways)
         FaNestFactory._register_validation_exception_handler(app, adapter)
         return app
+
+    @staticmethod
+    def _cors_options(cors: bool | dict[str, object]) -> dict[str, object]:
+        options: dict[str, object] = dict(cors) if isinstance(cors, dict) else {"allow_origins": []}
+        allow_origins = cast(list[str], options.get("allow_origins", []))
+        allow_credentials = cast(bool, options.get("allow_credentials", False))
+        if allow_credentials and "*" in allow_origins:
+            raise ValueError("CORS allow_credentials=True cannot be used with wildcard allow_origins")
+        return options
 
     @staticmethod
     def _register_validation_exception_handler(app: FastAPI, adapter: FastApiAdapter) -> None:
@@ -251,6 +260,7 @@ class FaNestFactory:
             ]
             global_filters[:] = [*await container.resolve_all_async(APP_FILTER), *explicit_global_filters]
             instances = []
+            seen_instance_ids: set[int] = set()
             for module_key, record in records.items():
                 for provider in [*record.metadata.providers, *record.metadata.gateways]:
                     if container.provider_token(provider) in APP_ENHANCER_TOKENS:
@@ -284,6 +294,10 @@ class FaNestFactory:
                         container.provider_token(provider),
                         module_key=module_key,
                     )
+                    instance_id = id(instance)
+                    if instance_id in seen_instance_ids:
+                        continue
+                    seen_instance_ids.add(instance_id)
                     instances.append(instance)
                     FaNestFactory._register_passport_strategy(container, instance, module_key=module_key)
                     hook = getattr(instance, "on_module_init", None)
