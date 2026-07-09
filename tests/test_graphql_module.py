@@ -1533,3 +1533,40 @@ def test_graphql_model_and_directive_registration_fail_explicitly_without_metada
 
     with pytest.raises(GraphQLUnsupportedFeatureError, match="GraphQL directives must use @Directive metadata"):
         schema.register_directive(object())
+
+
+def test_for_root_providers_supply_resolver_dependencies():
+    """Resolvers can inject services co-located via GraphQLModule.for_root(providers=...)."""
+
+    @Injectable()
+    class StatsService:
+        def total(self) -> int:
+            return 42
+
+    @Resolver
+    class StatsResolver:
+        def __init__(self, stats: StatsService):
+            self.stats = stats
+
+        @Query("total")
+        async def total(self):
+            return self.stats.total()
+
+    @Module(
+        imports=[
+            GraphQLModule.for_root(
+                resolvers=[StatsResolver],
+                providers=[StatsService],
+                path="graphql",
+            )
+        ]
+    )
+    class AppModule:
+        pass
+
+    app = FaNestFactory.create(AppModule)
+    with TestClient(app) as client:
+        response = client.post("/graphql", json={"query": "{ total }"})
+
+    assert response.status_code == 200
+    assert response.json() == {"data": {"total": 42}}

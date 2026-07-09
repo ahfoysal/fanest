@@ -2379,6 +2379,7 @@ class GraphQLModule:
         *,
         resolvers: list[type],
         imports: list[Any] | None = None,
+        providers: list[Any] | None = None,
         path: str = "graphql",
         schema: str | None = None,
         websocket: bool = True,
@@ -2393,6 +2394,7 @@ class GraphQLModule:
     ) -> type:
         controller_path = path.strip("/")
         module_imports = imports or []
+        module_providers = providers or []
         sdl = schema or ""
 
         def schema_factory() -> GraphQLSchema:
@@ -2501,7 +2503,7 @@ class GraphQLModule:
         @Module(
             imports=module_imports,
             controllers=[GraphQLController],
-            providers=[schema_provider, *resolvers],
+            providers=[schema_provider, *module_providers, *resolvers],
             gateways=[GraphQLSubscriptionGateway] if websocket else [],
             exports=[GraphQLSchema],
             global_module=federation,
@@ -2517,6 +2519,7 @@ class GraphQLModule:
         *,
         resolvers: list[type],
         imports: list[Any] | None = None,
+        providers: list[Any] | None = None,
         path: str = "graphql",
         websocket: bool = True,
         types: list[type] | None = None,
@@ -2530,6 +2533,7 @@ class GraphQLModule:
         return GraphQLModule.for_root(
             resolvers=resolvers,
             imports=imports,
+            providers=providers,
             path=path,
             schema=schema,
             websocket=websocket,
@@ -2547,6 +2551,7 @@ class GraphQLModule:
         *,
         resolvers: list[type],
         imports: list[Any] | None = None,
+        providers: list[Any] | None = None,
         path: str = "graphql",
         schema: str | None = None,
         websocket: bool = True,
@@ -2561,6 +2566,7 @@ class GraphQLModule:
         return GraphQLModule.for_root(
             resolvers=resolvers,
             imports=imports,
+            providers=providers,
             path=path,
             schema=schema,
             websocket=websocket,
