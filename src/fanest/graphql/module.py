@@ -154,8 +154,14 @@ class GraphQLSchema:
 
 class GraphQLModule:
     @staticmethod
-    def for_root(*, resolvers: list[type], path: str = "graphql") -> type:
+    def for_root(
+        *,
+        resolvers: list[type],
+        imports: list[Any] | None = None,
+        path: str = "graphql",
+    ) -> type:
         controller_path = path.strip("/")
+        module_imports = imports or []
 
         @Controller(controller_path)
         class GraphQLController:
@@ -169,7 +175,12 @@ class GraphQLModule:
                     variables=payload.get("variables"),
                 )
 
-        @Module(controllers=[GraphQLController], providers=[GraphQLSchema, *resolvers], exports=[GraphQLSchema])
+        @Module(
+            imports=module_imports,
+            controllers=[GraphQLController],
+            providers=[GraphQLSchema, *resolvers],
+            exports=[GraphQLSchema],
+        )
         class DynamicGraphQLModule:
             pass
 

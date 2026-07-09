@@ -3,7 +3,7 @@ import asyncio
 
 from fanest import Controller, FaNestFactory, Get, Injectable, Module, Post
 from fanest.mailer import MailerModule, MailerService
-from fanest.queues import Process, Processor, QueueModule, QueueService
+from fanest.queues import Job, MemoryQueueBackend, Process, Processor, QueueModule, QueueService
 
 
 @Processor("emails")
@@ -35,6 +35,30 @@ class QueueAppModule:
     pass
 
 
+class RecordingQueueBackend(MemoryQueueBackend):
+    added: list[str]
+
+    def __init__(self):
+        super().__init__()
+        self.added = []
+
+    async def add(self, job: Job) -> Job:
+        self.added.append(job.id)
+        return await super().add(job)
+
+
+RECORDING_QUEUE_BACKEND = RecordingQueueBackend()
+
+
+@Module(
+    imports=[QueueModule.for_root(backend=RECORDING_QUEUE_BACKEND)],
+    controllers=[QueueController],
+    providers=[EmailProcessor],
+)
+class QueueBackendAppModule:
+    pass
+
+
 def test_queue_module_registers_processors_and_runs_jobs():
     EmailProcessor.handled = []
 
@@ -43,6 +67,20 @@ def test_queue_module_registers_processors_and_runs_jobs():
 
     assert response.status_code == 200
     assert response.json()["handled"] == ["ada@example.com"]
+
+
+def test_queue_module_accepts_custom_backend_for_durable_adapters():
+    EmailProcessor.handled = []
+    RECORDING_QUEUE_BACKEND.clear()
+    RECORDING_QUEUE_BACKEND.added = []
+
+    with TestClient(FaNestFactory.create(QueueBackendAppModule)) as client:
+        response = client.post("/queues")
+
+    assert response.status_code == 200
+    assert response.json()["handled"] == ["ada@example.com"]
+    assert len(RECORDING_QUEUE_BACKEND.added) == 1
+    assert [job.queue for job in RECORDING_QUEUE_BACKEND.jobs()] == ["emails"]
 
 
 def test_queue_processors_are_not_duplicated_across_repeated_lifespan_startups():

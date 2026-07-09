@@ -78,3 +78,44 @@ def test_graphql_resolvers_resolve_inside_request_scope():
 
     assert first.json() == {"data": {"resolver_id": 1}}
     assert second.json() == {"data": {"resolver_id": 2}}
+
+
+@Injectable()
+class TaskRepository:
+    def count(self) -> int:
+        return 3
+
+
+@Module(providers=[TaskRepository], exports=[TaskRepository])
+class TaskFeatureModule:
+    pass
+
+
+@Resolver
+class AnalyticsResolver:
+    def __init__(self, tasks: TaskRepository):
+        self.tasks = tasks
+
+    @Query()
+    async def task_count(self):
+        return self.tasks.count()
+
+
+@Module(
+    imports=[
+        GraphQLModule.for_root(
+            imports=[TaskFeatureModule],
+            resolvers=[AnalyticsResolver],
+            path="analytics/graphql",
+        )
+    ]
+)
+class ImportedDependencyGraphQLModule:
+    pass
+
+
+def test_graphql_dynamic_module_can_import_resolver_dependencies():
+    with TestClient(FaNestFactory.create(ImportedDependencyGraphQLModule)) as client:
+        response = client.post("/analytics/graphql", json={"query": "{ task_count }"})
+
+    assert response.json() == {"data": {"task_count": 3}}

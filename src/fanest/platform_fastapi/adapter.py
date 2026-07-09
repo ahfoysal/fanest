@@ -575,6 +575,8 @@ class FastApiAdapter:
         result = data
         parameter = self._parameters(handler).get("data")
         annotation = parameter.annotation if parameter is not None else None
+        if annotation is inspect.Parameter.empty:
+            annotation = Any
         for pipe in self._collect(gateway, handler, "__fanest_pipes__"):
             instance = await self._resolve_component_async(pipe, owner=gateway)
             transformed = instance.transform(

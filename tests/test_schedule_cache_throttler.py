@@ -9,7 +9,7 @@ from fanest import Controller, FaNestFactory, Get, Injectable, Module, UseGuards
 from fanest.cache import CacheInterceptor, CacheKey, CacheModule, CacheService, CacheTTL, MemoryCacheStore
 from fanest.schedule import Cron, CronExpression, CronJob, Interval, SchedulerRegistry, Timeout
 from fanest.schedule.runner import ScheduleRunner
-from fanest.throttler import Throttle, ThrottlerGuard, ThrottlerModule
+from fanest.throttler import MemoryThrottlerStore, Throttle, ThrottlerGuard, ThrottlerModule
 
 
 @Injectable()
@@ -295,6 +295,17 @@ class LimitedModule:
     pass
 
 
+SHARED_THROTTLER_STORE = MemoryThrottlerStore()
+
+
+@Module(
+    imports=[ThrottlerModule.for_root(limit=1, ttl=60, store=SHARED_THROTTLER_STORE)],
+    controllers=[LimitedController],
+)
+class SharedStoreLimitedModule:
+    pass
+
+
 def test_throttler_guard_blocks_after_limit():
     client = TestClient(FaNestFactory.create(LimitedModule))
 
@@ -309,3 +320,12 @@ def test_throttler_guard_uses_separate_buckets_per_route():
     assert client.get("/limited/other").status_code == 200
     assert client.get("/limited").status_code == 429
     assert client.get("/limited/other").status_code == 429
+
+
+def test_throttler_module_accepts_shared_store_for_multi_instance_limits():
+    SHARED_THROTTLER_STORE._hits.clear()
+    first = TestClient(FaNestFactory.create(SharedStoreLimitedModule))
+    second = TestClient(FaNestFactory.create(SharedStoreLimitedModule))
+
+    assert first.get("/limited").status_code == 200
+    assert second.get("/limited").status_code == 429

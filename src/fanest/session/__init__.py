@@ -1,3 +1,3 @@
-from fanest.session.module import SessionModule
+from fanest.session.module import MemorySessionStore, RedisSessionStore, SessionModule
 
-__all__ = ["SessionModule"]
+__all__ = ["MemorySessionStore", "RedisSessionStore", "SessionModule"]

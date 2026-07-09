@@ -15,6 +15,7 @@ from fanest import (
     WebSocketGateway,
     WebSocketManager,
     SocketIoServer,
+    ValidationPipe,
     create_param_decorator,
     forward_ref,
     use_factory,
@@ -94,6 +95,19 @@ class SecureChatModule:
     pass
 
 
+@WebSocketGateway("/unannotated-body")
+@UsePipes(ValidationPipe())
+class UnannotatedBodyGateway:
+    @SubscribeMessage("ping")
+    async def ping(self, data=MessageBody()):
+        return {"payload": data}
+
+
+@Module(gateways=[UnannotatedBodyGateway])
+class UnannotatedBodyModule:
+    pass
+
+
 def test_websocket_gateway_runs_guards_and_pipes():
     client = TestClient(FaNestFactory.create(SecureChatModule))
 
@@ -106,6 +120,17 @@ def test_websocket_gateway_runs_guards_and_pipes():
         assert websocket.receive_json() == {
             "event": "shout",
             "data": {"message": "HELLO"},
+        }
+
+
+def test_unannotated_websocket_message_body_is_treated_as_any_for_pipes():
+    client = TestClient(FaNestFactory.create(UnannotatedBodyModule))
+
+    with client.websocket_connect("/unannotated-body") as websocket:
+        websocket.send_json({"event": "ping", "data": {"ok": True}})
+        assert websocket.receive_json() == {
+            "event": "ping",
+            "data": {"payload": {"ok": True}},
         }
 
 

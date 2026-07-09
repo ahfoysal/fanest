@@ -6,7 +6,7 @@ from fanest import BackgroundTasks, Catch, Controller, FaNestFactory, Get, Modul
 from fanest.health import HealthIndicator, HealthModule, MemoryHealthIndicator
 import fanest.health.module as health_module
 from fanest.security import HelmetModule
-from fanest.session import SessionModule
+from fanest.session import MemorySessionStore, SessionModule
 
 
 @Catch(KeyError)
@@ -96,6 +96,22 @@ class PlatformModule:
     pass
 
 
+SHARED_SESSION_STORE = MemorySessionStore()
+
+
+@Module(
+    imports=[
+        SessionModule.for_root(
+            secret_key="test-session-secret",
+            store=SHARED_SESSION_STORE,
+        )
+    ],
+    controllers=[SessionController],
+)
+class SharedSessionModule:
+    pass
+
+
 def test_session_and_security_header_modules():
     client = TestClient(FaNestFactory.create(PlatformModule))
 
@@ -104,6 +120,19 @@ def test_session_and_security_header_modules():
 
     assert response.json() == {"user": "Ada"}
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_session_module_accepts_shared_server_side_store_for_multi_instance_sessions():
+    SHARED_SESSION_STORE.sessions.clear()
+    first = TestClient(FaNestFactory.create(SharedSessionModule))
+    second = TestClient(FaNestFactory.create(SharedSessionModule))
+
+    set_response = first.get("/session/set")
+    assert set_response.json() == {"ok": True}
+    cookie = set_response.cookies.get("session")
+    assert cookie is not None
+
+    assert second.get("/session/get", cookies={"session": cookie}).json() == {"user": "Ada"}
 
 
 @Module(

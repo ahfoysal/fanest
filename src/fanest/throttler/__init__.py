@@ -1,3 +1,17 @@
-from fanest.throttler.module import Throttle, ThrottlerGuard, ThrottlerModule, ThrottlerService
+from fanest.throttler.module import (
+    MemoryThrottlerStore,
+    RedisThrottlerStore,
+    Throttle,
+    ThrottlerGuard,
+    ThrottlerModule,
+    ThrottlerService,
+)
 
-__all__ = ["Throttle", "ThrottlerGuard", "ThrottlerModule", "ThrottlerService"]
+__all__ = [
+    "MemoryThrottlerStore",
+    "RedisThrottlerStore",
+    "Throttle",
+    "ThrottlerGuard",
+    "ThrottlerModule",
+    "ThrottlerService",
+]
