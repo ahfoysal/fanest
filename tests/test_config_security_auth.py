@@ -7,7 +7,7 @@ from typing import Any, cast
 from fanest import Controller, FaNestFactory, Get, Module, UseGuards
 from fanest.auth import AuthModule, JwtAuthGuard, JwtService
 from fanest.config import ConfigModule, ConfigService
-from fanest.security import HelmetModule
+from fanest.security import CsrfModule, HelmetModule, PasswordHasher, UnsupportedSecurityFeatureError
 
 
 @Controller("secure")
@@ -203,6 +203,37 @@ def test_config_nested_lookup_strict_bool_and_expanded_env_file(tmp_path, monkey
         config.get("FEATURE_FLAG", cast=bool)
 
 
+def test_config_advanced_options_ignore_sources_and_load_namespaces(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("APP_MODE=file\n", encoding="utf-8")
+    monkeypatch.setenv("APP_MODE", "process")
+    monkeypatch.setenv("SECRET_FROM_ENV", "hidden")
+
+    @Module(
+        imports=[
+            ConfigModule.for_root(
+                env_file=str(env_file),
+                ignore_env_file=True,
+                ignore_env_vars=True,
+                load=[lambda: {"database": {"host": "db.internal", "port": "5432"}}],
+                values={"APP_MODE": "explicit"},
+            )
+        ]
+    )
+    class AdvancedConfigModule:
+        pass
+
+    config = FaNestFactory.create(AdvancedConfigModule).state.fanest_container.resolve(ConfigService)
+    database = config.namespace("database")
+
+    assert config.get("APP_MODE") == "explicit"
+    assert config.has("SECRET_FROM_ENV") is False
+    assert database.get("host") == "db.internal"
+    assert database.get("port", cast=int) == 5432
+    with pytest.raises(TypeError, match="not an object"):
+        config.namespace("APP_MODE")
+
+
 class AsyncConfigSchema(BaseModel):
     app_name: str
     database: dict[str, int]
@@ -257,6 +288,28 @@ def test_security_headers_merge_defaults_and_reject_injection():
 
     with pytest.raises(ValueError, match="newline"):
         HelmetModule.for_root(headers={"x-test": "ok\r\nset-cookie: stolen=true"})
+
+
+def test_csrf_module_fails_explicitly_until_a_real_middleware_is_supported():
+    with pytest.raises(UnsupportedSecurityFeatureError, match="CSRF protection is not built into FaNest"):
+        CsrfModule.for_root()
+
+
+def test_password_hasher_uses_salted_pbkdf2_and_constant_time_verify():
+    hasher = PasswordHasher(iterations=100_000)
+
+    first = hasher.hash("correct horse battery staple")
+    second = hasher.hash("correct horse battery staple")
+
+    assert first != second
+    assert hasher.verify("correct horse battery staple", first)
+    assert not hasher.verify("wrong password", first)
+    assert not hasher.verify("correct horse battery staple", "not-a-valid-hash")
+    assert not hasher.verify("correct horse battery staple", "pbkdf2_not-real$100000$c2FsdA$ZGlnZXN0")
+
+    with pytest.raises(ValueError, match="iterations"):
+        PasswordHasher(iterations=99_999)
+
 
     with pytest.raises(ValueError, match="names cannot be empty"):
         HelmetModule.for_root(headers={"   ": "bad"})

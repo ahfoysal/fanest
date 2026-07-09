@@ -2,7 +2,21 @@ from fastapi import UploadFile
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from fanest import Cookie, Controller, FaNestFactory, Get, Header, Module, Param, Post, Query, UploadedFile, UploadedFiles
+from fanest import (
+    Cookie,
+    Controller,
+    FaNestFactory,
+    FilesInterceptor,
+    Get,
+    Header,
+    Module,
+    Param,
+    Post,
+    Query,
+    UploadedFile,
+    UploadedFiles,
+    UseInterceptors,
+)
 from fanest.swagger import (
     ApiBearerAuth,
     ApiBasicAuth,
@@ -163,8 +177,14 @@ class DocsController:
 
     @ApiConsumes("multipart/form-data")
     @Post("/uploads")
+    @UseInterceptors(FilesInterceptor("photos", max_count=3))
     async def uploads(self, files=UploadedFiles("photos")):
         return {"count": len(files)}
+
+    @Post("/implicit-upload")
+    @UseInterceptors(FilesInterceptor("attachments", max_count=2))
+    async def implicit_upload(self, attachments=UploadedFiles("attachments", default=None)):
+        return {"count": len(attachments or [])}
 
 
 @ApiExcludeController()
@@ -285,8 +305,16 @@ def test_swagger_decorators_and_module_setup():
     uploads_schema_name = uploads_schema_ref.rsplit("/", 1)[-1]
     uploads_schema = document["components"]["schemas"][uploads_schema_name]
     assert uploads_schema["required"] == ["photos"]
+    assert uploads_schema["properties"]["photos"]["maxItems"] == 3
     assert uploads_schema["properties"]["photos"]["items"]["type"] == "string"
+    assert uploads_schema["properties"]["photos"]["items"]["format"] == "binary"
     assert uploads_schema["properties"]["photos"]["items"]["contentMediaType"] == "application/octet-stream"
+    implicit_operation = client.get("/api-docs/openapi.json").json()["paths"][
+        "/docs/implicit-upload"
+    ]["post"]
+    implicit_schema = implicit_operation["requestBody"]["content"]["multipart/form-data"]["schema"]
+    assert implicit_schema["properties"]["attachments"]["maxItems"] == 2
+    assert "required" not in implicit_schema
     assert "/docs/internal" not in client.get("/api-docs/openapi.json").json()["paths"]
     assert "/hidden-docs/" not in client.get("/api-docs/openapi.json").json()["paths"]
     assert CreateDocDto.model_json_schema()["properties"]["title"]["description"] == "Document title"

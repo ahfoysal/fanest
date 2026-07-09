@@ -1,9 +1,11 @@
 from pathlib import Path
+import code
 import compileall
 from contextlib import contextmanager
 import errno
 import importlib
 import importlib.metadata as importlib_metadata
+import json
 import keyword
 import platform
 import py_compile
@@ -20,6 +22,8 @@ app = typer.Typer(help="FaNest command line tools.")
 generate_app = typer.Typer(help="Generate FaNest artifacts.")
 app.add_typer(generate_app, name="generate")
 app.add_typer(generate_app, name="g", help="Alias for generate.")
+
+WORKSPACE_CONFIG = "fanest.json"
 
 
 @app.command()
@@ -84,6 +88,7 @@ def workspace(
         force=force,
     )
     _write_file(root / "pyproject.toml", _workspace_pyproject_template(name), dry_run, force=force)
+    _write_file(root / WORKSPACE_CONFIG, _workspace_config_template("api"), dry_run, force=force)
     _write_file(root / ".gitignore", _gitignore_template(), dry_run, force=force)
     typer.echo(f"Created FaNest workspace in {root}")
 
@@ -171,6 +176,33 @@ def check(
     typer.echo(f"Application target OK: {app_path}")
 
 
+@app.command()
+def repl(
+    path: str = typer.Argument("main.py"),
+    app_name: str = typer.Option("app", "--app"),
+    command: str | None = typer.Option(None, "--command", "-c"),
+) -> None:
+    app_path, app_dir = _resolve_app_target(path, app_name)
+    module_name, _, attribute = app_path.partition(":")
+    module = _load_check_module(path, module_name, app_dir)
+    if not hasattr(module, attribute):
+        raise typer.BadParameter(f"Application attribute not found: {attribute}")
+    application = getattr(module, attribute)
+    if hasattr(application, "build"):
+        application = application.build()
+    namespace = {
+        "app": application,
+        "graph": _repl_graph(application),
+        "module": module,
+        attribute: application,
+    }
+    typer.echo(f"FaNest REPL loaded {app_path}")
+    if command:
+        exec(command, namespace)
+        return
+    code.interact(local=namespace, banner="")
+
+
 def _load_check_module(path: str, module_name: str, app_dir: Path | None = None):
     source = Path(path)
     if source.exists() and source.is_file() and source.suffix == ".py":
@@ -245,14 +277,22 @@ def generate_resource(
     dry_run: bool = typer.Option(False, "--dry-run"),
     force: bool = typer.Option(False, "--force"),
     module: str | None = typer.Option(None, "--module"),
+    project: str | None = typer.Option(None, "--project", "-p"),
 ) -> None:
     name = _artifact_name(name)
-    resource = _resource_dir(name, dry_run, exist_ok=force)
+    source_root = _source_root(project)
+    resource = _resource_dir(name, dry_run, exist_ok=force, source_root=source_root)
     class_name = _class_name(name)
     _write_file(resource / f"{name}_service.py", _service_template(class_name), dry_run, force=force)
     _write_file(
         resource / f"{name}_controller.py",
         _controller_template(name, class_name),
+        dry_run,
+        force=force,
+    )
+    _write_file(
+        resource / f"{name}_dto.py",
+        _dto_template(class_name),
         dry_run,
         force=force,
     )
@@ -263,7 +303,7 @@ def generate_resource(
         force=force,
     )
     if module:
-        _register_module_import(module, name, class_name, dry_run)
+        _register_module_import(module, name, class_name, dry_run, source_root=source_root)
     typer.echo(f"Generated resource {name}")
 
 
@@ -275,14 +315,16 @@ def generate_module(
     force: bool = typer.Option(False, "--force"),
     flat: bool = typer.Option(False, "--flat"),
     module: str | None = typer.Option(None, "--module"),
+    project: str | None = typer.Option(None, "--project", "-p"),
 ) -> None:
     name = _artifact_name(name)
-    resource = _resource_dir(name, dry_run)
+    source_root = _source_root(project)
+    resource = _resource_dir(name, dry_run, source_root=source_root)
     class_name = _class_name(name)
-    target = Path("src") / f"{name}_module.py" if flat else resource / f"{name}_module.py"
+    target = source_root / f"{name}_module.py" if flat else resource / f"{name}_module.py"
     _write_file(target, _module_template(name, class_name), dry_run, force=force)
     if module:
-        _register_module_import(module, name, class_name, dry_run)
+        _register_module_import(module, name, class_name, dry_run, source_root=source_root)
     typer.echo(f"Generated module {name}")
 
 
@@ -292,9 +334,10 @@ def generate_controller(
     name: str,
     dry_run: bool = typer.Option(False, "--dry-run"),
     force: bool = typer.Option(False, "--force"),
+    project: str | None = typer.Option(None, "--project", "-p"),
 ) -> None:
     name = _artifact_name(name)
-    resource = _resource_dir(name, dry_run)
+    resource = _resource_dir(name, dry_run, source_root=_source_root(project))
     class_name = _class_name(name)
     _write_file(
         resource / f"{name}_controller.py",
@@ -311,9 +354,10 @@ def generate_service(
     name: str,
     dry_run: bool = typer.Option(False, "--dry-run"),
     force: bool = typer.Option(False, "--force"),
+    project: str | None = typer.Option(None, "--project", "-p"),
 ) -> None:
     name = _artifact_name(name)
-    resource = _resource_dir(name, dry_run)
+    resource = _resource_dir(name, dry_run, source_root=_source_root(project))
     class_name = _class_name(name)
     _write_file(resource / f"{name}_service.py", _service_template(class_name), dry_run, force=force)
     typer.echo(f"Generated service {name}")
@@ -452,11 +496,19 @@ def generate_application(
     force: bool = typer.Option(False, "--force"),
 ) -> None:
     name = _artifact_name(name)
-    target = Path("apps") / name
+    project_root = Path("apps") / name
+    target = _workspace_scaffold_path(project_root)
     _write_file(target / "src" / "__init__.py", "", dry_run, force=force)
     _write_file(target / "src" / "main.py", _main_template(), dry_run, force=force)
     _write_file(target / "main.py", _workspace_entrypoint_template(), dry_run, force=force)
     _write_file(target / "tests" / "test_app.py", _project_test_template(), dry_run, force=force)
+    _update_workspace_project(
+        name,
+        project_type="application",
+        root=project_root,
+        source_root=project_root / "src",
+        dry_run=dry_run,
+    )
     typer.echo(f"Generated application {name}")
 
 
@@ -468,9 +520,10 @@ def generate_library(
     force: bool = typer.Option(False, "--force"),
 ) -> None:
     name = _artifact_name(name)
-    target = Path("libs") / name
+    project_root = Path("libs") / name
+    target = _workspace_scaffold_path(project_root)
     class_name = _class_name(name)
-    _write_file(Path("libs") / "__init__.py", "", dry_run, force=force)
+    _write_file(_workspace_scaffold_path(Path("libs")) / "__init__.py", "", dry_run, force=force)
     _write_file(
         target / "__init__.py",
         f"from .{name}_module import {class_name}Module\n",
@@ -478,6 +531,13 @@ def generate_library(
         force=force,
     )
     _write_file(target / f"{name}_module.py", _library_template(class_name), dry_run, force=force)
+    _update_workspace_project(
+        name,
+        project_type="library",
+        root=project_root,
+        source_root=project_root,
+        dry_run=dry_run,
+    )
     typer.echo(f"Generated library {name}")
 
 
@@ -574,6 +634,25 @@ def generate_repository(
     typer.echo(f"Generated repository {name}")
 
 
+@generate_app.command("command")
+@generate_app.command("cmd")
+def generate_command(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
+    resource = _resource_dir(name, dry_run)
+    class_name = _class_name(name)
+    _write_file(
+        resource / f"{name}_command.py",
+        _command_template(name, class_name),
+        dry_run,
+        force=force,
+    )
+    typer.echo(f"Generated command {name}")
+
+
 @generate_app.command("test")
 @generate_app.command("spec")
 def generate_test(
@@ -622,20 +701,130 @@ def _class_name(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_"))
 
 
-def _ensure_resource_dir(name: str, *, exist_ok: bool = True) -> Path:
-    Path("src").mkdir(exist_ok=True)
-    (Path("src") / "__init__.py").touch()
-    resource = Path("src") / name
+def _source_root(project: str | None = None) -> Path:
+    workspace_root = _find_workspace_root()
+    if workspace_root is None:
+        if project:
+            raise typer.BadParameter("--project requires a FaNest workspace with fanest.json.")
+        return Path("src")
+    config = _load_workspace_config(workspace_root)
+    project_name = project or _current_workspace_project(workspace_root, config) or config.get("defaultProject")
+    projects = config.get("projects", {})
+    if not isinstance(project_name, str) or project_name not in projects:
+        available = ", ".join(sorted(projects)) or "none"
+        raise typer.BadParameter(f"Unknown workspace project {project_name!r}. Available projects: {available}.")
+    project_config = projects[project_name]
+    if not isinstance(project_config, dict) or not isinstance(project_config.get("sourceRoot"), str):
+        raise typer.BadParameter(f"Workspace project {project_name!r} is missing sourceRoot.")
+    return _workspace_path(workspace_root, project_config["sourceRoot"])
+
+
+def _find_workspace_root(start: Path | None = None) -> Path | None:
+    current = (start or Path.cwd()).resolve()
+    candidates = [current, *current.parents]
+    for candidate in candidates:
+        if (candidate / WORKSPACE_CONFIG).exists():
+            return candidate
+    return None
+
+
+def _load_workspace_config(root: Path) -> dict[str, Any]:
+    try:
+        config = json.loads((root / WORKSPACE_CONFIG).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"Invalid {WORKSPACE_CONFIG}: {exc}") from exc
+    if not isinstance(config, dict):
+        raise typer.BadParameter(f"{WORKSPACE_CONFIG} must contain a JSON object.")
+    config.setdefault("projects", {})
+    return config
+
+
+def _current_workspace_project(root: Path, config: dict[str, Any]) -> str | None:
+    cwd = Path.cwd().resolve()
+    projects = config.get("projects", {})
+    if not isinstance(projects, dict):
+        return None
+    for name, project in projects.items():
+        if not isinstance(project, dict) or not isinstance(project.get("root"), str):
+            continue
+        project_root = _workspace_path(root, project["root"]).resolve()
+        try:
+            cwd.relative_to(project_root)
+        except ValueError:
+            continue
+        return str(name)
+    return None
+
+
+def _workspace_path(root: Path, value: str | Path) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    absolute = root / path
+    try:
+        return absolute.resolve().relative_to(Path.cwd().resolve())
+    except ValueError:
+        return absolute
+
+
+def _workspace_scaffold_path(path: Path) -> Path:
+    workspace_root = _find_workspace_root()
+    if workspace_root is None:
+        return path
+    return _workspace_path(workspace_root, path)
+
+
+def _update_workspace_project(
+    name: str,
+    *,
+    project_type: str,
+    root: Path,
+    source_root: Path,
+    dry_run: bool,
+) -> None:
+    workspace_root = _find_workspace_root()
+    if workspace_root is None:
+        return
+    config = _load_workspace_config(workspace_root)
+    projects = config.setdefault("projects", {})
+    if not isinstance(projects, dict):
+        raise typer.BadParameter("Workspace config projects must be an object.")
+    projects[name] = {
+        "type": project_type,
+        "root": root.as_posix(),
+        "sourceRoot": source_root.as_posix(),
+    }
+    if dry_run:
+        typer.echo(f"Would update {workspace_root / WORKSPACE_CONFIG} with {name}")
+        return
+    (workspace_root / WORKSPACE_CONFIG).write_text(_json_template(config), encoding="utf-8")
+
+
+def _ensure_resource_dir(
+    name: str,
+    *,
+    exist_ok: bool = True,
+    source_root: Path = Path("src"),
+) -> Path:
+    source_root.mkdir(parents=True, exist_ok=True)
+    (source_root / "__init__.py").touch()
+    resource = source_root / name
     resource.mkdir(parents=True, exist_ok=exist_ok)
     (resource / "__init__.py").touch()
     return resource
 
 
-def _resource_dir(name: str, dry_run: bool, *, exist_ok: bool = True) -> Path:
+def _resource_dir(
+    name: str,
+    dry_run: bool,
+    *,
+    exist_ok: bool = True,
+    source_root: Path = Path("src"),
+) -> Path:
     _validate_artifact_name(name)
     if dry_run:
-        return Path("src") / name
-    return _ensure_resource_dir(name, exist_ok=exist_ok)
+        return source_root / name
+    return _ensure_resource_dir(name, exist_ok=exist_ok, source_root=source_root)
 
 
 def _write_file(path: Path, content: str, dry_run: bool, *, force: bool = False) -> None:
@@ -785,11 +974,60 @@ def _port_in_use_error(port: int) -> None:
     raise typer.Exit(1)
 
 
-def _register_module_import(parent_module: str, child_name: str, child_class: str, dry_run: bool) -> None:
+def _repl_graph(application: Any) -> dict[str, Any]:
+    state = getattr(application, "state", None)
+    container = getattr(state, "fanest_container", None)
+    root_module = getattr(state, "fanest_root_module", None)
+    routes = []
+    for route in getattr(application, "routes", []):
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", None)
+        if path is None or methods is None:
+            continue
+        routes.append({"path": path, "methods": sorted(methods)})
+    graph: dict[str, Any] = {
+        "root_module": _display_name(root_module),
+        "routes": routes,
+    }
+    if container is not None:
+        module_providers = getattr(container, "_module_providers", {})
+        module_imports = getattr(container, "_module_imports", {})
+        graph["modules"] = [
+            {
+                "name": _display_name(module),
+                "imports": [_display_name(imported) for imported in module_imports.get(module, [])],
+                "providers": [_display_name(token) for token in providers],
+            }
+            for module, providers in module_providers.items()
+        ]
+    else:
+        graph["modules"] = []
+    return graph
+
+
+def _display_name(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    name = getattr(value, "__name__", None)
+    if isinstance(name, str):
+        return name
+    return value.__class__.__name__
+
+
+def _register_module_import(
+    parent_module: str,
+    child_name: str,
+    child_class: str,
+    dry_run: bool,
+    *,
+    source_root: Path = Path("src"),
+) -> None:
     target = Path(parent_module)
     if not target.exists():
-        target = Path("src") / parent_module
-    import_line = _module_import_line(target, child_name, child_class)
+        target = source_root / parent_module
+    import_line = _module_import_line(target, child_name, child_class, source_root=source_root)
     if dry_run:
         typer.echo(f"Would update {target} with {child_class}Module")
         return
@@ -805,12 +1043,25 @@ def _register_module_import(parent_module: str, child_name: str, child_class: st
     typer.echo(f"Updated {target} with {module_name}")
 
 
-def _module_import_line(target: Path, child_name: str, child_class: str) -> str:
+def _module_import_line(
+    target: Path,
+    child_name: str,
+    child_class: str,
+    *,
+    source_root: Path = Path("src"),
+) -> str:
     child_module = f"{child_name}.{child_name}_module"
+    try:
+        target.resolve().relative_to(source_root.resolve())
+    except ValueError:
+        pass
+    else:
+        return f"from .{child_module} import {child_class}Module\n"
     try:
         target.relative_to(Path("src"))
     except ValueError:
-        return f"from src.{child_module} import {child_class}Module\n"
+        package = source_root.name
+        return f"from {package}.{child_module} import {child_class}Module\n"
     return f"from .{child_module} import {child_class}Module\n"
 
 
@@ -923,9 +1174,34 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["apps/api/tests"]
 
+[tool.fanest.scripts]
+"start:api" = "fanest dev apps/api/main.py"
+"build:api" = "fanest build apps/api"
+
 [tool.ruff]
 line-length = 100
 '''
+
+
+def _workspace_config_template(default_project: str) -> str:
+    return _json_template(
+        {
+            "version": 1,
+            "defaultProject": default_project,
+            "projects": {
+                default_project: {
+                    "type": "application",
+                    "root": f"apps/{default_project}",
+                    "sourceRoot": f"apps/{default_project}/src",
+                    "entryFile": "main",
+                }
+            },
+        }
+    )
+
+
+def _json_template(data: dict[str, Any]) -> str:
+    return json.dumps(data, indent=2, sort_keys=True) + "\n"
 
 
 def _gitignore_template() -> str:
@@ -965,14 +1241,42 @@ def _service_template(class_name: str) -> str:
 
 @Injectable()
 class {class_name}Service:
+    def __init__(self):
+        self._items = []
+        self._next_id = 1
+
     async def find_all(self):
-        return []
+        return self._items
+
+    async def find_one(self, item_id: int):
+        return next((item for item in self._items if item["id"] == item_id), None)
+
+    async def create(self, data):
+        item = {{"id": self._next_id, **data.model_dump(exclude_unset=True)}}
+        self._next_id += 1
+        self._items.append(item)
+        return item
+
+    async def update(self, item_id: int, data):
+        item = await self.find_one(item_id)
+        if item is None:
+            return None
+        item.update(data.model_dump(exclude_unset=True))
+        return item
+
+    async def remove(self, item_id: int):
+        item = await self.find_one(item_id)
+        if item is None:
+            return None
+        self._items.remove(item)
+        return item
 '''
 
 
 def _controller_template(name: str, class_name: str) -> str:
-    return f'''from fanest import Controller, Get
+    return f'''from fanest import Body, Controller, Delete, Get, Param, Patch, Post
 
+from .{name}_dto import Create{class_name}Dto, Update{class_name}Dto
 from .{name}_service import {class_name}Service
 
 
@@ -984,6 +1288,26 @@ class {class_name}Controller:
     @Get("/")
     async def find_all(self):
         return await self.{name}_service.find_all()
+
+    @Get("/{{item_id}}")
+    async def find_one(self, item_id: int = Param("item_id")):
+        return await self.{name}_service.find_one(item_id)
+
+    @Post("/")
+    async def create(self, data: Create{class_name}Dto = Body()):
+        return await self.{name}_service.create(data)
+
+    @Patch("/{{item_id}}")
+    async def update(
+        self,
+        item_id: int = Param("item_id"),
+        data: Update{class_name}Dto = Body(),
+    ):
+        return await self.{name}_service.update(item_id, data)
+
+    @Delete("/{{item_id}}")
+    async def remove(self, item_id: int = Param("item_id")):
+        return await self.{name}_service.remove(item_id)
 '''
 
 
@@ -1004,6 +1328,7 @@ def _resource_module_template(name: str, class_name: str) -> str:
     return f'''from fanest import Module
 
 from .{name}_controller import {class_name}Controller
+from .{name}_dto import Create{class_name}Dto, Update{class_name}Dto
 from .{name}_service import {class_name}Service
 
 
@@ -1160,6 +1485,23 @@ def _repository_template(class_name: str) -> str:
 class {class_name}Repository:
     async def find_all(self):
         return []
+'''
+
+
+def _command_template(name: str, class_name: str) -> str:
+    return f'''import typer
+
+
+cli = typer.Typer(help="{class_name} command application.")
+
+
+@cli.command("{name}")
+def run() -> None:
+    typer.echo("{name} command executed")
+
+
+if __name__ == "__main__":
+    cli()
 '''
 
 

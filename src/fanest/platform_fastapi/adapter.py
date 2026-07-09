@@ -1,10 +1,11 @@
+import base64
 import inspect
 import json
 import re
 from copy import deepcopy
 from collections.abc import Callable
 from pathlib import Path as FilePath
-from typing import Any
+from typing import Any, cast
 
 from fastapi import Body as FastBody
 from fastapi import BackgroundTasks as FastBackgroundTasks
@@ -17,6 +18,13 @@ from starlette.websockets import WebSocketDisconnect
 
 from fanest.common.pipes import DefaultValuePipe
 from fanest.common.responses import StreamableFile
+from fanest.common.upload import (
+    AnyFilesInterceptor,
+    FileFieldsInterceptor,
+    FileInterceptor,
+    FilesInterceptor,
+)
+from fanest.common.versioning import VERSION_NEUTRAL, VersioningOptions, VersioningType
 from fanest.core.container import FaNestContainer
 from fanest.core.metadata import (
     ControllerMetadata,
@@ -26,7 +34,7 @@ from fanest.core.metadata import (
     ParameterSource,
     RouteMetadata,
 )
-from fanest.websockets import WebSocketManager
+from fanest.websockets import UnsupportedSocketIoProtocolError, WebSocketManager
 
 
 class FastApiAdapter:
@@ -40,6 +48,7 @@ class FastApiAdapter:
         global_pipes: list[object] | None = None,
         global_interceptors: list[object] | None = None,
         global_filters: list[object] | None = None,
+        versioning: VersioningOptions | None = None,
         controller_modules: dict[type, Any] | None = None,
         gateway_modules: dict[type, Any] | None = None,
     ) -> None:
@@ -50,9 +59,11 @@ class FastApiAdapter:
         self.global_pipes = global_pipes if global_pipes is not None else []
         self.global_interceptors = global_interceptors if global_interceptors is not None else []
         self.global_filters = global_filters if global_filters is not None else []
+        self.versioning = versioning
         self.controller_modules = controller_modules or {}
         self.gateway_modules = gateway_modules or {}
         self._parameter_cache: dict[Any, dict[str, inspect.Parameter]] = {}
+        self._non_uri_versioned_routes: set[tuple[str, str]] = set()
 
     def register_controllers(self, controllers: list[type]) -> None:
         for controller in controllers:
@@ -79,19 +90,22 @@ class FastApiAdapter:
             routes.append((route_metadata.path, handler, route_metadata))
 
         for _, handler, route_metadata in sorted(routes, key=self._route_sort_key):
-            version = self._metadata(handler, "__fanest_version__") or getattr(
+            route_version = self._metadata(handler, "__fanest_version__") or getattr(
                 controller, "__fanest_version__", None
             )
-            path = self._join_paths(
-                self.global_prefix,
-                f"v{version}" if version else "",
-                controller_metadata.prefix,
-                route_metadata.path,
+            versioning = self.versioning or (VersioningOptions() if route_version else None)
+            versions = self._route_versions(route_version, versioning)
+            path_versions = (
+                (None,)
+                if versioning is not None and versioning.type != VersioningType.URI
+                else versions
             )
             endpoint = self._endpoint(
                 controller,
                 handler.__name__,
                 handler,
+                route_version=route_version,
+                versioning=versioning,
                 module_key=self.controller_modules.get(controller),
             )
             route_options = dict(route_metadata.options)
@@ -121,6 +135,12 @@ class FastApiAdapter:
                     deepcopy(route_options.get("openapi_extra", {})),
                     deepcopy(pending_openapi_extra or {}),
                 )
+            upload_openapi_extra = self._upload_openapi_extra(controller, handler)
+            if upload_openapi_extra:
+                route_options["openapi_extra"] = self._merge_openapi_extras(
+                    deepcopy(upload_openapi_extra),
+                    deepcopy(route_options.get("openapi_extra", {})),
+                )
             if self._metadata(handler, "__fanest_bearer_auth__") or getattr(
                 controller, "__fanest_bearer_auth__", False
             ):
@@ -135,17 +155,75 @@ class FastApiAdapter:
                 extra = dict(route_options.get("openapi_extra", {}))
                 extra["security"] = [*extra.get("security", []), *securities]
                 route_options["openapi_extra"] = extra
-            self.app.add_api_route(
-                path,
-                endpoint,
-                methods=self._route_methods(route_metadata.method),
-                **route_options,
-            )
+            for version in path_versions:
+                path = self._versioned_path(
+                    controller_metadata.prefix,
+                    route_metadata.path,
+                    version,
+                    versioning,
+                )
+                methods = self._route_methods(route_metadata.method)
+                self._ensure_supported_versioned_route(path, methods, versioning, route_version)
+                self.app.add_api_route(
+                    path,
+                    endpoint,
+                    methods=methods,
+                    **route_options,
+                )
 
     def _route_sort_key(self, route: tuple[str, Callable[..., Any], RouteMetadata]) -> tuple[int, int]:
         path = route[0]
         dynamic_segments = path.count("{")
         return (dynamic_segments, -len(path))
+
+    def _route_versions(
+        self,
+        route_version: Any,
+        versioning: VersioningOptions | None,
+    ) -> tuple[str | None, ...]:
+        if route_version is None:
+            return (versioning.default_version,) if versioning and versioning.default_version else (None,)
+        if route_version == VERSION_NEUTRAL:
+            return (None,)
+        if isinstance(route_version, list | tuple | set):
+            return tuple(str(version) for version in route_version)
+        return (str(route_version),)
+
+    def _versioned_path(
+        self,
+        controller_prefix: str,
+        route_path: str,
+        version: str | None,
+        versioning: VersioningOptions | None,
+    ) -> str:
+        version_prefix = ""
+        if version and (versioning is None or versioning.type == VersioningType.URI):
+            prefix = versioning.prefix if versioning is not None else "v"
+            version_prefix = f"{prefix}{version}" if prefix else version
+        return self._join_paths(
+            self.global_prefix,
+            version_prefix,
+            controller_prefix,
+            route_path,
+        )
+
+    def _ensure_supported_versioned_route(
+        self,
+        path: str,
+        methods: list[str],
+        versioning: VersioningOptions | None,
+        route_version: Any,
+    ) -> None:
+        if route_version is None or versioning is None or versioning.type == VersioningType.URI:
+            return
+        for method in methods:
+            key = (method, path)
+            if key in self._non_uri_versioned_routes:
+                raise RuntimeError(
+                    "Header, media-type, and custom versioning do not yet support "
+                    f"multiple handlers for {method} {path}."
+                )
+            self._non_uri_versioned_routes.add(key)
 
     def _register_gateway(self, gateway: type) -> None:
         gateway_metadata: GatewayMetadata | None = getattr(gateway, "__fanest_gateway__", None)
@@ -163,7 +241,10 @@ class FastApiAdapter:
 
         async def websocket_endpoint(websocket: WebSocket) -> None:
             instance = await self.container.resolve_async(gateway, module_key=module_key)
-            handlers = {event: getattr(instance, name) for event, name in handlers_meta.items()}
+            handlers: dict[str, Callable[..., Any]] = {
+                event: cast(Callable[..., Any], getattr(instance, name))
+                for event, name in handlers_meta.items()
+            }
             connection_context = ExecutionContext(
                 handler=getattr(instance, "on_connect", instance),
                 controller=instance,
@@ -179,7 +260,14 @@ class FastApiAdapter:
                 await websocket.accept()
             except (RuntimeError, WebSocketDisconnect):
                 return
-            self.container.resolve(WebSocketManager).connect(websocket)
+            engineio_error = self._engineio_transport_error(websocket)
+            if engineio_error is not None:
+                await self._send_websocket_event(websocket, "error", engineio_error)
+                await self._close_websocket_safely(websocket, code=1003)
+                return
+            websocket_manager = self.container.resolve(WebSocketManager)
+            websocket_manager.connect(websocket)
+            await websocket_manager.emit_lifecycle("connect", websocket)
             connect_hook = getattr(instance, "on_connect", None)
             if connect_hook is not None:
                 try:
@@ -209,7 +297,11 @@ class FastApiAdapter:
             try:
                 while True:
                     try:
-                        payload = await websocket.receive_json()
+                        payload = await self._receive_websocket_payload(websocket)
+                    except UnsupportedSocketIoProtocolError as exc:
+                        if not await self._send_websocket_event(websocket, "error", str(exc)):
+                            break
+                        continue
                     except ValueError as exc:
                         if not await self._send_websocket_event(
                             websocket,
@@ -236,26 +328,53 @@ class FastApiAdapter:
                         ):
                             break
                         continue
-                    handler = handlers.get(event)
-                    if handler is None:
-                        if not await self._send_websocket_event(websocket, "error", "Unknown event"):
+                    try:
+                        namespace = self._websocket_namespace(payload)
+                    except ValueError as exc:
+                        if not await self._send_websocket_event(websocket, "error", str(exc)):
                             break
                         continue
+                    if not self.container.resolve(WebSocketManager).in_namespace(websocket, namespace):
+                        if not await self._send_websocket_event(
+                            websocket,
+                            "error",
+                            f"Socket is not connected to namespace {namespace}",
+                            namespace=namespace,
+                        ):
+                            break
+                        continue
+                    handler = handlers.get(event)
+                    if handler is None:
+                        if not await self._send_websocket_event(
+                            websocket,
+                            "error",
+                            "Unknown event",
+                            namespace=namespace,
+                        ):
+                            break
+                        continue
+                    handler_callable = handler
                     context = ExecutionContext(
-                        handler=handler,
+                        handler=handler_callable,
                         controller=instance,
                         request=websocket,
-                        kwargs={"data": data, "websocket": websocket},
+                        kwargs={"data": data, "websocket": websocket, "namespace": namespace},
                     )
                     try:
-                        await self._run_guards(instance, handler, context)
-                        data = await self._run_websocket_pipes(instance, handler, data, context)
+                        await self._run_guards(instance, handler_callable, context)
+                        data = await self._run_websocket_pipes(instance, handler_callable, data, context)
                         context.kwargs.clear()
                         context.kwargs.update(
-                            await self._bind_websocket_parameters(handler, data, websocket, context)
+                            await self._bind_websocket_parameters(
+                                handler_callable,
+                                data,
+                                websocket,
+                                context,
+                                namespace=namespace,
+                            )
                         )
                     except Exception as exc:
-                        handled = await self._run_filters_safe(instance, handler, context, exc)
+                        handled = await self._run_filters_safe(instance, handler_callable, context, exc)
                         if not await self._send_websocket_event(
                             websocket,
                             "error",
@@ -264,9 +383,18 @@ class FastApiAdapter:
                             break
                         continue
                     try:
-                        result = handler(**context.kwargs)
-                        if inspect.isawaitable(result):
-                            result = await result
+                        async def call_handler() -> Any:
+                            handler_result = handler_callable(**context.kwargs)
+                            if inspect.isawaitable(handler_result):
+                                handler_result = await handler_result
+                            return handler_result
+
+                        result = await self._run_interceptors(
+                            instance,
+                            handler_callable,
+                            context,
+                            call_handler,
+                        )
                     except Exception as exc:
                         handled = await self._run_filters_safe(instance, handler, context, exc)
                         if not await self._send_websocket_event(
@@ -282,15 +410,41 @@ class FastApiAdapter:
                                 websocket,
                                 result["event"],
                                 result["data"],
+                                namespace=namespace,
                             ):
                                 break
                             continue
-                        if not await self._send_websocket_event(websocket, event, result):
+                        ack_id = self._websocket_ack_id(payload)
+                        if ack_id is not None:
+                            if not await self._send_websocket_ack(
+                                websocket,
+                                ack_id,
+                                event,
+                                result,
+                                namespace=namespace,
+                            ):
+                                break
+                            continue
+                        if not await self._send_websocket_event(websocket, event, result, namespace=namespace):
+                            break
+                    else:
+                        ack_id = self._websocket_ack_id(payload)
+                        if ack_id is not None and not await self._send_websocket_ack(
+                            websocket,
+                            ack_id,
+                            event,
+                            None,
+                            namespace=namespace,
+                        ):
                             break
             except WebSocketDisconnect:
                 pass
             finally:
-                self.container.resolve(WebSocketManager).disconnect(websocket)
+                websocket_manager = self.container.resolve(WebSocketManager)
+                namespaces = list(websocket_manager._socket_namespaces.get(websocket, {"/"}))
+                for namespace in namespaces:
+                    await websocket_manager.emit_lifecycle("disconnect", websocket, namespace)
+                websocket_manager.disconnect(websocket)
                 await self._run_websocket_disconnect_hook(instance, websocket)
 
         self.app.add_api_websocket_route(path, websocket_endpoint)
@@ -314,6 +468,8 @@ class FastApiAdapter:
         controller_class: type,
         handler_name: str,
         handler_function: Callable[..., Any],
+        route_version: Any = None,
+        versioning: VersioningOptions | None = None,
         module_key: Any | None = None,
     ) -> Callable[..., Any]:
         async def endpoint(
@@ -325,6 +481,7 @@ class FastApiAdapter:
             kwargs = self._restore_reserved_user_parameter_names(handler_function, kwargs)
             request_scope = self.container.begin_request()
             end_request_on_return = True
+            self._attach_raw_body(request)
             controller = await self.container.resolve_async(controller_class, module_key=module_key)
             handler = getattr(controller, handler_name)
             context = ExecutionContext(
@@ -334,6 +491,7 @@ class FastApiAdapter:
                 kwargs=kwargs,
             )
             try:
+                self._ensure_request_version(request, route_version, versioning)
                 await self._run_guards(controller, handler, context)
                 context.kwargs.update(self._bind_request_parameters(handler, request, kwargs))
                 context.kwargs.update(self._bind_response_parameters(handler, response, kwargs))
@@ -418,6 +576,43 @@ class FastApiAdapter:
         setattr(endpoint, "__fanest_handler_name__", handler_name)
         setattr(endpoint, "__fanest_module_key__", module_key)
         return endpoint
+
+    def _ensure_request_version(
+        self,
+        request: Request,
+        route_version: Any,
+        versioning: VersioningOptions | None,
+    ) -> None:
+        if route_version is None or versioning is None or versioning.type == VersioningType.URI:
+            return
+        if route_version == VERSION_NEUTRAL:
+            return
+        route_versions = {str(version) for version in self._route_versions(route_version, versioning) if version}
+        if not route_versions:
+            return
+        request_versions = set(self._extract_request_versions(request, versioning))
+        if request_versions & route_versions:
+            return
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    def _extract_request_versions(self, request: Request, versioning: VersioningOptions) -> list[str]:
+        if versioning.type == VersioningType.HEADER:
+            value = request.headers.get(versioning.header)
+            return [value] if value else []
+        if versioning.type == VersioningType.MEDIA_TYPE:
+            accept = request.headers.get("accept", "")
+            pattern = rf"(?:^|[;\s,]){re.escape(versioning.key)}=(?P<version>[^;\s,]+)"
+            return [match.group("version") for match in re.finditer(pattern, accept)]
+        if versioning.type == VersioningType.CUSTOM:
+            if versioning.extractor is None:
+                raise RuntimeError("Custom versioning requires an extractor.")
+            value = versioning.extractor(request)
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [value]
+            return [str(item) for item in value]
+        return []
 
     def _build_signature(self, handler: Callable[..., Any]) -> inspect.Signature:
         original = inspect.signature(handler)
@@ -699,6 +894,13 @@ class FastApiAdapter:
                 bound[name] = request
         return bound
 
+    def _attach_raw_body(self, request: Request) -> None:
+        if "fanest.raw_body" not in request.scope:
+            return
+        raw_body = request.scope["fanest.raw_body"]
+        request.state.raw_body = raw_body
+        setattr(request, "raw_body", raw_body)
+
     def _bind_header_parameters(
         self, handler: Callable[..., Any], request: Request, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
@@ -853,6 +1055,8 @@ class FastApiAdapter:
         data: Any,
         websocket: WebSocket,
         context: ExecutionContext,
+        *,
+        namespace: str = "/",
     ) -> dict[str, Any]:
         bound: dict[str, Any] = {}
         for name, parameter in self._parameters(handler).items():
@@ -874,6 +1078,8 @@ class FastApiAdapter:
                 bound[name] = data
             elif name == "websocket":
                 bound[name] = websocket
+            elif name == "namespace":
+                bound[name] = namespace
         return bound
 
     async def _run_websocket_disconnect_hook(self, instance: Any, websocket: WebSocket) -> None:
@@ -950,7 +1156,11 @@ class FastApiAdapter:
             if isinstance(handled, memoryview):
                 handled = handled.tobytes()
             if isinstance(handled, bytes):
-                return handled.decode("utf-8")
+                return self._websocket_binary_payload(handled)
+            if isinstance(handled, dict):
+                return {str(key): self._websocket_payload(value) for key, value in handled.items()}
+            if isinstance(handled, list | tuple):
+                return [self._websocket_payload(value) for value in handled]
             return handled
         body = getattr(handled, "body", b"")
         if isinstance(body, memoryview):
@@ -967,13 +1177,100 @@ class FastApiAdapter:
                 return text
         return text
 
-    async def _send_websocket_event(self, websocket: WebSocket, event: str, data: Any) -> bool:
+    def _websocket_binary_payload(self, data: bytes) -> dict[str, str]:
+        return {
+            "__fanest_binary__": base64.b64encode(data).decode("ascii"),
+            "encoding": "base64",
+        }
+
+    async def _receive_websocket_payload(self, websocket: WebSocket) -> Any:
+        message = await websocket.receive()
+        message_type = message.get("type")
+        if message_type == "websocket.disconnect":
+            raise WebSocketDisconnect(message.get("code", 1000))
+        text = message.get("text")
+        if text is not None:
+            self._ensure_not_socketio_engine_frame(text)
+            return json.loads(text)
+        data = message.get("bytes")
+        if data is not None:
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError("Binary websocket frames must contain UTF-8 JSON envelopes") from exc
+            self._ensure_not_socketio_engine_frame(text)
+            return json.loads(text)
+        raise ValueError("Unsupported websocket frame")
+
+    def _ensure_not_socketio_engine_frame(self, text: str) -> None:
+        stripped = text.strip()
+        if stripped[:1] in {"0", "1", "2", "3", "4", "5", "6"}:
+            raise UnsupportedSocketIoProtocolError(
+                "Native Socket.IO/Engine.IO frames are not supported by this gateway. "
+                "Use FaNest JSON websocket envelopes like {'event': 'name', 'data': ...}."
+            )
+
+    def _engineio_transport_error(self, websocket: WebSocket) -> str | None:
+        transport = websocket.query_params.get("transport")
+        if transport is not None and transport != "websocket":
+            return (
+                f"Unsupported Engine.IO transport mode '{transport}'. "
+                "FaNest websocket gateways only support direct WebSocket connections with JSON envelopes."
+            )
+        if "EIO" in websocket.query_params:
+            return (
+                "Native Engine.IO handshakes are not supported by this gateway. "
+                "Use direct WebSocket connections with FaNest JSON envelopes."
+            )
+        return None
+
+    def _websocket_ack_id(self, payload: dict[str, Any]) -> Any:
+        ack_id = payload.get("ack", payload.get("id"))
+        if isinstance(ack_id, bool):
+            return None
+        return ack_id
+
+    def _websocket_namespace(self, payload: dict[str, Any]) -> str:
+        namespace = payload.get("namespace", payload.get("nsp", "/"))
+        if not isinstance(namespace, str):
+            raise ValueError("Namespace must be a string")
+        stripped = namespace.strip() or "/"
+        return stripped if stripped.startswith("/") else f"/{stripped}"
+
+    async def _send_websocket_ack(
+        self,
+        websocket: WebSocket,
+        ack_id: Any,
+        event: str,
+        data: Any,
+        *,
+        namespace: str = "/",
+    ) -> bool:
+        return await self._send_websocket_event(
+            websocket,
+            "ack",
+            {"id": ack_id, "event": event, "data": self._websocket_payload(data)},
+            namespace=namespace,
+        )
+
+    async def _send_websocket_event(
+        self,
+        websocket: WebSocket,
+        event: str,
+        data: Any,
+        *,
+        namespace: str = "/",
+    ) -> bool:
+        payload = {"event": event, "data": self._websocket_payload(data)}
+        if namespace != "/":
+            payload["namespace"] = namespace
         try:
-            await websocket.send_json({"event": event, "data": self._websocket_payload(data)})
+            await websocket.send_json(payload)
             return True
         except TypeError:
             try:
-                await websocket.send_json({"event": event, "data": str(data)})
+                payload["data"] = str(data)
+                await websocket.send_json(payload)
                 return True
             except (RuntimeError, TypeError, WebSocketDisconnect):
                 self.container.resolve(WebSocketManager).disconnect(websocket)
@@ -1036,6 +1333,74 @@ class FastApiAdapter:
                 self._deep_merge_openapi_extra(target[key], value)
                 continue
             target[key] = value
+
+    def _upload_openapi_extra(
+        self,
+        controller: type,
+        handler: Callable[..., Any],
+    ) -> dict[str, Any] | None:
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        for name, parameter in inspect.signature(handler).parameters.items():
+            if name == "self":
+                continue
+            source = parameter.default
+            if not isinstance(source, ParameterSource) or source.source not in {"file", "files"}:
+                continue
+            field_name = source.name or name
+            schema = self._upload_property_schema(source.source)
+            max_items = self._upload_max_items(controller, handler, field_name, source.source)
+            if max_items is not None and schema.get("type") == "array":
+                schema["maxItems"] = max_items
+            properties[field_name] = schema
+            if self._source_default(source) is ...:
+                required.append(field_name)
+        if not properties:
+            return None
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": properties,
+        }
+        if required:
+            schema["required"] = required
+        return {"requestBody": {"content": {"multipart/form-data": {"schema": schema}}}}
+
+    def _upload_property_schema(self, source: str) -> dict[str, Any]:
+        file_schema = {
+            "type": "string",
+            "format": "binary",
+            "contentMediaType": "application/octet-stream",
+        }
+        if source == "files":
+            return {"type": "array", "items": file_schema}
+        return file_schema
+
+    def _upload_max_items(
+        self,
+        controller: type,
+        handler: Callable[..., Any],
+        field_name: str,
+        source: str,
+    ) -> int | None:
+        if source != "files":
+            return None
+        candidates = [
+            *getattr(controller, "__fanest_interceptors__", []),
+            *getattr(handler, "__fanest_interceptors__", []),
+        ]
+        for interceptor in candidates:
+            instance = interceptor() if inspect.isclass(interceptor) else interceptor
+            if isinstance(instance, FilesInterceptor) and instance.field_name == field_name:
+                return instance.max_count
+            if isinstance(instance, FileFieldsInterceptor):
+                for upload_field in instance.upload_fields:
+                    if upload_field.name == field_name:
+                        return upload_field.max_count
+            if isinstance(instance, AnyFilesInterceptor):
+                return instance.max_count
+            if isinstance(instance, FileInterceptor) and instance.field_name == field_name:
+                return 1
+        return None
 
     def _response_headers(self, controller: Any, handler: Callable[..., Any]) -> list[tuple[str, str]]:
         controller_values = getattr(controller.__class__, "__fanest_response_headers__", [])

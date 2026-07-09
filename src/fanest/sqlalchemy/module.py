@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, NoReturn
 
 from sqlalchemy import and_, or_  # type: ignore[reportAttributeAccessIssue]
 from sqlalchemy import delete as sqlalchemy_delete  # type: ignore[reportAttributeAccessIssue]
@@ -21,10 +21,28 @@ from fanest.core.providers import token
 from fanest.core.providers import use_factory as provider_factory
 
 SQLALCHEMY_OPTIONS = token("SQLALCHEMY_OPTIONS")
+SQLALCHEMY_DATA_SOURCE = token("SQLALCHEMY_DATA_SOURCE")
+SQLALCHEMY_ENTITY_MANAGER = token("SQLALCHEMY_ENTITY_MANAGER")
 _current_session: ContextVar[AsyncSession | None] = ContextVar("fanest_sqlalchemy_session", default=None)
 _root_module_cache: dict[tuple[str, bool, bool], type] = {}
 _async_root_module_cache: dict[tuple[int, tuple[Any, ...], bool], type] = {}
 _feature_module_cache: dict[tuple[type, ...], type] = {}
+
+
+class UnsupportedDatabaseRecipeError(NotImplementedError):
+    """Raised when a NestJS JavaScript ORM recipe has no Python-native adapter."""
+
+
+def _ensure_default_data_source(name: str | None) -> None:
+    if name not in {None, "default"}:
+        raise UnsupportedDatabaseRecipeError(
+            "Named TypeORM data sources are not implemented by FaNest's SQLAlchemy adapter. "
+            "Use a separate SqlAlchemyModule.for_root(...) configuration and inject SqlAlchemyService instead."
+        )
+
+
+def get_current_session() -> AsyncSession | None:
+    return _current_session.get()
 
 
 @Injectable()
@@ -68,6 +86,18 @@ class SqlAlchemyService:
 
     def create_repository(self, model: type) -> "SqlAlchemyRepository":
         return SqlAlchemyRepository(self, model)
+
+    def get_repository(self, model: type) -> "SqlAlchemyRepository":
+        return self.create_repository(model)
+
+    @asynccontextmanager
+    async def session_scope(self) -> AsyncIterator[AsyncSession]:
+        async for session in self.session():
+            yield session
+
+    async def run_in_transaction(self, handler: Callable[[AsyncSession], Awaitable[Any]]) -> Any:
+        async with self.transaction() as session:
+            return await handler(session)
 
     async def close(self) -> None:
         if self._closed:
@@ -323,12 +353,43 @@ class SqlAlchemyRepository:
         await session.commit()
 
 
-def repository_token(model: type):
+def repository_token(model: type, data_source: str | None = None):
+    _ensure_default_data_source(data_source)
     return token(f"SQLALCHEMY_REPOSITORY:{model.__module__}.{model.__name__}")
 
 
-def InjectRepository(model: type):
-    return Inject(repository_token(model))
+def get_repository_token(model: type, data_source: str | None = None):
+    return repository_token(model, data_source=data_source)
+
+
+def get_data_source_token(name: str | None = None) -> Any:
+    _ensure_default_data_source(name)
+    return SQLALCHEMY_DATA_SOURCE
+
+
+def get_entity_manager_token(name: str | None = None) -> Any:
+    _ensure_default_data_source(name)
+    return SQLALCHEMY_ENTITY_MANAGER
+
+
+def get_connection_token(name: str | None = None) -> Any:
+    return get_data_source_token(name)
+
+
+def InjectRepository(model: type, data_source: str | None = None):
+    return Inject(repository_token(model, data_source=data_source))
+
+
+def InjectEntityManager():
+    return Inject(SQLALCHEMY_ENTITY_MANAGER)
+
+
+def InjectDataSource(name: str | None = None):
+    return Inject(get_data_source_token(name))
+
+
+def InjectConnection(name: str | None = None):
+    return InjectDataSource(name)
 
 
 def Transactional(service_attr: str = "db"):
@@ -343,6 +404,10 @@ def Transactional(service_attr: str = "db"):
         return wrapper
 
     return decorator
+
+
+Transaction = Transactional
+InjectManager = InjectEntityManager
 
 
 class MigrationManager:
@@ -380,8 +445,13 @@ class SqlAlchemyModule:
         options = {"database_url": database_url, "echo": echo}
 
         @Module(
-            providers=[use_value(SQLALCHEMY_OPTIONS, options), SqlAlchemyService],
-            exports=[SqlAlchemyService],
+            providers=[
+                use_value(SQLALCHEMY_OPTIONS, options),
+                SqlAlchemyService,
+                provider_factory(SQLALCHEMY_DATA_SOURCE, lambda service: service, inject=[SqlAlchemyService]),
+                provider_factory(SQLALCHEMY_ENTITY_MANAGER, lambda service: service, inject=[SqlAlchemyService]),
+            ],
+            exports=[SqlAlchemyService, SQLALCHEMY_DATA_SOURCE, SQLALCHEMY_ENTITY_MANAGER],
             global_module=is_global,
         )
         class DynamicSqlAlchemyModule:
@@ -405,8 +475,10 @@ class SqlAlchemyModule:
             providers=[
                 provider_factory(SQLALCHEMY_OPTIONS, use_factory, inject=inject or []),
                 SqlAlchemyService,
+                provider_factory(SQLALCHEMY_DATA_SOURCE, lambda service: service, inject=[SqlAlchemyService]),
+                provider_factory(SQLALCHEMY_ENTITY_MANAGER, lambda service: service, inject=[SqlAlchemyService]),
             ],
-            exports=[SqlAlchemyService],
+            exports=[SqlAlchemyService, SQLALCHEMY_DATA_SOURCE, SQLALCHEMY_ENTITY_MANAGER],
             global_module=is_global,
         )
         class DynamicSqlAlchemyModule:
@@ -416,7 +488,7 @@ class SqlAlchemyModule:
         return DynamicSqlAlchemyModule
 
     @staticmethod
-    def for_feature(models: list[type]) -> type:
+    def for_feature(models: list[type] | tuple[type, ...]) -> type:
         cache_key = tuple(models)
         if cache_key in _feature_module_cache:
             return _feature_module_cache[cache_key]
@@ -438,3 +510,39 @@ class SqlAlchemyModule:
 
 
 TypeOrmModule = SqlAlchemyModule
+
+
+class _UnsupportedOrmModule:
+    recipe_name = "ORM"
+    python_equivalent = "SqlAlchemyModule / TypeOrmModule"
+
+    @classmethod
+    def _raise(cls) -> NoReturn:
+        raise UnsupportedDatabaseRecipeError(
+            f"{cls.recipe_name} is a NestJS JavaScript ORM recipe and is not implemented by FaNest. "
+            f"Use the Python-native {cls.python_equivalent} instead."
+        )
+
+    @classmethod
+    def for_root(cls, *args: Any, **kwargs: Any) -> NoReturn:
+        cls._raise()
+
+    @classmethod
+    def for_root_async(cls, *args: Any, **kwargs: Any) -> NoReturn:
+        cls._raise()
+
+    @classmethod
+    def for_feature(cls, *args: Any, **kwargs: Any) -> NoReturn:
+        cls._raise()
+
+
+class SequelizeModule(_UnsupportedOrmModule):
+    recipe_name = "SequelizeModule"
+
+
+class MikroOrmModule(_UnsupportedOrmModule):
+    recipe_name = "MikroOrmModule"
+
+
+class PrismaModule(_UnsupportedOrmModule):
+    recipe_name = "PrismaModule"

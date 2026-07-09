@@ -1,3 +1,15 @@
-from fanest.security.module import HelmetModule, SecurityHeadersMiddleware
+from fanest.security.module import (
+    CsrfModule,
+    HelmetModule,
+    PasswordHasher,
+    SecurityHeadersMiddleware,
+    UnsupportedSecurityFeatureError,
+)
 
-__all__ = ["HelmetModule", "SecurityHeadersMiddleware"]
+__all__ = [
+    "CsrfModule",
+    "HelmetModule",
+    "PasswordHasher",
+    "SecurityHeadersMiddleware",
+    "UnsupportedSecurityFeatureError",
+]

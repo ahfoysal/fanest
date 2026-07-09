@@ -17,9 +17,41 @@ from fanest.core.enhancers import APP_ENHANCER_TOKENS, APP_FILTER, APP_GUARD, AP
 from fanest.core.metadata import ClassProvider, ForwardRef, ValueProvider
 from fanest.core.scanner import ModuleScanner
 from fanest.common.middleware import FaNestMiddlewareAdapter
+from fanest.common.versioning import VersioningOptions, normalize_versioning_options
 from fanest.platform_fastapi.adapter import FastApiAdapter
 from fanest.schedule.registry import SchedulerRegistry
 from fanest.schedule.runner import ScheduleRunner
+
+
+class FaNestRawBodyMiddleware:
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        body = bytearray()
+        messages: list[dict[str, Any]] = []
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message.get("type") == "http.request":
+                body.extend(message.get("body", b""))
+                if not message.get("more_body", False):
+                    break
+            else:
+                break
+        scope["fanest.raw_body"] = bytes(body)
+        iterator = iter(messages)
+
+        async def replay_receive() -> dict[str, Any]:
+            try:
+                return next(iterator)
+            except StopIteration:
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self.app(scope, replay_receive, send)
 
 
 class FaNestFactory:
@@ -40,10 +72,12 @@ class FaNestFactory:
         overrides: dict[type, object] | None = None,
         global_prefix: str = "",
         cors: bool | dict[str, object] = False,
+        raw_body: bool = False,
         global_guards: list[object] | None = None,
         global_pipes: list[object] | None = None,
         global_interceptors: list[object] | None = None,
         global_filters: list[object] | None = None,
+        versioning: VersioningOptions | dict[str, Any] | bool | None = None,
     ) -> FastAPI:
         if version is None:
             version = _DEFAULT_FANEST_VERSION
@@ -59,10 +93,12 @@ class FaNestFactory:
             overrides=overrides,
             global_prefix=global_prefix,
             cors=cors,
+            raw_body=raw_body,
             global_guards=global_guards,
             global_pipes=global_pipes,
             global_interceptors=global_interceptors,
             global_filters=global_filters,
+            versioning=versioning,
         )
 
     @staticmethod
@@ -76,10 +112,12 @@ class FaNestFactory:
         overrides: dict[type, object] | None = None,
         global_prefix: str = "",
         cors: bool | dict[str, object] = False,
+        raw_body: bool = False,
         global_guards: list[object] | None = None,
         global_pipes: list[object] | None = None,
         global_interceptors: list[object] | None = None,
         global_filters: list[object] | None = None,
+        versioning: VersioningOptions | dict[str, Any] | bool | None = None,
     ) -> FastAPI:
         if version is None:
             version = _DEFAULT_FANEST_VERSION
@@ -95,10 +133,12 @@ class FaNestFactory:
             overrides=overrides,
             global_prefix=global_prefix,
             cors=cors,
+            raw_body=raw_body,
             global_guards=global_guards,
             global_pipes=global_pipes,
             global_interceptors=global_interceptors,
             global_filters=global_filters,
+            versioning=versioning,
         )
 
     @staticmethod
@@ -113,10 +153,12 @@ class FaNestFactory:
         overrides: dict[type, object] | None,
         global_prefix: str,
         cors: bool | dict[str, object],
+        raw_body: bool,
         global_guards: list[object] | None,
         global_pipes: list[object] | None,
         global_interceptors: list[object] | None,
         global_filters: list[object] | None,
+        versioning: VersioningOptions | dict[str, Any] | bool | None,
     ) -> FastAPI:
 
         container = FaNestContainer()
@@ -134,7 +176,7 @@ class FaNestFactory:
                     *record.metadata.controllers,
                 ],
                 imports=imports,
-                exports=set(record.metadata.exports),
+                exports=scanner.export_tokens(module_key),
                 global_module=record.metadata.global_module,
             )
         container.register(
@@ -210,7 +252,12 @@ class FaNestFactory:
                 allow_credentials=cast(bool, options.get("allow_credentials", False)),
                 allow_methods=cast(list[str], options.get("allow_methods", ["GET"])),
                 allow_headers=cast(list[str], options.get("allow_headers", [])),
+                allow_origin_regex=cast(str | None, options.get("allow_origin_regex")),
+                expose_headers=cast(list[str], options.get("expose_headers", [])),
+                max_age=cast(int, options.get("max_age", 600)),
             )
+        if raw_body:
+            app.add_middleware(FaNestRawBodyMiddleware)
         for middleware in reversed(scanner.middlewares):
             app.add_middleware(
                 FaNestMiddlewareAdapter,
@@ -220,14 +267,16 @@ class FaNestFactory:
         adapter = FastApiAdapter(
             app=app,
             container=container,
-            global_prefix=global_prefix,
+            global_prefix=FaNestFactory._global_prefix(global_prefix),
             global_guards=resolved_global_guards,
             global_pipes=resolved_global_pipes,
             global_interceptors=resolved_global_interceptors,
             global_filters=resolved_global_filters,
+            versioning=normalize_versioning_options(versioning),
             controller_modules=scanner.controller_modules,
             gateway_modules=scanner.gateway_modules,
         )
+        app.state.fanest_http_adapter = adapter
         adapter.register_controllers(scanner.controllers)
         adapter.register_gateways(scanner.gateways)
         FaNestFactory._register_validation_exception_handler(app, adapter)
@@ -266,6 +315,12 @@ class FaNestFactory:
         for key in ("allow_origins", "allow_methods", "allow_headers", "expose_headers"):
             if key in options:
                 options[key] = FaNestFactory._cors_string_list(key, options[key])
+        if "allow_origin_regex" in options and not isinstance(options["allow_origin_regex"], str | type(None)):
+            raise ValueError("CORS allow_origin_regex must be a string")
+        if "max_age" in options:
+            max_age = options["max_age"]
+            if not isinstance(max_age, int) or max_age < 0:
+                raise ValueError("CORS max_age must be a non-negative integer")
         allow_origins = cast(list[str], options.get("allow_origins", []))
         allow_credentials = cast(bool, options.get("allow_credentials", False))
         if not isinstance(allow_credentials, bool):
@@ -282,9 +337,22 @@ class FaNestFactory:
             values = list(value)
         else:
             raise ValueError(f"CORS {key} must be a string or a list of strings")
+        if any(not isinstance(item, str) for item in values):
+            raise ValueError(f"CORS {key} must contain only strings")
         normalized = [str(item).strip() for item in values]
         if any(not item for item in normalized):
             raise ValueError(f"CORS {key} cannot contain empty values")
+        return normalized
+
+    @staticmethod
+    def _global_prefix(prefix: str) -> str:
+        if not isinstance(prefix, str):
+            raise ValueError("global_prefix must be a string")
+        normalized = prefix.strip("/")
+        if normalized in {"", "."}:
+            return ""
+        if any(part in {"", ".", ".."} for part in normalized.split("/")):
+            raise ValueError("global_prefix cannot contain empty, dot, or parent directory segments")
         return normalized
 
     @staticmethod
@@ -373,6 +441,9 @@ class FaNestFactory:
             schedule_runner = ScheduleRunner(instances, registry=container.resolve(SchedulerRegistry))
             schedule_runner.start()
             yield
+            close_all_microservices = getattr(app, "close_all_microservices", None)
+            if close_all_microservices is not None:
+                await close_all_microservices()
             await schedule_runner.stop()
             for instance in reversed(instances):
                 hook = getattr(instance, "before_application_shutdown", None)

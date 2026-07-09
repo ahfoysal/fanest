@@ -1,16 +1,19 @@
 import logging
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import IntEnum
 from json import dumps
-from typing import Any, TextIO
+from typing import Any, Callable, Iterator, TextIO
 
 from fanest import Injectable, Module, Optional, use_value
 from fanest.core.metadata import InjectMarker
 from fanest.core.providers import token
 
 LOGGER_OPTIONS = token("LOGGER_OPTIONS")
+_REQUEST_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("fanest_logger_request_context", default={})
 
 
 class LogLevel(IntEnum):
@@ -31,6 +34,7 @@ class LoggerOptions:
     handlers: tuple[logging.Handler, ...] = ()
     stream: TextIO | None = None
     extra: dict[str, Any] | None = None
+    exception_reporters: tuple[Callable[[BaseException, dict[str, Any]], Any], ...] = ()
 
 
 class StructuredLogFormatter(logging.Formatter):
@@ -46,6 +50,9 @@ class StructuredLogFormatter(logging.Formatter):
         fanest_context = getattr(record, "fanest_context", None)
         if fanest_context:
             payload["context"] = fanest_context
+        fanest_request_context = getattr(record, "fanest_request_context", None)
+        if fanest_request_context:
+            payload.update(fanest_request_context)
         fanest_extra = getattr(record, "fanest_extra", None)
         if fanest_extra:
             payload.update(fanest_extra)
@@ -69,6 +76,23 @@ class Logger:
 
     def with_context(self, context: str) -> "Logger":
         return self.child(context)
+
+    @staticmethod
+    def current_context() -> dict[str, Any]:
+        return dict(_REQUEST_CONTEXT.get())
+
+    @staticmethod
+    @contextmanager
+    def request_context(**values: Any) -> Iterator[dict[str, Any]]:
+        context = {**_REQUEST_CONTEXT.get(), **values}
+        token = _REQUEST_CONTEXT.set(context)
+        try:
+            yield context
+        finally:
+            _REQUEST_CONTEXT.reset(token)
+
+    def bind_context(self, **values: Any):
+        return self.request_context(**values)
 
     def set_context(self, context: str) -> None:
         self.context = context
@@ -117,6 +141,19 @@ class Logger:
     def fatal(self, message: str, exc_info: Any = None, **extra: Any) -> None:
         self._write(logging.CRITICAL, message, extra, exc_info=exc_info)
 
+    def report_exception(self, error: BaseException, **extra: Any) -> None:
+        context = self._log_context(extra)
+        for reporter in self.options.exception_reporters:
+            try:
+                reporter(error, context)
+            except Exception as reporter_error:
+                self.warn(
+                    "exception reporter failed",
+                    reporter=getattr(reporter, "__name__", reporter.__class__.__name__),
+                    reporter_error=str(reporter_error),
+                )
+        self.error(str(error), exc_info=(type(error), error, error.__traceback__), **extra)
+
     def _write(self, level: int, message: str, extra: dict[str, Any], exc_info: Any = None) -> None:
         self._logger.log(
             level,
@@ -126,9 +163,18 @@ class Logger:
                 "fanest_context": self.context,
                 "fanest_base_extra": self.options.extra or {},
                 "fanest_extra": extra,
+                "fanest_request_context": _REQUEST_CONTEXT.get(),
                 "fanest_timestamp": self.options.include_timestamp,
             },
         )
+
+    def _log_context(self, extra: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **(self.options.extra or {}),
+            **_REQUEST_CONTEXT.get(),
+            **extra,
+            "logger_context": self.context,
+        }
 
     def _configure_logger(self, logger: logging.Logger, options: LoggerOptions) -> None:
         logger.setLevel(_coerce_level(options.level))
@@ -164,6 +210,9 @@ class LoggerModule:
         handlers: list[logging.Handler] | tuple[logging.Handler, ...] | None = None,
         stream: TextIO | None = None,
         extra: dict[str, Any] | None = None,
+        exception_reporters: list[Callable[[BaseException, dict[str, Any]], Any]]
+        | tuple[Callable[[BaseException, dict[str, Any]], Any], ...]
+        | None = None,
         is_global: bool = False,
     ) -> type:
         options = LoggerOptions(
@@ -175,6 +224,7 @@ class LoggerModule:
             handlers=tuple(handlers or ()),
             stream=stream,
             extra=extra,
+            exception_reporters=tuple(exception_reporters or ()),
         )
 
         @Module(

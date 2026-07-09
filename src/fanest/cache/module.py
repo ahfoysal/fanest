@@ -132,6 +132,12 @@ class CacheService:
             return await result
         return result
 
+    def mget(self, *keys: str) -> list[Any | None]:
+        return [self.get(key) for key in keys]
+
+    async def mget_async(self, *keys: str) -> list[Any | None]:
+        return [await self.get_async(key) for key in keys]
+
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         self.store.set(key, value, self.default_ttl if ttl is None else ttl)
 
@@ -139,6 +145,16 @@ class CacheService:
         result = self.store.set(key, value, self.default_ttl if ttl is None else ttl)
         if inspect.isawaitable(result):
             await result
+
+    def mset(self, values: dict[str, Any] | list[tuple[str, Any]], ttl: int | None = None) -> None:
+        items = values.items() if isinstance(values, dict) else values
+        for key, value in items:
+            self.set(key, value, ttl)
+
+    async def mset_async(self, values: dict[str, Any] | list[tuple[str, Any]], ttl: int | None = None) -> None:
+        items = values.items() if isinstance(values, dict) else values
+        for key, value in items:
+            await self.set_async(key, value, ttl)
 
     async def remember(self, key: str, factory: Callable[[], Any], ttl: int | None = None) -> Any:
         cached = await self.get_async(key)
@@ -150,6 +166,19 @@ class CacheService:
         await self.set_async(key, value, ttl)
         return value
 
+    def wrap(self, key: str, factory: Callable[[], Any], ttl: int | None = None) -> Any:
+        cached = self.get(key)
+        if cached is not None:
+            return cached
+        value = factory()
+        if inspect.isawaitable(value):
+            raise RuntimeError("Async cache factories require wrap_async().")
+        self.set(key, value, ttl)
+        return value
+
+    async def wrap_async(self, key: str, factory: Callable[[], Any], ttl: int | None = None) -> Any:
+        return await self.remember(key, factory, ttl)
+
     def has(self, key: str) -> bool:
         return self.get(key) is not None
 
@@ -159,18 +188,40 @@ class CacheService:
     def clear(self) -> None:
         self.store.clear()
 
+    reset = clear
+
     async def clear_async(self) -> None:
         result = self.store.clear()
         if inspect.isawaitable(result):
             await result
 
+    async def reset_async(self) -> None:
+        await self.clear_async()
+
     def delete(self, key: str) -> None:
         self.store.delete(key)
+
+    del_ = delete
 
     async def delete_async(self, key: str) -> None:
         result = self.store.delete(key)
         if inspect.isawaitable(result):
             await result
+
+    async def del_async(self, key: str) -> None:
+        await self.delete_async(key)
+
+    def mdelete(self, *keys: str) -> None:
+        for key in keys:
+            self.delete(key)
+
+    mdel = mdelete
+
+    async def mdelete_async(self, *keys: str) -> None:
+        for key in keys:
+            await self.delete_async(key)
+
+    mdel_async = mdelete_async
 
     def close(self) -> None:
         close = getattr(self.store, "close", None)

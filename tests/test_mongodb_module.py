@@ -3,8 +3,27 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from fanest import Controller, FaNestFactory, Get, Inject, Module, Post
-from fanest.mongodb import InjectModel, MongoCollection, MongoModule, MongoService, MongooseModule, collection_token
+from fanest import Controller, FaNestFactory, Get, Inject, Injectable, Module, Post
+from fanest.mongodb import (
+    InjectCollection,
+    InjectConnection,
+    InjectModel,
+    MongoCollection,
+    MongoModule,
+    MongoNamedConnectionUnsupportedError,
+    MongoService,
+    MongoTransactionUnsupportedError,
+    MongooseFeature,
+    MongooseModule,
+    Prop,
+    Schema,
+    SchemaFactory,
+    collection_token,
+    get_connection_token,
+    get_current_mongo_session,
+    get_model_token,
+    live_mongo_url,
+)
 from fanest.mongodb.module import MotorCollection
 
 
@@ -106,12 +125,35 @@ class FakeMotorClient:
     def __init__(self):
         self.databases: dict[str, FakeMotorDatabase] = {}
         self.closed = False
+        self.sessions: list[FakeMotorSession] = []
 
     def __getitem__(self, name):
         return self.databases.setdefault(name, FakeMotorDatabase())
 
+    def start_session(self):
+        session = FakeMotorSession()
+        self.sessions.append(session)
+        return session
+
     def close(self):
         self.closed = True
+
+
+class FakeMotorSession:
+    def __init__(self):
+        self.entered = False
+        self.transaction_started = False
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        self.entered = False
+
+    def start_transaction(self):
+        self.transaction_started = True
+        return self
 
 
 @Controller("mongo-users")
@@ -168,6 +210,110 @@ def test_mongoose_alias_and_inject_model_helper():
     created = TestClient(FaNestFactory.create(MongooseAppModule)).post("/mongoose-users").json()
 
     assert created["name"] == "Grace"
+
+
+@Injectable()
+class MongoCollectionsAliasService:
+    def __init__(self, users: MongoCollection = InjectCollection("users")):
+        self.users = users
+
+
+@Module(
+    imports=[MongoModule.for_root(database="fanest"), MongoModule.for_feature(("users",))],
+    providers=[MongoCollectionsAliasService],
+)
+class MongoAliasAppModule:
+    pass
+
+
+def test_mongo_model_token_and_collection_injection_aliases():
+    import asyncio
+
+    assert get_model_token("users") == collection_token("users")
+    assert get_model_token("users", "default") == collection_token("users")
+    with pytest.raises(MongoNamedConnectionUnsupportedError, match="Named Mongoose connections"):
+        get_model_token("users", "analytics")
+
+    async def run():
+        app = FaNestFactory.create(MongoAliasAppModule)
+        service = await app.state.fanest_container.resolve_async(MongoCollectionsAliasService)
+        created = await service.users.insert_one({"email": "alias@example.com"})
+        assert await service.users.find_one({"_id": created["_id"]}) == created
+
+    asyncio.run(run())
+
+
+@Schema(collection="decorated_users")
+class DecoratedUserSchema:
+    email: str = Prop()
+    name: str = Prop()
+
+
+@Injectable()
+class MongooseDescriptorService:
+    def __init__(
+        self,
+        decorated_users: MongoCollection = InjectModel("decorated_users"),
+        dict_users: MongoCollection = InjectModel("dict_users"),
+        feature_users: MongoCollection = InjectCollection("feature_users"),
+        connection: MongoService = InjectConnection(),
+    ):
+        self.decorated_users = decorated_users
+        self.dict_users = dict_users
+        self.feature_users = feature_users
+        self.connection = connection
+
+
+@Module(
+    imports=[
+        MongooseModule.for_root(database="fanest"),
+        MongooseModule.for_feature(
+            [
+                DecoratedUserSchema,
+                {"name": "dict_users", "schema": SchemaFactory.create_for_class(DecoratedUserSchema)},
+                MongooseFeature(name="feature_users", schema=SchemaFactory.create_for_class(DecoratedUserSchema)),
+            ]
+        ),
+    ],
+    providers=[MongooseDescriptorService],
+)
+class MongooseDescriptorAppModule:
+    pass
+
+
+def test_mongoose_schema_descriptors_and_connection_aliases():
+    import asyncio
+
+    schema = SchemaFactory.create_for_class(DecoratedUserSchema)
+    assert schema.name == "DecoratedUserSchema"
+    assert schema.fields == ("email", "name")
+    assert get_connection_token() is MongoService
+
+    async def run():
+        app = FaNestFactory.create(MongooseDescriptorAppModule)
+        container = app.state.fanest_container
+        service = await container.resolve_async(MongooseDescriptorService)
+        mongo = await container.resolve_async(MongoService)
+
+        assert service.connection is mongo
+        assert await container.resolve_async(get_connection_token()) is mongo
+        created = await service.decorated_users.insert_one({"email": "decorated@example.com"})
+        assert await service.dict_users.insert_one({"email": "dict@example.com"})
+        assert await service.feature_users.insert_one({"email": "feature@example.com"})
+        assert await service.connection.collection("decorated_users").find_one({"_id": created["_id"]}) == created
+
+    asyncio.run(run())
+
+
+def test_mongoose_for_feature_descriptor_modules_are_stable():
+    schema = SchemaFactory.create_for_class(DecoratedUserSchema)
+
+    assert MongooseModule.for_feature([{"name": "stable_users", "schema": schema}]) is MongooseModule.for_feature(
+        [{"name": "stable_users", "schema": schema}]
+    )
+    assert MongooseModule.for_feature([MongooseFeature(name="stable_features", schema=schema)]) is MongooseModule.for_feature(
+        [MongooseFeature(name="stable_features", schema=schema)]
+    )
 
 
 async def _exercise_mongo_update_operators():
@@ -353,13 +499,39 @@ def test_mongo_module_accepts_motor_style_client_and_closes_it():
     asyncio.run(run())
 
 
+def test_mongo_transaction_helpers_use_motor_session_and_reject_in_memory_mode():
+    import asyncio
+
+    async def run():
+        client = FakeMotorClient()
+        motor_service = MongoService({"client": client, "database": "fanest"})
+
+        async def handler(session):
+            assert get_current_mongo_session() is session
+            return "ok"
+
+        assert await motor_service.run_in_transaction(handler) == "ok"
+        assert client.sessions[0].transaction_started is True
+        assert get_current_mongo_session() is None
+
+        memory_service = MongoService({"database": "fanest"})
+        with pytest.raises(MongoTransactionUnsupportedError, match="Motor client"):
+            async with memory_service.transaction():
+                pass
+
+    asyncio.run(run())
+
+
 @pytest.mark.live_mongo
-@pytest.mark.skipif(not os.getenv("FANEST_LIVE_MONGO"), reason="set FANEST_LIVE_MONGO to run live MongoDB checks")
+@pytest.mark.skipif(
+    not os.getenv("FANEST_LIVE_MONGO_URL"),
+    reason="set FANEST_LIVE_MONGO_URL to run live MongoDB checks",
+)
 def test_live_mongo_motor_contract_when_enabled():
     import asyncio
 
     async def run():
-        uri = os.getenv("FANEST_LIVE_MONGO_URL", "mongodb://localhost:27017")
+        uri = os.environ["FANEST_LIVE_MONGO_URL"]
         module = MongoModule.for_root(uri=uri, database="fanest_live_tests")
         app = FaNestFactory.create(module)
         service = await app.state.fanest_container.resolve_async(MongoService)
@@ -376,6 +548,8 @@ def test_live_mongo_motor_contract_when_enabled():
 def test_mongo_dynamic_modules_are_stable_for_identical_options():
     assert MongoModule.for_root(database="fanest") is MongoModule.for_root(database="fanest")
     assert MongoModule.for_feature(["users"]) is MongoModule.for_feature(["users"])
+    assert MongoModule.for_feature(("users",)) is MongoModule.for_feature(("users",))
+    assert live_mongo_url("FANEST_TEST_MISSING_MONGO_URL") is None
 
     async def options_factory():
         return {"database": "fanest"}

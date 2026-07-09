@@ -508,3 +508,77 @@ def test_inherited_route_metadata_registers_implicit_enhancer_providers():
 
     assert client.get("/inherited", params={"name": "ada"}).status_code == 403
     assert client.get("/inherited", params={"name": "ada", "allow": "yes"}).json() == {"name": "ada"}
+
+
+class ReExportedService:
+    def message(self):
+        return "re-exported"
+
+
+@Module(providers=[ReExportedService], exports=[ReExportedService])
+class ReExportSourceModule:
+    pass
+
+
+@Module(imports=[ReExportSourceModule], exports=[ReExportSourceModule])
+class ReExportBridgeModule:
+    pass
+
+
+class ReExportConsumer:
+    def __init__(self, service: ReExportedService):
+        self.service = service
+
+
+@Module(imports=[ReExportBridgeModule], providers=[ReExportConsumer])
+class ReExportConsumerModule:
+    pass
+
+
+def test_modules_can_re_export_imported_modules():
+    app = FaNestFactory.create(ReExportConsumerModule)
+    consumer = app.state.fanest_container.resolve(ReExportConsumer, module_key=ReExportConsumerModule)
+
+    assert consumer.service.message() == "re-exported"
+
+
+class UnknownExportService:
+    pass
+
+
+@Module(exports=[UnknownExportService])
+class InvalidExportModule:
+    pass
+
+
+def test_module_export_must_be_local_or_re_exported_from_an_import():
+    with pytest.raises(TypeError, match="exports .*not local or exported"):
+        FaNestFactory.create(InvalidExportModule)
+
+
+class ScanOnlyGuard:
+    def can_activate(self, context):
+        return True
+
+
+@Controller("scan-isolation")
+@UseGuards(ScanOnlyGuard)
+class ScanIsolationController:
+    @Get("/")
+    async def index(self):
+        return {"ok": True}
+
+
+@Module(controllers=[ScanIsolationController])
+class ScanIsolationModule:
+    pass
+
+
+def test_implicit_provider_discovery_does_not_mutate_module_metadata_between_scans():
+    metadata = getattr(ScanIsolationModule, "__fanest_module__")
+    assert metadata.providers == []
+
+    FaNestFactory.create(ScanIsolationModule)
+    FaNestFactory.create(ScanIsolationModule)
+
+    assert metadata.providers == []

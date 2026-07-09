@@ -156,6 +156,7 @@ class SwaggerModule:
         if config.get("security"):
             schema["security"] = config["security"]
         SwaggerModule._add_extra_model_schemas(schema)
+        SwaggerModule._merge_multipart_inline_schema_refs(schema)
         SwaggerModule._dedupe_operation_parameters(schema)
         return schema
 
@@ -346,6 +347,44 @@ class SwaggerModule:
                 order.append(key)
             selected[key] = parameter
         return [selected[key] for key in order]
+
+    @staticmethod
+    def _merge_multipart_inline_schema_refs(schema: dict[str, Any]) -> None:
+        schemas = schema.get("components", {}).get("schemas", {})
+        if not isinstance(schemas, dict):
+            return
+        for path_item in schema.get("paths", {}).values():
+            if not isinstance(path_item, dict):
+                continue
+            for operation in path_item.values():
+                if not isinstance(operation, dict):
+                    continue
+                content = operation.get("requestBody", {}).get("content", {})
+                if not isinstance(content, dict):
+                    continue
+                multipart = content.get("multipart/form-data", {})
+                if not isinstance(multipart, dict):
+                    continue
+                multipart_schema = multipart.get("schema")
+                if not isinstance(multipart_schema, dict):
+                    continue
+                ref = multipart_schema.get("$ref")
+                if not isinstance(ref, str) or not ref.startswith("#/components/schemas/"):
+                    continue
+                schema_name = ref.rsplit("/", 1)[-1]
+                target = schemas.get(schema_name)
+                if isinstance(target, dict):
+                    SwaggerModule._deep_merge_schema(target, multipart_schema)
+
+    @staticmethod
+    def _deep_merge_schema(target: dict[str, Any], source: dict[str, Any]) -> None:
+        for key, value in source.items():
+            if key == "$ref":
+                continue
+            if isinstance(value, dict) and isinstance(target.get(key), dict):
+                SwaggerModule._deep_merge_schema(target[key], value)
+                continue
+            target[key] = value
 
     @staticmethod
     def _remove_route(app: FastAPI, path: str) -> None:

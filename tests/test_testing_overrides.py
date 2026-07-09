@@ -18,7 +18,7 @@ from fanest import (
     use_class,
     use_factory,
 )
-from fanest.testing import TestingModule
+from fanest.testing import TestingModule, create_auto_mock
 
 
 class DenyGuard:
@@ -318,3 +318,39 @@ def test_testing_module_resolve_uses_isolated_request_scopes():
     assert second.value == 2
     assert first is not second
     assert module._container().current_request_instances() is None
+
+
+class ExternalUsersClient:
+    async def list_users(self):
+        return [{"name": "real"}]
+
+
+@Controller("testing-automock")
+class AutomockController:
+    def __init__(self, users_client: ExternalUsersClient):
+        self.users_client = users_client
+
+    @Get("/")
+    async def index(self):
+        return {"users": await self.users_client.list_users()}
+
+
+@Module(controllers=[AutomockController])
+class AutomockModule:
+    pass
+
+
+def test_testing_module_use_mocker_supplies_missing_constructor_dependencies():
+    users_client = create_auto_mock(ExternalUsersClient)
+    users_client.list_users.return_value = [{"name": "mock"}]
+
+    app = (
+        TestingModule.create(AutomockModule)
+        .use_mocker(lambda token: users_client if token is ExternalUsersClient else None)
+        .compile()
+    )
+
+    assert TestClient(app).get("/testing-automock").json() == {
+        "users": [{"name": "mock"}]
+    }
+    users_client.list_users.assert_awaited_once()

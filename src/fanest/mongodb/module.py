@@ -1,6 +1,11 @@
 from copy import deepcopy
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import inspect
+import os
 import re
+from dataclasses import dataclass
+from collections.abc import AsyncIterator
 from typing import Any, Awaitable, Callable, cast
 from uuid import uuid4
 
@@ -8,17 +13,100 @@ from fanest import Inject, Injectable, Module, use_value
 from fanest.core.providers import token, use_factory as provider_factory
 
 MONGO_OPTIONS = token("MONGO_OPTIONS")
+_current_mongo_session: ContextVar[Any | None] = ContextVar("fanest_mongo_session", default=None)
 _root_module_cache: dict[Any, type] = {}
 _async_root_module_cache: dict[tuple[int, tuple[Any, ...], bool], type] = {}
 _feature_module_cache: dict[tuple[str, ...], type] = {}
 
 
-def collection_token(name: str):
+class MongoTransactionUnsupportedError(RuntimeError):
+    """Raised when Mongo transactions are requested without a Motor client/session."""
+
+
+class MongoNamedConnectionUnsupportedError(NotImplementedError):
+    """Raised when a Mongoose-style named connection is requested."""
+
+
+def _ensure_default_connection(name: str | None) -> None:
+    if name not in {None, "default"}:
+        raise MongoNamedConnectionUnsupportedError(
+            "Named Mongoose connections are not implemented by FaNest's Mongo adapter. "
+            "Use a separate MongoModule.for_root(...) configuration and inject MongoService instead."
+        )
+
+
+@dataclass(frozen=True)
+class MongooseFeature:
+    name: str
+    schema: Any = None
+    collection: str | None = None
+
+
+@dataclass(frozen=True)
+class MongooseSchema:
+    model: type
+    name: str
+    fields: tuple[str, ...]
+
+
+class SchemaFactory:
+    @staticmethod
+    def create_for_class(model: type) -> MongooseSchema:
+        annotations = getattr(model, "__annotations__", {})
+        fields = tuple(annotations)
+        name = getattr(model, "__name__", str(model))
+        return MongooseSchema(model=model, name=name, fields=fields)
+
+
+def collection_token(name: str, connection_name: str | None = None):
+    _ensure_default_connection(connection_name)
     return token(f"MONGO_COLLECTION:{name}")
 
 
-def InjectModel(name: str):
-    return Inject(collection_token(name))
+def get_model_token(name: str, connection_name: str | None = None):
+    return collection_token(name, connection_name=connection_name)
+
+
+def get_connection_token(name: str | None = None) -> Any:
+    _ensure_default_connection(name)
+    return MongoService
+
+
+def InjectModel(name: str, connection_name: str | None = None):
+    return Inject(collection_token(name, connection_name=connection_name))
+
+
+def InjectCollection(name: str, connection_name: str | None = None):
+    return Inject(collection_token(name, connection_name=connection_name))
+
+
+def InjectConnection(name: str | None = None):
+    return Inject(get_connection_token(name))
+
+
+def Prop(*args: Any, **kwargs: Any) -> Any:
+    default = kwargs.get("default", None)
+    if args:
+        default = args[0]
+    return default
+
+
+def Schema(*, collection: str | None = None, name: str | None = None, **options: Any):
+    def decorator(model: type) -> type:
+        setattr(model, "__mongoose_collection__", collection)
+        setattr(model, "__mongoose_name__", name or model.__name__)
+        setattr(model, "__mongoose_options__", dict(options))
+        return model
+
+    return decorator
+
+
+def get_current_mongo_session() -> Any | None:
+    return _current_mongo_session.get()
+
+
+def live_mongo_url(env_var: str = "FANEST_LIVE_MONGO_URL") -> str | None:
+    return os.getenv(env_var)
 
 
 def _freeze(value: Any) -> Any:
@@ -33,6 +121,31 @@ def _freeze(value: Any) -> Any:
     except TypeError:
         return (type(value), id(value))
     return value
+
+
+def _feature_name(feature: Any) -> str:
+    if isinstance(feature, str):
+        return feature
+    if isinstance(feature, MongooseFeature):
+        return feature.collection or feature.name
+    if isinstance(feature, dict):
+        name = feature.get("collection") or feature.get("name")
+        if not name:
+            raise ValueError("MongoModule.for_feature(...) dict entries require a 'name' or 'collection'.")
+        return str(name)
+    name = getattr(feature, "collection", None) or getattr(feature, "name", None)
+    if name:
+        return str(name)
+    schema_name = getattr(feature, "__mongoose_collection__", None) or getattr(feature, "__mongoose_name__", None)
+    if schema_name:
+        return str(schema_name)
+    if inspect.isclass(feature):
+        return getattr(feature, "__mongoose_collection__", None) or getattr(feature, "__name__")
+    raise TypeError(f"Unsupported Mongo feature descriptor: {feature!r}")
+
+
+def _feature_names(features: list[Any] | tuple[Any, ...]) -> tuple[str, ...]:
+    return tuple(_feature_name(feature) for feature in features)
 
 
 class MongoCollection:
@@ -409,6 +522,35 @@ class MongoService:
                 self._collections[name] = MongoCollection(name)
         return self._collections[name]
 
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[Any]:
+        if self._closed:
+            raise RuntimeError("MongoService has been closed.")
+        active_session = _current_mongo_session.get()
+        if active_session is not None:
+            yield active_session
+            return
+        if self._client is None or not hasattr(self._client, "start_session"):
+            raise MongoTransactionUnsupportedError(
+                "Mongo transactions require a Motor client with start_session(). "
+                "The in-memory MongoCollection does not emulate multi-document transactions."
+            )
+        session_context = self._client.start_session()
+        if inspect.isawaitable(session_context):
+            session_context = await cast(Awaitable[Any], session_context)
+        async with session_context as session:
+            transaction_context = session.start_transaction()
+            async with transaction_context:
+                token = _current_mongo_session.set(session)
+                try:
+                    yield session
+                finally:
+                    _current_mongo_session.reset(token)
+
+    async def run_in_transaction(self, handler: Callable[[Any], Awaitable[Any]]) -> Any:
+        async with self.transaction() as session:
+            return await handler(session)
+
     async def on_application_shutdown(self) -> None:
         if self._closed:
             return
@@ -460,8 +602,9 @@ class MongoModule:
         return DynamicMongoModule
 
     @staticmethod
-    def for_feature(collections: list[str]) -> type:
-        cache_key = tuple(collections)
+    def for_feature(collections: list[Any] | tuple[Any, ...]) -> type:
+        names = _feature_names(collections)
+        cache_key = names
         if cache_key in _feature_module_cache:
             return _feature_module_cache[cache_key]
         providers = [
@@ -470,10 +613,10 @@ class MongoModule:
                 lambda service, name=name: service.collection(name),
                 inject=[MongoService],
             )
-            for name in collections
+            for name in names
         ]
 
-        @Module(providers=providers, exports=[collection_token(name) for name in collections])
+        @Module(providers=providers, exports=[collection_token(name) for name in names])
         class DynamicMongoFeatureModule:
             pass
 

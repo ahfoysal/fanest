@@ -46,7 +46,8 @@ class ModuleRef:
     async def resolve(self, token: Any, strict: bool = False) -> Any:
         if strict and self.module_key is None:
             raise StrictLookupError()
-        request_scope = self.container.begin_request()
+        owns_scope = self.container.current_request_instances() is None
+        request_scope = self.container.begin_request() if owns_scope else None
         try:
             if strict:
                 return await self.container.resolve_local_async(token, self.module_key)
@@ -54,12 +55,14 @@ class ModuleRef:
         except KeyError as exc:
             raise UnknownProviderError(token) from exc
         finally:
-            self.container.end_request(request_scope)
+            if owns_scope and request_scope is not None:
+                self.container.end_request(request_scope)
 
     def resolve_sync(self, token: Any, strict: bool = False) -> Any:
         if strict and self.module_key is None:
             raise StrictLookupError()
-        request_scope = self.container.begin_request()
+        owns_scope = self.container.current_request_instances() is None
+        request_scope = self.container.begin_request() if owns_scope else None
         try:
             if strict:
                 return self.container.resolve_local(token, self.module_key)
@@ -67,7 +70,8 @@ class ModuleRef:
         except KeyError as exc:
             raise UnknownProviderError(token) from exc
         finally:
-            self.container.end_request(request_scope)
+            if owns_scope and request_scope is not None:
+                self.container.end_request(request_scope)
 
     async def create(self, cls: type) -> Any:
         try:

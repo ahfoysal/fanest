@@ -109,3 +109,31 @@ async def test_http_register_async_supports_async_options_factory():
 
     assert response.json() == {"url": "https://async.example.test/ready"}
     await service.aclose()
+
+
+@pytest.mark.anyio
+async def test_http_module_accepts_options_object_json_helpers_and_streaming():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/stream":
+            return httpx.Response(200, content=b"chunk", request=request)
+        return httpx.Response(200, json={"path": request.url.path}, request=request)
+
+    @Module(
+        imports=[
+            HttpModule.register(
+                HttpModuleOptions(base_url="https://options.example.test"),
+                transport=httpx.MockTransport(handler),
+            )
+        ]
+    )
+    class AppModule:
+        pass
+
+    app = FaNestFactory.create(AppModule)
+    service = app.state.fanest_container.resolve(HttpService)
+
+    assert await service.get_json("/json") == {"path": "/json"}
+    async with service.stream("GET", "/stream") as response:
+        assert await response.aread() == b"chunk"
+
+    await service.aclose()

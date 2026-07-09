@@ -380,15 +380,15 @@ def test_live_redis_cache_store_smoke() -> None:
 
 @pytest.mark.live_mongo
 @pytest.mark.skipif(
-    not os.getenv("FANEST_LIVE_MONGO_URI"),
-    reason="Set FANEST_LIVE_MONGO_URI to run optional Mongo integration smoke tests.",
+    not os.getenv("FANEST_LIVE_MONGO_URL"),
+    reason="Set FANEST_LIVE_MONGO_URL to run optional Mongo integration smoke tests.",
 )
 @pytest.mark.anyio
 async def test_live_mongo_service_smoke() -> None:
     service = MongoService(
         {
-            "uri": os.environ["FANEST_LIVE_MONGO_URI"],
-            "database": os.getenv("FANEST_LIVE_MONGO_DATABASE", "fanest_test"),
+            "uri": os.environ["FANEST_LIVE_MONGO_URL"],
+            "database": os.getenv("FANEST_LIVE_MONGO_DB", "fanest_test"),
         }
     )
     collection = service.collection("fanest_smoke")

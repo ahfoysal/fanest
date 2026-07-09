@@ -14,6 +14,7 @@ from fanest import (
     Catch,
     UseGuards,
     UseFilters,
+    UseInterceptors,
     UsePipes,
     WebSocketGateway,
     WebSocketManager,
@@ -25,6 +26,7 @@ from fanest import (
 )
 from fanest.core.container import FaNestContainer
 from fanest.platform_fastapi.adapter import FastApiAdapter
+from fanest.websockets import UnsupportedSocketIoProtocolError
 
 
 @WebSocketGateway("/chat")
@@ -226,6 +228,39 @@ def test_socket_io_style_room_emitter():
             assert sender.receive_json() == {"event": "announce", "data": {"sent": True}}
 
 
+@WebSocketGateway("/socketio-namespace")
+class SocketIoNamespaceGateway:
+    def __init__(self, server: SocketIoServer):
+        self.namespace = server.of("/admin")
+
+    async def on_connect(self, websocket):
+        self.namespace.join(websocket)
+
+    @SubscribeMessage("announce")
+    async def announce(self, data, websocket):
+        await self.namespace.emit("admin-news", data, exclude=websocket)
+        return {"sent": True}
+
+
+@Module(gateways=[SocketIoNamespaceGateway])
+class SocketIoNamespaceModule:
+    pass
+
+
+def test_socket_io_namespace_style_emitter_is_isolated_from_rooms():
+    client = TestClient(FaNestFactory.create(SocketIoNamespaceModule))
+
+    with client.websocket_connect("/socketio-namespace") as sender:
+        with client.websocket_connect("/socketio-namespace") as receiver:
+            sender.send_json({"event": "announce", "data": {"text": "hi"}})
+            assert receiver.receive_json() == {
+                "event": "admin-news",
+                "data": {"text": "hi"},
+                "namespace": "/admin",
+            }
+            assert sender.receive_json() == {"event": "announce", "data": {"sent": True}}
+
+
 @Catch(ValueError)
 class WebSocketValueErrorFilter:
     def catch(self, exc, context):
@@ -382,7 +417,10 @@ def test_websocket_handler_returned_responses_are_json_safe():
         websocket.send_json({"event": "plain", "data": "ok"})
         assert websocket.receive_json() == {"event": "plain", "data": "plain:ok"}
         websocket.send_json({"event": "bytes", "data": None})
-        assert websocket.receive_json() == {"event": "bytes", "data": "binary-ok"}
+        assert websocket.receive_json() == {
+            "event": "bytes",
+            "data": {"__fanest_binary__": "YmluYXJ5LW9r", "encoding": "base64"},
+        }
 
 
 @WebSocketGateway("/decorated-socket")
@@ -524,6 +562,20 @@ def test_websocket_gateway_reports_malformed_payloads():
     with client.websocket_connect("/advanced-socket") as websocket:
         websocket.send_text("{")
         assert websocket.receive_json()["event"] == "error"
+
+
+def test_websocket_gateway_reports_native_socketio_protocol_as_unsupported():
+    client = TestClient(FaNestFactory.create(AdvancedSocketModule))
+
+    with client.websocket_connect("/advanced-socket") as websocket:
+        websocket.send_text('42["broadcast",{"text":"hi"}]')
+        response = websocket.receive_json()
+        assert response["event"] == "error"
+        assert "Native Socket.IO/Engine.IO frames are not supported" in response["data"]
+
+
+def test_socketio_protocol_error_is_exported_for_protocol_edges():
+    assert issubclass(UnsupportedSocketIoProtocolError, RuntimeError)
 
 
 @Catch(ValueError)
@@ -730,3 +782,216 @@ def test_websocket_filter_non_json_payload_falls_back_to_string():
             "event": "error",
             "data": "non-json-payload",
         }
+
+
+class WebSocketEnvelopeInterceptor:
+    async def intercept(self, context, call_next):
+        result = await call_next()
+        return {"wrapped": result, "path": context.request.url.path}
+
+
+@WebSocketGateway("/intercepted-socket")
+@UseInterceptors(WebSocketEnvelopeInterceptor())
+class InterceptedSocketGateway:
+    @SubscribeMessage("echo")
+    async def echo(self, data):
+        return {"echo": data}
+
+
+@Module(gateways=[InterceptedSocketGateway])
+class InterceptedSocketModule:
+    pass
+
+
+def test_websocket_gateway_runs_interceptors_and_supports_ack_frames():
+    client = TestClient(FaNestFactory.create(InterceptedSocketModule, global_prefix="api"))
+
+    with client.websocket_connect("/api/intercepted-socket") as websocket:
+        websocket.send_json({"event": "echo", "data": "hello", "id": "ack-1"})
+        assert websocket.receive_json() == {
+            "event": "ack",
+            "data": {
+                "id": "ack-1",
+                "event": "echo",
+                "data": {
+                    "wrapped": {"echo": "hello"},
+                    "path": "/api/intercepted-socket",
+                },
+            },
+        }
+
+
+@WebSocketGateway("/binary-socket")
+class BinarySocketGateway:
+    @SubscribeMessage("echo-bytes")
+    async def echo_bytes(self, data):
+        return memoryview(str(data).encode())
+
+
+@Module(gateways=[BinarySocketGateway])
+class BinarySocketModule:
+    pass
+
+
+def test_websocket_gateway_accepts_binary_json_envelopes_and_returns_json_safe_binary():
+    client = TestClient(FaNestFactory.create(BinarySocketModule))
+
+    with client.websocket_connect("/binary-socket") as websocket:
+        websocket.send_bytes(b'{"event":"echo-bytes","data":"payload","ack":"bin-1"}')
+        assert websocket.receive_json() == {
+            "event": "ack",
+            "data": {
+                "id": "bin-1",
+                "event": "echo-bytes",
+                "data": {"__fanest_binary__": "cGF5bG9hZA==", "encoding": "base64"},
+            },
+        }
+
+
+@WebSocketGateway("/socketio-namespace-rooms")
+class SocketIoNamespaceRoomsGateway:
+    def __init__(self, server: SocketIoServer):
+        self.default = server
+        self.admin = server.of("/admin")
+
+    async def on_connect(self, websocket):
+        self.default.join(websocket, "lobby")
+        self.admin.join(websocket)
+        self.admin.join_room(websocket, "lobby")
+
+    @SubscribeMessage("announce")
+    async def announce(self, data, websocket, namespace="/"):
+        if namespace == "/admin":
+            await self.admin.to("lobby").emit("admin-news", data, exclude=websocket)
+            return {"sent": "admin"}
+        await self.default.to("lobby").emit("default-news", data, exclude=websocket)
+        return {"sent": "default"}
+
+
+@Module(gateways=[SocketIoNamespaceRoomsGateway])
+class SocketIoNamespaceRoomsModule:
+    pass
+
+
+def test_socket_io_namespace_payloads_route_and_rooms_are_namespace_scoped():
+    client = TestClient(FaNestFactory.create(SocketIoNamespaceRoomsModule))
+
+    with client.websocket_connect("/socketio-namespace-rooms") as sender:
+        with client.websocket_connect("/socketio-namespace-rooms") as receiver:
+            sender.send_json(
+                {
+                    "event": "announce",
+                    "namespace": "/admin",
+                    "data": {"text": "secret"},
+                    "id": "admin-1",
+                }
+            )
+            assert receiver.receive_json() == {
+                "event": "admin-news",
+                "data": {"text": "secret"},
+                "namespace": "/admin",
+            }
+            assert sender.receive_json() == {
+                "event": "ack",
+                "data": {"id": "admin-1", "event": "announce", "data": {"sent": "admin"}},
+                "namespace": "/admin",
+            }
+
+            sender.send_json({"event": "announce", "data": {"text": "public"}})
+            assert receiver.receive_json() == {
+                "event": "default-news",
+                "data": {"text": "public"},
+            }
+            assert sender.receive_json() == {
+                "event": "announce",
+                "data": {"sent": "default"},
+            }
+
+
+def test_websocket_manager_disconnect_removes_namespace_scoped_rooms():
+    manager = WebSocketManager()
+    socket = RecordingSocket()
+    manager.connect(cast(Any, socket))
+    manager.join("lobby", cast(Any, socket), namespace="/admin")
+
+    manager.disconnect(cast(Any, socket))
+
+    assert manager.connections("lobby", namespace="/admin") == []
+    assert manager.namespace_connections("/admin") == []
+
+
+@WebSocketGateway("/ack-none-socket")
+class AckNoneGateway:
+    @SubscribeMessage("side-effect")
+    async def side_effect(self, data):
+        return None
+
+
+@Module(gateways=[AckNoneGateway])
+class AckNoneModule:
+    pass
+
+
+def test_websocket_ack_is_sent_even_when_handler_returns_none():
+    client = TestClient(FaNestFactory.create(AckNoneModule))
+
+    with client.websocket_connect("/ack-none-socket") as websocket:
+        websocket.send_json({"event": "side-effect", "data": {"ok": True}, "id": "none-1"})
+        assert websocket.receive_json() == {
+            "event": "ack",
+            "data": {"id": "none-1", "event": "side-effect", "data": None},
+        }
+
+
+def test_websocket_gateway_rejects_engineio_transport_modes_cleanly():
+    client = TestClient(FaNestFactory.create(AdvancedSocketModule))
+
+    with client.websocket_connect("/advanced-socket?transport=polling") as websocket:
+        response = websocket.receive_json()
+        assert response["event"] == "error"
+        assert "Unsupported Engine.IO transport mode 'polling'" in response["data"]
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_json()
+
+
+def test_websocket_gateway_rejects_engineio_handshakes_cleanly():
+    client = TestClient(FaNestFactory.create(AdvancedSocketModule))
+
+    with client.websocket_connect("/advanced-socket?transport=websocket&EIO=4") as websocket:
+        response = websocket.receive_json()
+        assert response["event"] == "error"
+        assert "Native Engine.IO handshakes are not supported" in response["data"]
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_json()
+
+
+def test_socket_io_server_lifecycle_events_are_emitted():
+    events = []
+
+    @WebSocketGateway("/socketio-lifecycle")
+    class SocketIoLifecycleGateway:
+        def __init__(self, server: SocketIoServer):
+            server.on("connect", self.connected)
+            server.on("disconnect", self.disconnected)
+
+        def connected(self, websocket, namespace):
+            events.append(("connect", namespace))
+
+        def disconnected(self, websocket, namespace):
+            events.append(("disconnect", namespace))
+
+        @SubscribeMessage("echo")
+        async def echo(self, data):
+            return data
+
+    @Module(gateways=[SocketIoLifecycleGateway])
+    class SocketIoLifecycleModule:
+        pass
+
+    client = TestClient(FaNestFactory.create(SocketIoLifecycleModule))
+
+    with client.websocket_connect("/socketio-lifecycle") as websocket:
+        websocket.send_json({"event": "echo", "data": "ok"})
+        assert websocket.receive_json() == {"event": "echo", "data": "ok"}
+
+    assert events == [("connect", "/"), ("disconnect", "/")]

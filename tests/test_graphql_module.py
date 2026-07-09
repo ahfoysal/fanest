@@ -1,25 +1,41 @@
 import asyncio
+import enum
 
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 import pytest
 from typing import Any, cast
 
 from fanest import FaNestFactory, Injectable, Module
 from fanest.graphql import (
     Args,
+    Directive,
+    EnumType,
+    External,
+    Extends,
     Field,
     GraphQLDataLoader,
     GraphQLModule,
     GraphQLSchema,
+    GraphQLUnsupportedFeatureError,
     InputType,
+    IntersectionType,
+    InterfaceType,
     Key,
     Mutation,
     ObjectType,
+    PartialType,
+    PickType,
+    Provides,
     Query,
+    Requires,
     ResolveField,
     ResolveReference,
     Resolver,
+    Scalar,
     Subscription,
+    UnionType,
+    UseFieldMiddleware,
     UseGuards,
     UseInterceptors,
     UsePipes,
@@ -712,6 +728,55 @@ def test_graphql_subscription_filter_and_resolve_hooks():
     assert filtered.json() == {"data": {"updates": None}}
 
 
+@Resolver
+class EnhancedSubscriptionResolver:
+    @Subscription()
+    @UseGuards(GraphQLAllowGuard)
+    async def guarded_subscription(self, allowed: bool):
+        return {"allowed": allowed}
+
+    @Subscription()
+    @UsePipes(GraphQLUpperPipe)
+    @UseInterceptors(GraphQLEnvelopeInterceptor)
+    async def transformed_subscription(self, name: str = cast(Any, Args("value"))):
+        return {"name": name}
+
+
+def test_graphql_schema_subscribe_runs_guards_pipes_and_interceptors():
+    schema = GraphQLSchema()
+    schema.register_resolver(EnhancedSubscriptionResolver())
+
+    async def collect(document: str):
+        return [item async for item in schema.subscribe(document)]
+
+    allowed = asyncio.run(
+        collect('subscription { guarded_subscription(allowed: true) { allowed } }')
+    )
+    denied = asyncio.run(
+        collect('subscription { guarded_subscription(allowed: false) { allowed } }')
+    )
+    transformed = asyncio.run(
+        collect('subscription { transformed_subscription(value: "ada") { name intercepted } }')
+    )
+
+    assert allowed == [{"data": {"guarded_subscription": {"allowed": True}}}]
+    assert denied == [
+        {
+            "data": {"guarded_subscription": None},
+            "errors": [
+                {
+                    "message": "Forbidden",
+                    "path": ["guarded_subscription"],
+                    "locations": [{"line": 1, "column": 16}],
+                }
+            ],
+        }
+    ]
+    assert transformed == [
+        {"data": {"transformed_subscription": {"name": "ADA", "intercepted": True}}}
+    ]
+
+
 def test_graphql_code_first_metadata_helpers_are_introspectable():
     schema = GraphQLModule.for_root(
         resolvers=[GraphQLParityResolver, CodeFirstUserResolver],
@@ -798,6 +863,56 @@ def test_graphql_federation_service_and_entities_are_executable():
             ]
         }
     }
+
+
+@Extends
+@ObjectType("UnsupportedFederatedProduct")
+@Resolver
+class UnsupportedFederatedProductResolver:
+    @External
+    @Field(str)
+    def id(self):
+        return ""
+
+    @Requires("id")
+    @Field(str)
+    def name(self):
+        return ""
+
+    @Query()
+    async def unsupported_product(self):
+        return {"id": "1", "name": "Unsupported"}
+
+
+@Resolver
+class UnsupportedFederatedFieldResolver:
+    @Query()
+    @Provides("name")
+    async def unsupported_field(self):
+        return {"id": "1", "name": "Unsupported"}
+
+
+def test_graphql_federation_directives_are_preserved_in_generated_sdl():
+    schema = GraphQLSchema(federation=True)
+    schema.register_resolver(UnsupportedFederatedProductResolver())
+    schema.register_resolver(UnsupportedFederatedFieldResolver())
+    schema.register_model(SharedNode)
+    schema.register_model(SearchKind)
+    schema.register_model(SearchResult)
+    schema.register_scalar(DateTimeScalar)
+
+    sdl = schema.federation_sdl()
+
+    assert "type UnsupportedFederatedProduct @extends" in sdl
+    assert "id: String @external" in sdl
+    assert 'name: String @requires(fields: "id")' in sdl
+    assert "scalar DateTime" in sdl
+    assert "interface Node" in sdl
+    assert "enum SearchKind" in sdl
+    assert "union SearchResult = CodeFirstUser" in sdl
+    assert "extend type Query" in sdl
+    assert "_service: _Service" in sdl
+    assert "_entities(representations: [_Any!]!): [_Entity]!" in sdl
 
 
 class AsyncProfile:
@@ -1024,3 +1139,397 @@ def test_graphql_validator_reports_unknown_fields_without_running_resolvers():
             "locations": [{"line": 1, "column": 3}],
         }
     ]
+
+
+class TrimFieldMiddleware:
+    async def resolve(self, context, next_field):
+        value = await next_field()
+        return value.strip() if isinstance(value, str) else value
+
+
+@Scalar("DateTime")
+class DateTimeScalar:
+    pass
+
+
+@Scalar("EpochMillis")
+class EpochMillisScalar:
+    def parse_value(self, value):
+        return int(value) / 1000
+
+    def serialize(self, value):
+        return int(value * 1000)
+
+
+@Directive("tag", locations=("OBJECT", "FIELD_DEFINITION"), repeatable=True)
+class TagDirective:
+    pass
+
+
+@Directive('@tag(name: "node")')
+@InterfaceType("Node")
+class SharedNode:
+    @Directive('@tag(name: "id")')
+    @Field(str, name="id")
+    def node_id(self):
+        return ""
+
+
+class SearchKind(enum.Enum):
+    USER = "USER"
+    BOOK = "BOOK"
+
+
+SearchKind = EnumType(SearchKind, name="SearchKind")
+
+
+@UnionType("SearchResult", types=(CodeFirstUserResolver,))
+class SearchResult:
+    pass
+
+
+@Directive("upper", locations=("FIELD",))
+class UpperDirective:
+    pass
+
+
+@Resolver
+class GraphQLExtrasResolver:
+    @Query()
+    async def extras_user(self):
+        return {"id": "u1", "name": " Ada "}
+
+    @ResolveField("name")
+    @UseFieldMiddleware(TrimFieldMiddleware)
+    async def extras_name(self, parent):
+        return parent["name"]
+
+    @Query()
+    async def epoch_echo(self, value: EpochMillisScalar) -> EpochMillisScalar:
+        return value
+
+    @Query()
+    async def current_epoch(self) -> EpochMillisScalar:
+        return 12.5
+
+
+class ExtensionsPlugin:
+    def after_execute(self, schema, response):
+        response.setdefault("extensions", {})["plugin"] = "seen"
+        return response
+
+
+class LifecyclePlugin:
+    def __init__(self):
+        self.events: list[str] = []
+
+    def before_execute(self, schema, document, variables, operation_name):
+        self.events.append("before_execute")
+
+    def before_resolve(self, schema, field, operation):
+        self.events.append(f"before_resolve:{field.response_key}")
+
+    def after_resolve(self, schema, result, field, operation):
+        self.events.append(f"after_resolve:{field.response_key}")
+        if field.response_key == "decorated":
+            return {**result, "plugin": True}
+        return None
+
+    def on_error(self, schema, error, field, operation):
+        self.events.append(f"on_error:{field.response_key}:{error['message']}")
+
+    def after_execute(self, schema, response):
+        self.events.append("after_execute")
+        return response
+
+
+@Module(
+    imports=[
+        GraphQLModule.for_root(
+            resolvers=[GraphQLExtrasResolver],
+            path="extras/graphql",
+            types=[SharedNode, SearchKind, SearchResult],
+            scalars=[DateTimeScalar, EpochMillisScalar],
+            directives=[UpperDirective, TagDirective],
+            max_complexity=3,
+            extensions={"bucket": "graphql-deep-extras"},
+            plugins=[ExtensionsPlugin()],
+            field_middleware=[TrimFieldMiddleware],
+            websocket=False,
+        )
+    ]
+)
+class GraphQLExtrasModule:
+    pass
+
+
+def test_graphql_deep_extras_metadata_extensions_complexity_and_field_middleware():
+    with TestClient(FaNestFactory.create(GraphQLExtrasModule)) as client:
+        shaped = client.post(
+            "/extras/graphql",
+            json={"query": "{ extras_user @upper { id name } }"},
+        )
+        too_complex = client.post(
+            "/extras/graphql",
+            json={"query": "{ extras_user { id name __typename } __typename }"},
+        )
+
+    assert shaped.json() == {
+        "data": {"extras_user": {"id": "u1", "name": "Ada"}},
+        "extensions": {"bucket": "graphql-deep-extras", "plugin": "seen"},
+    }
+    assert too_complex.json() == {
+        "errors": [{"message": "GraphQL query complexity 5 exceeds max_complexity 3"}],
+        "extensions": {"bucket": "graphql-deep-extras", "plugin": "seen"},
+    }
+
+    schema = GraphQLSchema()
+    schema.register_model(SharedNode)
+    schema.register_model(SearchKind)
+    schema.register_model(SearchResult)
+    schema.register_scalar(DateTimeScalar)
+    schema.register_scalar(EpochMillisScalar)
+    schema.register_directive(UpperDirective)
+    schema.register_directive(TagDirective)
+    body = asyncio.run(
+        schema.execute(
+            """
+            {
+              scalar: __type(name: "DateTime") { name kind fields }
+              iface: __type(name: "Node") { name kind fields { name } }
+              enumType: __type(name: "SearchKind") { name kind enumValues { name } }
+              unionType: __type(name: "SearchResult") { name kind possibleTypes { name } }
+              schema: __schema { directives { name locations isRepeatable } }
+            }
+            """
+        )
+    )["data"]
+    assert body["scalar"] == {"name": "DateTime", "kind": "SCALAR", "fields": None}
+    assert body["iface"] == {
+        "name": "Node",
+        "kind": "INTERFACE",
+        "fields": [{"name": "id"}],
+    }
+    assert body["enumType"] == {
+        "name": "SearchKind",
+        "kind": "ENUM",
+        "enumValues": [{"name": "USER"}, {"name": "BOOK"}],
+    }
+    assert body["unionType"] == {
+        "name": "SearchResult",
+        "kind": "UNION",
+        "possibleTypes": [{"name": "CodeFirstUser"}],
+    }
+    assert {"name": "upper", "locations": ["FIELD"], "isRepeatable": False} in body["schema"]["directives"]
+
+
+def test_graphql_sdl_generation_includes_code_first_extras_and_roots():
+    schema = GraphQLSchema()
+    schema.register_resolver(GraphQLExtrasResolver())
+    schema.register_model(SharedNode)
+    schema.register_model(SearchKind)
+    schema.register_model(SearchResult)
+    schema.register_scalar(DateTimeScalar)
+    schema.register_directive(UpperDirective)
+    schema.register_directive(TagDirective)
+
+    sdl = schema.sdl()
+
+    assert "directive @upper on FIELD" in sdl
+    assert "directive @tag repeatable on OBJECT | FIELD_DEFINITION" in sdl
+    assert "scalar DateTime" in sdl
+    assert "interface Node" in sdl
+    assert 'interface Node @tag(name: "node")' in sdl
+    assert 'id: String @tag(name: "id")' in sdl
+    assert "enum SearchKind" in sdl
+    assert "USER" in sdl
+    assert "union SearchResult = CodeFirstUser" in sdl
+    assert "type Query" in sdl
+    assert "extras_user: String" in sdl
+
+
+def test_graphql_scalar_parse_and_serialize_hooks_run_during_execution():
+    schema = GraphQLSchema()
+    schema.register_scalar(EpochMillisScalar)
+    schema.register_resolver(GraphQLExtrasResolver())
+
+    body = asyncio.run(
+        schema.execute("{ epoch_echo(value: 2500) current_epoch }")
+    )
+
+    assert body == {"data": {"epoch_echo": 2500, "current_epoch": 12500}}
+
+
+@Resolver
+class SearchExecutionResolver:
+    @Query()
+    async def search_results(self):
+        return [
+            {"__typename": "CodeFirstUser", "name": "Ada", "title": "hidden"},
+            {"__typename": "Book", "title": "Graph Thinking", "name": "hidden"},
+        ]
+
+
+def test_graphql_inline_and_named_fragments_filter_by_runtime_typename():
+    schema = GraphQLSchema()
+    schema.register_model(SearchResult)
+    schema.register_resolver(SearchExecutionResolver())
+
+    body = asyncio.run(
+        schema.execute(
+            """
+            {
+              search_results {
+                __typename
+                ... on CodeFirstUser { name }
+                ...BookFields
+              }
+            }
+
+            fragment BookFields on Book {
+              title
+            }
+            """
+        )
+    )
+
+    assert body == {
+        "data": {
+            "search_results": [
+                {"__typename": "CodeFirstUser", "name": "Ada"},
+                {"__typename": "Book", "title": "Graph Thinking"},
+            ]
+        }
+    }
+
+
+def test_graphql_plugin_lifecycle_hooks_wrap_resolution_and_errors():
+    plugin = LifecyclePlugin()
+    schema = GraphQLSchema(plugins=[plugin])
+    schema.register_resolver(GraphQLExtrasResolver())
+
+    body = asyncio.run(
+        schema.execute('{ decorated: extras_user { id plugin } missing }')
+    )
+
+    assert body == {
+        "data": {
+            "decorated": {"id": "u1", "plugin": True},
+            "missing": None,
+        },
+        "errors": [
+            {
+                "message": "Unknown query field: missing",
+                "path": ["missing"],
+                "locations": [{"line": 1, "column": 40}],
+            }
+        ],
+    }
+    assert plugin.events == [
+        "before_execute",
+        "before_resolve:decorated",
+        "after_resolve:decorated",
+        "on_error:missing:Unknown query field: missing",
+        "after_execute",
+    ]
+
+
+@Resolver
+class PluginSubscriptionResolver:
+    @Subscription()
+    async def plugin_updates(self):
+        return {"message": "ready"}
+
+
+def test_graphql_subscription_plugin_lifecycle_matches_query_execution():
+    plugin = LifecyclePlugin()
+    schema = GraphQLSchema(plugins=[plugin])
+    schema.register_resolver(PluginSubscriptionResolver())
+
+    async def collect(document: str):
+        return [item async for item in schema.subscribe(document)]
+
+    good = asyncio.run(collect("subscription { plugin_updates { message } }"))
+    missing = asyncio.run(collect("subscription { missing_subscription }"))
+
+    assert good == [{"data": {"plugin_updates": {"message": "ready"}}}]
+    assert missing == [
+        {
+            "data": {"missing_subscription": None},
+            "errors": [
+                {
+                    "message": "Unknown subscription field: missing_subscription",
+                    "path": ["missing_subscription"],
+                    "locations": [{"line": 1, "column": 16}],
+                }
+            ],
+        }
+    ]
+    assert plugin.events == [
+        "before_execute",
+        "before_resolve:plugin_updates",
+        "after_resolve:plugin_updates",
+        "after_execute",
+        "before_execute",
+        "on_error:missing_subscription:Unknown subscription field: missing_subscription",
+        "after_execute",
+    ]
+
+
+def test_graphql_schema_first_directive_usages_are_preserved_in_generated_sdl():
+    schema = GraphQLSchema()
+    schema.register_directive(TagDirective)
+    schema.register_sdl(
+        """
+        type SdlTagged @tag(name: "model") {
+          id: ID! @tag(name: "id")
+          title: String
+        }
+        """
+    )
+
+    sdl = schema.sdl()
+
+    assert 'type SdlTagged @tag(name: "model")' in sdl
+    assert 'id: ID! @tag(name: "id")' in sdl
+
+
+@InputType("CreateMappedUserInput")
+class CreateMappedUserInput(BaseModel):
+    name: str
+    age: int
+
+
+@InputType("AuditMappedInput")
+class AuditMappedInput(BaseModel):
+    trace_id: str
+
+
+def test_graphql_mapped_types_preserve_graphql_input_metadata():
+    PartialMappedUser = PartialType(CreateMappedUserInput)
+    PickMappedUser = PickType(CreateMappedUserInput, ["name"])
+    IntersectedMappedUser = IntersectionType(CreateMappedUserInput, AuditMappedInput)
+
+    schema = GraphQLSchema()
+    schema.register_model(PartialMappedUser)
+    schema.register_model(PickMappedUser)
+    schema.register_model(IntersectedMappedUser)
+
+    sdl = schema.sdl()
+
+    assert "input PartialCreateMappedUserInput" in sdl
+    assert "name: String" in sdl
+    assert "age: Int" in sdl
+    assert "input PickCreateMappedUserInput" in sdl
+    assert "input CreateMappedUserInputAuditMappedInputIntersection" in sdl
+    assert "trace_id: String" in sdl
+
+
+def test_graphql_model_and_directive_registration_fail_explicitly_without_metadata():
+    schema = GraphQLSchema()
+
+    with pytest.raises(GraphQLUnsupportedFeatureError, match="GraphQL model sharing requires"):
+        schema.register_model(object)
+
+    with pytest.raises(GraphQLUnsupportedFeatureError, match="GraphQL directives must use @Directive metadata"):
+        schema.register_directive(object())

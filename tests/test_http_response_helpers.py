@@ -1,7 +1,20 @@
 from fastapi import BackgroundTasks, Request, Response
 from fastapi.testclient import TestClient
 
-from fanest import Controller, FaNestFactory, Get, Injectable, Module, Query, Res, SetHeader, Sse, StreamableFile
+from fanest import (
+    Controller,
+    FaNestApplication,
+    FaNestFactory,
+    Get,
+    Injectable,
+    Module,
+    Query,
+    Render,
+    Res,
+    SetHeader,
+    Sse,
+    StreamableFile,
+)
 
 
 @Injectable(scope="request")
@@ -33,6 +46,15 @@ class ResponseController:
     @Get("/stream")
     async def stream(self):
         return StreamableFile(b"hello", filename="hello.txt", content_type="text/plain")
+
+    @Get("/large")
+    async def large(self):
+        return {"text": "x" * 1000}
+
+    @Render("<h1>{{name}}</h1>")
+    @Get("/render")
+    async def render(self):
+        return {"name": "Ada"}
 
     @SetHeader("x-sse", "yes")
     @Sse("/events")
@@ -121,6 +143,30 @@ def test_streamable_file_returns_streaming_response_with_headers():
     assert response.headers["x-stream"] == "yes"
 
 
+def test_streamable_file_from_path_returns_file_response(tmp_path):
+    payload = tmp_path / "payload.txt"
+    payload.write_text("from disk", encoding="utf-8")
+
+    @Controller("path-stream")
+    class PathStreamController:
+        @Get("/")
+        async def index(self):
+            return StreamableFile.from_path(
+                payload,
+                filename="payload.txt",
+                content_type="text/plain",
+            )
+
+    @Module(controllers=[PathStreamController])
+    class PathStreamModule:
+        pass
+
+    response = TestClient(FaNestFactory.create(PathStreamModule)).get("/path-stream")
+
+    assert response.text == "from disk"
+    assert response.headers["content-disposition"] == 'attachment; filename="payload.txt"'
+
+
 def test_sse_decorator_formats_event_streams():
     client = TestClient(FaNestFactory.create(ResponseModule))
 
@@ -173,3 +219,17 @@ def test_response_decorator_supports_manual_and_passthrough_modes():
     assert manual.headers["x-manual"] == "yes"
     assert passthrough.json() == {"ok": True}
     assert passthrough.headers["x-pass"] == "yes"
+
+
+def test_compression_and_render_helpers():
+    client = TestClient(
+        FaNestApplication(ResponseModule).enable_compression(minimum_size=1).build()
+    )
+
+    compressed = client.get("/responses/large", headers={"accept-encoding": "gzip"})
+    rendered = client.get("/responses/render")
+
+    assert compressed.headers["content-encoding"] == "gzip"
+    assert compressed.json() == {"text": "x" * 1000}
+    assert rendered.headers["content-type"].startswith("text/html")
+    assert rendered.text == "<h1>Ada</h1>"

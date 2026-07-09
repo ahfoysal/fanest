@@ -174,11 +174,14 @@ def test_queue_module_passes_redis_client_hook_to_service():
 
 
 @pytest.mark.live_redis
-@pytest.mark.skipif(not os.getenv("FANEST_LIVE_REDIS"), reason="set FANEST_LIVE_REDIS to run live Redis checks")
+@pytest.mark.skipif(
+    not os.getenv("FANEST_LIVE_REDIS_URL"),
+    reason="set FANEST_LIVE_REDIS_URL to run live Redis checks",
+)
 @pytest.mark.anyio
 async def test_live_redis_queue_backend_when_enabled():
     backend = RedisStreamQueueBackend(
-        url=os.getenv("FANEST_LIVE_REDIS_URL", "redis://localhost:6379/0"),
+        url=os.environ["FANEST_LIVE_REDIS_URL"],
         prefix="fanest:live-queue:",
     )
     try:

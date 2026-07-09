@@ -1,6 +1,7 @@
 import pytest
+from fastapi.testclient import TestClient
 
-from fanest import FaNestFactory, Inject, Injectable, Module, ModuleRef, forward_ref, use_factory
+from fanest import Controller, FaNestFactory, Get, Inject, Injectable, Module, ModuleRef, forward_ref, use_factory
 from fanest.core.container import FaNestContainer, ForwardRefProxy
 from fanest.core.module_ref import StrictLookupError, UnknownProviderError
 
@@ -217,6 +218,39 @@ async def test_module_ref_create_and_resolve_sync_handle_scoped_dependencies():
     assert isinstance(created.request, RequestScopedService)
     assert first_transient is not second_transient
     assert TransientScopedService.created == 2
+
+
+@Controller("module-ref-scope")
+class ModuleRefScopeController:
+    def __init__(self, request_service: RequestScopedService, module_ref: ModuleRef):
+        self.request_service = request_service
+        self.module_ref = module_ref
+
+    @Get()
+    async def read(self):
+        resolved = await self.module_ref.resolve(RequestScopedService)
+        resolved_sync = self.module_ref.resolve_sync(RequestScopedService)
+        return {
+            "injected": id(self.request_service),
+            "resolved": id(resolved),
+            "resolved_sync": id(resolved_sync),
+        }
+
+
+@Module(providers=[RequestScopedService], controllers=[ModuleRefScopeController])
+class ModuleRefScopeModule:
+    pass
+
+
+def test_module_ref_resolve_reuses_active_request_scope():
+    client = TestClient(FaNestFactory.create(ModuleRefScopeModule))
+
+    first = client.get("/module-ref-scope").json()
+    second = client.get("/module-ref-scope").json()
+
+    assert first["injected"] == first["resolved"] == first["resolved_sync"]
+    assert second["injected"] == second["resolved"] == second["resolved_sync"]
+    assert first["injected"] != second["injected"]
 
 
 @Injectable()

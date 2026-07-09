@@ -5,10 +5,12 @@ from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Injectable, Module, Post
 from fanest.cqrs import (
+    AggregateRoot,
     CommandBus,
     CommandHandler,
     CqrsHandlerNotFoundError,
     CqrsModule,
+    CqrsOptions,
     CqrsUnhandledException,
     EventBus,
     EventPublisher,
@@ -352,3 +354,63 @@ def test_cqrs_supports_subclass_matching_sagas_publisher_and_error_bus():
     assert len(CqrsAdvancedStore.exceptions) == 1
 
     assert client.post("/advanced-cqrs/publisher").json() == {"welcome": ["Grace", "Lin"]}
+
+
+class UserAggregate(AggregateRoot):
+    def __init__(self):
+        super().__init__()
+        self.names: list[str] = []
+
+    def create(self, name: str):
+        self.apply(UserCreatedEvent(name))
+
+    def on_UserCreatedEvent(self, event: UserCreatedEvent):
+        self.names.append(event.name)
+
+
+@pytest.mark.anyio
+async def test_event_publisher_merges_aggregate_root_context_and_commits_events():
+    seen: list[str] = []
+    events = EventBus()
+    events.register(UserCreatedEvent, type("Handler", (), {"handle": lambda self, event: seen.append(event.name)})())
+    publisher = EventPublisher(events)
+
+    aggregate = publisher.merge_object_context(UserAggregate())
+    aggregate.create("Ada")
+
+    assert aggregate.names == ["Ada"]
+    assert [event.name for event in aggregate.get_uncommitted_events()] == ["Ada"]
+
+    await aggregate.commit()
+
+    assert seen == ["Ada"]
+    assert aggregate.get_uncommitted_events() == ()
+
+
+@dataclass(frozen=True)
+class BrokenCommand:
+    pass
+
+
+class BrokenCommandHandler:
+    def execute(self, command: BrokenCommand):
+        raise RuntimeError("configured")
+
+
+async def async_cqrs_options():
+    return CqrsOptions(rethrow_unhandled_exceptions=True)
+
+
+@Module(imports=[CqrsModule.for_root_async(use_factory=async_cqrs_options)])
+class AsyncCqrsModule:
+    pass
+
+
+@pytest.mark.anyio
+async def test_cqrs_for_root_async_wires_options_into_buses():
+    app = FaNestFactory.create(AsyncCqrsModule)
+    bus = await app.state.fanest_container.resolve_async(CommandBus)
+    bus.register(BrokenCommand, BrokenCommandHandler())
+
+    with pytest.raises(RuntimeError, match="configured"):
+        await bus.execute(BrokenCommand())

@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib
+import json
 import os
 import py_compile
 import sys
@@ -122,6 +123,75 @@ def test_cli_generates_resource_and_extra_artifacts(tmp_path, monkeypatch):
     assert "CreateUsersDto" in Path(tmp_path / "src/users/users_dto.py").read_text()
     assert (tmp_path / "src/request_id/request_id_middleware.py").exists()
     assert (tmp_path / "src/current_user/current_user_decorator.py").exists()
+
+
+def test_cli_resource_generator_emits_crud_handlers(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["generate", "resource", "users"])
+
+    assert result.exit_code == 0
+    controller = (tmp_path / "src/users/users_controller.py").read_text(encoding="utf-8")
+    service = (tmp_path / "src/users/users_service.py").read_text(encoding="utf-8")
+    module = (tmp_path / "src/users/users_module.py").read_text(encoding="utf-8")
+    assert "Post" in controller
+    assert "Patch" in controller
+    assert "Delete" in controller
+    assert "async def create" in service
+    assert "async def update" in service
+    assert "CreateUsersDto" in module
+
+
+def test_cli_repl_loads_application_for_command_mode(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    Path("main.py").write_text(
+        "async def app(scope, receive, send):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["repl", "main.py", "--command", "print(callable(app))"])
+
+    assert result.exit_code == 0
+    assert "FaNest REPL loaded main:app" in result.output
+    assert "True" in result.output
+
+
+def test_cli_repl_exposes_application_graph(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["new", "blog_api"])
+    monkeypatch.chdir(tmp_path / "blog_api")
+
+    result = runner.invoke(
+        app,
+        [
+            "repl",
+            "main.py",
+            "--command",
+            "print(graph['root_module']); print(any(route['path'] == '/' for route in graph['routes']))",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "AppModule" in result.output
+    assert "True" in result.output
+
+
+def test_cli_generates_commander_style_command_app(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["generate", "command", "export-users"])
+
+    assert result.exit_code == 0
+    command_file = tmp_path / "src/export_users/export_users_command.py"
+    assert command_file.exists()
+    content = command_file.read_text(encoding="utf-8")
+    assert "typer.Typer" in content
+    assert '@cli.command("export_users")' in content
 
 
 def test_cli_accepts_kebab_case_artifact_names_and_emits_python_modules(tmp_path, monkeypatch):
@@ -312,6 +382,90 @@ def test_cli_generates_workspace_and_library(tmp_path, monkeypatch):
     assert (tmp_path / "acme/apps/api/tests/test_app.py").exists()
     assert (tmp_path / "acme/libs/__init__.py").exists()
     assert (tmp_path / "acme/libs/common/common_module.py").exists()
+    config = json.loads((tmp_path / "acme/fanest.json").read_text(encoding="utf-8"))
+    pyproject = (tmp_path / "acme/pyproject.toml").read_text(encoding="utf-8")
+    assert config["defaultProject"] == "api"
+    assert config["projects"]["api"]["sourceRoot"] == "apps/api/src"
+    assert config["projects"]["common"]["type"] == "library"
+    assert '"start:api" = "fanest dev apps/api/main.py"' in pyproject
+
+
+def test_cli_generates_artifacts_into_default_workspace_project(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    workspace = runner.invoke(app, ["workspace", "acme"])
+    monkeypatch.chdir(tmp_path / "acme")
+    service = runner.invoke(app, ["generate", "service", "users"])
+    module = runner.invoke(app, ["generate", "module", "billing"])
+
+    assert workspace.exit_code == 0
+    assert service.exit_code == 0
+    assert module.exit_code == 0
+    assert (tmp_path / "acme/apps/api/src/users/users_service.py").exists()
+    assert (tmp_path / "acme/apps/api/src/billing/billing_module.py").exists()
+    assert not (tmp_path / "acme/src/users/users_service.py").exists()
+
+
+def test_cli_generates_artifacts_into_current_workspace_project(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    workspace = runner.invoke(app, ["workspace", "acme"])
+    monkeypatch.chdir(tmp_path / "acme/apps/api")
+    controller = runner.invoke(app, ["generate", "controller", "orders"])
+
+    assert workspace.exit_code == 0
+    assert controller.exit_code == 0
+    assert (tmp_path / "acme/apps/api/src/orders/orders_controller.py").exists()
+
+
+def test_cli_generates_workspace_library_from_application_directory(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    workspace = runner.invoke(app, ["workspace", "acme"])
+    monkeypatch.chdir(tmp_path / "acme/apps/api")
+    library = runner.invoke(app, ["generate", "library", "common"])
+
+    assert workspace.exit_code == 0
+    assert library.exit_code == 0
+    assert (tmp_path / "acme/libs/common/common_module.py").exists()
+    assert not (tmp_path / "acme/apps/api/libs/common/common_module.py").exists()
+    config = json.loads((tmp_path / "acme/fanest.json").read_text(encoding="utf-8"))
+    assert config["projects"]["common"]["sourceRoot"] == "libs/common"
+
+
+def test_cli_generates_artifacts_into_named_workspace_project(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    workspace = runner.invoke(app, ["workspace", "acme"])
+    monkeypatch.chdir(tmp_path / "acme")
+    application = runner.invoke(app, ["generate", "application", "admin-api"])
+    resource = runner.invoke(app, ["generate", "resource", "users", "--project", "admin_api"])
+
+    assert workspace.exit_code == 0
+    assert application.exit_code == 0
+    assert resource.exit_code == 0
+    assert (tmp_path / "acme/apps/admin_api/src/users/users_module.py").exists()
+    config = json.loads((tmp_path / "acme/fanest.json").read_text(encoding="utf-8"))
+    assert config["projects"]["admin_api"]["root"] == "apps/admin_api"
+
+
+def test_cli_registers_workspace_project_module_import(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    workspace = runner.invoke(app, ["workspace", "acme"])
+    monkeypatch.chdir(tmp_path / "acme")
+    result = runner.invoke(app, ["generate", "resource", "users", "--module", "main.py"])
+
+    assert workspace.exit_code == 0
+    assert result.exit_code == 0
+    content = (tmp_path / "acme/apps/api/src/main.py").read_text(encoding="utf-8")
+    assert "from .users.users_module import UsersModule" in content
+    assert "@Module(imports=[UsersModule], controllers=[AppController]" in content
 
 
 def test_cli_generates_monorepo_application_aliases(tmp_path, monkeypatch):

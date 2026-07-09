@@ -15,6 +15,79 @@ class MetricDefinition:
     buckets: tuple[float, ...] = ()
 
 
+@dataclass(frozen=True)
+class DiscoveryGraphNode:
+    id: str
+    label: str
+    kind: str
+    module: str | None = None
+
+
+@dataclass(frozen=True)
+class DiscoveryGraphEdge:
+    source: str
+    target: str
+    kind: str
+
+
+@dataclass(frozen=True)
+class DiscoveryGraph:
+    nodes: tuple[DiscoveryGraphNode, ...]
+    edges: tuple[DiscoveryGraphEdge, ...]
+
+    def to_dict(self) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "nodes": [node.__dict__ for node in self.nodes],
+            "edges": [edge.__dict__ for edge in self.edges],
+        }
+
+
+class DiscoveryGraphExporter:
+    def __init__(self, discovery_service: Any) -> None:
+        self.discovery_service = discovery_service
+
+    def snapshot(self) -> DiscoveryGraph:
+        nodes: dict[str, DiscoveryGraphNode] = {}
+        edges: list[DiscoveryGraphEdge] = []
+        for provider in self.discovery_service.get_providers():
+            module_label = self._module_label(provider)
+            if module_label is not None:
+                module_id = f"module:{module_label}"
+                nodes.setdefault(
+                    module_id,
+                    DiscoveryGraphNode(id=module_id, label=module_label, kind="module"),
+                )
+            provider_label = self._provider_label(provider)
+            provider_id = f"provider:{module_label or 'root'}:{provider_label}"
+            nodes[provider_id] = DiscoveryGraphNode(
+                id=provider_id,
+                label=provider_label,
+                kind="provider",
+                module=module_label,
+            )
+            if module_label is not None:
+                edges.append(DiscoveryGraphEdge(source=f"module:{module_label}", target=provider_id, kind="provides"))
+        for controller in self.discovery_service.get_controllers():
+            label = getattr(controller, "__name__", str(controller))
+            controller_id = f"controller:{label}"
+            nodes[controller_id] = DiscoveryGraphNode(id=controller_id, label=label, kind="controller")
+        return DiscoveryGraph(nodes=tuple(nodes.values()), edges=tuple(edges))
+
+    def _module_label(self, provider: Any) -> str | None:
+        module_type = getattr(provider, "module_type", None)
+        if module_type is not None:
+            return getattr(module_type, "__name__", str(module_type))
+        module_key = getattr(provider, "module_key", None)
+        return None if module_key is None else str(module_key)
+
+    def _provider_label(self, provider: Any) -> str:
+        metatype = getattr(provider, "metatype", None)
+        if metatype is not None:
+            return getattr(metatype, "__name__", str(metatype))
+        token_value = getattr(provider, "token", None)
+        return getattr(token_value, "__name__", str(token_value))
+
+
 def Counted(name: str, *, labels: dict[str, Any] | None = None):
     def decorator(handler):
         setattr(handler, "__fanest_metric_counter__", name)

@@ -1,6 +1,7 @@
 import io
 import json
 import logging
+import asyncio
 from typing import Any, cast
 
 from fanest.logger import Logger, LoggerModule, LoggerOptions
@@ -80,3 +81,87 @@ def test_logger_module_register_exports_configurable_options():
     assert options_provider.use_value.level == logging.WARNING
     assert options_provider.use_value.structured is True
     assert options_provider.use_value.extra == {"app": "fanest"}
+
+
+def test_logger_binds_async_local_context_and_reports_exceptions():
+    stream = io.StringIO()
+    captured: list[tuple[BaseException, dict[str, Any]]] = []
+    logger = Logger(
+        LoggerOptions(
+            context="ReportingLogger",
+            structured=True,
+            include_timestamp=False,
+            stream=stream,
+            extra={"service": "orders"},
+            exception_reporters=(lambda error, context: captured.append((error, context)),),
+        )
+    )
+
+    with logger.bind_context(request_id="req-1", tenant="acme"):
+        error = RuntimeError("payment failed")
+        logger.report_exception(error, order_id="ord_1")
+
+    payload = json.loads(stream.getvalue().splitlines()[0])
+
+    assert payload["level"] == "error"
+    assert payload["service"] == "orders"
+    assert payload["request_id"] == "req-1"
+    assert payload["tenant"] == "acme"
+    assert payload["order_id"] == "ord_1"
+    assert "RuntimeError" in payload["exception"]
+    assert captured == [
+        (
+            error,
+            {
+                "service": "orders",
+                "request_id": "req-1",
+                "tenant": "acme",
+                "order_id": "ord_1",
+                "logger_context": "ReportingLogger",
+            },
+        )
+    ]
+    assert Logger.current_context() == {}
+
+
+def test_logger_request_context_is_isolated_across_async_tasks():
+    async def run_task(request_id: str) -> tuple[str, dict[str, Any]]:
+        with Logger.request_context(request_id=request_id):
+            await asyncio.sleep(0)
+            return request_id, Logger.current_context()
+
+    async def run_all():
+        return await asyncio.gather(run_task("req-1"), run_task("req-2"))
+
+    first, second = asyncio.run(run_all())
+
+    assert first == ("req-1", {"request_id": "req-1"})
+    assert second == ("req-2", {"request_id": "req-2"})
+    assert Logger.current_context() == {}
+
+
+def test_logger_exception_reporter_failures_do_not_mask_logging():
+    stream = io.StringIO()
+
+    def broken_reporter(error: BaseException, context: dict[str, Any]) -> None:
+        raise RuntimeError("sentry offline")
+
+    logger = Logger(
+        LoggerOptions(
+            context="ReporterFailureLogger",
+            structured=True,
+            include_timestamp=False,
+            stream=stream,
+            exception_reporters=(broken_reporter,),
+        )
+    )
+
+    logger.report_exception(ValueError("boom"))
+
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+
+    assert lines[0]["message"] == "exception reporter failed"
+    assert lines[0]["reporter"] == "broken_reporter"
+    assert lines[0]["reporter_error"] == "sentry offline"
+    assert lines[1]["level"] == "error"
+    assert lines[1]["message"] == "boom"

@@ -5,6 +5,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, cast
+from urllib import request
 
 from fastapi.responses import JSONResponse
 
@@ -22,6 +23,8 @@ class HealthModuleOptions:
     error_status_code: int = 503
     timeout_seconds: float | None = None
     include_error_messages: bool = True
+    readiness_path: str = "/ready"
+    liveness_path: str = "/live"
 
 
 class HealthCheckError(Exception):
@@ -32,10 +35,18 @@ class HealthCheckError(Exception):
 
 
 class HealthIndicator:
-    def __init__(self, name: str, check: Callable[[], Any], *, timeout_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        check: Callable[[], Any],
+        *,
+        timeout_seconds: float | None = None,
+        tags: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
         self.name = name
         self.check = check
         self.timeout_seconds = timeout_seconds
+        self.tags = tuple(tags or ())
 
     async def run(self) -> dict[str, Any]:
         result = await self._run_check()
@@ -60,10 +71,17 @@ class HealthIndicator:
 
 
 class DiskHealthIndicator(HealthIndicator):
-    def __init__(self, name: str = "disk", *, path: str = ".", threshold_percent: float = 90.0) -> None:
+    def __init__(
+        self,
+        name: str = "disk",
+        *,
+        path: str = ".",
+        threshold_percent: float = 90.0,
+        tags: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
         self.path = path
         self.threshold_percent = threshold_percent
-        super().__init__(name, self._check)
+        super().__init__(name, self._check, tags=tags)
 
     def _check(self) -> dict[str, Any]:
         usage = shutil.disk_usage(self.path)
@@ -83,10 +101,11 @@ class MemoryHealthIndicator(HealthIndicator):
         *,
         heap_threshold_mb: float | None = None,
         rss_threshold_mb: float | None = None,
+        tags: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.heap_threshold_mb = heap_threshold_mb
         self.rss_threshold_mb = rss_threshold_mb
-        super().__init__(name, self._check)
+        super().__init__(name, self._check, tags=tags)
 
     def _check(self) -> dict[str, Any]:
         rss_mb = self._rss_mb()
@@ -106,6 +125,27 @@ class MemoryHealthIndicator(HealthIndicator):
         return max_rss / 1024
 
 
+class HttpHealthIndicator(HealthIndicator):
+    def __init__(
+        self,
+        name: str,
+        *,
+        url: str,
+        timeout_seconds: float = 2.0,
+        expected_status: int | range | tuple[int, ...] = range(200, 400),
+        tags: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
+        self.url = url
+        self.expected_status = expected_status
+        super().__init__(name, self._check, timeout_seconds=timeout_seconds, tags=tags)
+
+    def _check(self) -> dict[str, Any]:
+        with request.urlopen(self.url, timeout=self.timeout_seconds) as response:
+            status_code = response.status
+        ok = status_code in self.expected_status
+        return {"status": "ok" if ok else "error", "url": self.url, "status_code": status_code}
+
+
 @Injectable()
 class HealthService:
     def __init__(
@@ -115,18 +155,43 @@ class HealthService:
     ):
         self.indicators = [] if isinstance(indicators, InjectMarker) else indicators or []
         self.options = HealthModuleOptions() if isinstance(options, InjectMarker) else options or HealthModuleOptions()
+        self._ready = True
 
-    async def check(self) -> dict[str, Any]:
-        if not self.indicators:
+    async def check(self, *, tags: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
+        indicators = self._filter_indicators(tags)
+        if not indicators:
             return {"status": "ok"}
         details: dict[str, Any] = {}
         status = "ok"
-        results = await asyncio.gather(*(self._run_indicator(indicator) for indicator in self.indicators))
+        results = await asyncio.gather(*(self._run_indicator(indicator) for indicator in indicators))
         for result in results:
             details.update(result)
             if any(value.get("status") != "ok" for value in result.values() if isinstance(value, dict)):
                 status = "error"
         return {"status": status, "details": details}
+
+    async def readiness(self) -> dict[str, Any]:
+        result = await self.check(tags=("readiness", "ready"))
+        if not self._ready:
+            result = {**result, "status": "error"}
+            result.setdefault("details", {})
+            result["details"]["readiness"] = self._error_result("application is not ready")
+        return result
+
+    async def liveness(self) -> dict[str, Any]:
+        return await self.check(tags=("liveness", "live"))
+
+    def mark_ready(self) -> None:
+        self._ready = True
+
+    def mark_not_ready(self) -> None:
+        self._ready = False
+
+    async def on_application_bootstrap(self) -> None:
+        self.mark_ready()
+
+    async def before_application_shutdown(self) -> None:
+        self.mark_not_ready()
 
     async def check_indicators(self, indicators: list[Callable[[], Any]]) -> dict[str, Any]:
         previous = self.indicators
@@ -142,6 +207,12 @@ class HealthService:
     def ping_check(self, name: str, value: Any = True) -> dict[str, Any]:
         status = "ok" if value else "error"
         return {name: {"status": status}}
+
+    def _filter_indicators(self, tags: list[str] | tuple[str, ...] | None) -> list[HealthIndicator]:
+        if tags is None:
+            return self.indicators
+        selected = set(tags)
+        return [indicator for indicator in self.indicators if selected.intersection(indicator.tags)]
 
     async def _run_indicator(self, indicator: HealthIndicator) -> dict[str, Any]:
         try:
@@ -176,6 +247,19 @@ class HealthController:
     @Get("/")
     async def check(self):
         result = await self.health_service.check()
+        return self._response(result)
+
+    @Get("/ready")
+    async def readiness(self):
+        result = await self.health_service.readiness()
+        return self._response(result)
+
+    @Get("/live")
+    async def liveness(self):
+        result = await self.health_service.liveness()
+        return self._response(result)
+
+    def _response(self, result: dict[str, Any]):
         if result.get("status") == "error":
             return JSONResponse(status_code=self.options.error_status_code, content=result)
         return result
@@ -189,12 +273,17 @@ class HealthModule:
         error_status_code: int = 503,
         timeout_seconds: float | None = None,
         include_error_messages: bool = True,
+        readiness_path: str = "/ready",
+        liveness_path: str = "/live",
         is_global: bool = False,
     ) -> type:
+        _validate_probe_paths(readiness_path=readiness_path, liveness_path=liveness_path)
         options = HealthModuleOptions(
             error_status_code=error_status_code,
             timeout_seconds=timeout_seconds,
             include_error_messages=include_error_messages,
+            readiness_path=readiness_path,
+            liveness_path=liveness_path,
         )
 
         @Module(
@@ -220,10 +309,16 @@ class HealthModule:
             result = use_factory(*dependencies)
             if inspect.isawaitable(result):
                 result = await cast(Awaitable[Any], result)
+            _validate_probe_paths(
+                readiness_path=result.get("readiness_path", "/ready"),
+                liveness_path=result.get("liveness_path", "/live"),
+            )
             return HealthModuleOptions(
                 error_status_code=result.get("error_status_code", 503),
                 timeout_seconds=result.get("timeout_seconds"),
                 include_error_messages=result.get("include_error_messages", True),
+                readiness_path=result.get("readiness_path", "/ready"),
+                liveness_path=result.get("liveness_path", "/live"),
             )
 
         async def indicators_factory(*dependencies: Any) -> list[HealthIndicator]:
@@ -247,3 +342,8 @@ class HealthModule:
             pass
 
         return DynamicHealthModule
+
+
+def _validate_probe_paths(*, readiness_path: str, liveness_path: str) -> None:
+    if readiness_path != "/ready" or liveness_path != "/live":
+        raise NotImplementedError("HealthModule custom probe paths are not supported; use /health/ready and /health/live")

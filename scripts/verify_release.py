@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def main() -> None:
     version = _project_version()
     _assert_project_metadata(version)
+    _assert_no_root_scratch_files()
     tag = os.environ.get("GITHUB_REF_NAME")
     if tag and tag.startswith("v") and tag[1:] != version:
         raise SystemExit(f"Release tag {tag!r} does not match pyproject version {version!r}.")
@@ -100,11 +101,36 @@ def _assert_wheel_metadata(wheel: Path) -> None:
             raise SystemExit("Wheel is missing console entry point metadata.")
 
 
+def _assert_no_root_scratch_files() -> None:
+    scratch_patterns = (
+        "*.bak",
+        "*.log",
+        "*.orig",
+        "*.rej",
+        "*.tmp",
+        ".DS_Store",
+        "Thumbs.db",
+        "debug*",
+        "scratch*",
+        "test-output*",
+        "tmp*",
+    )
+    scratch_files = sorted(
+        path.name
+        for path in ROOT.iterdir()
+        if path.is_file() and any(path.match(pattern) for pattern in scratch_patterns)
+    )
+    if scratch_files:
+        raise SystemExit(f"Remove scratch files from repository root: {scratch_files!r}.")
+
+
 def _smoke_install(distribution: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="fanest-release-smoke-") as tmp:
-        venv = Path(tmp) / "venv"
+        workspace = Path(tmp)
+        venv = workspace / "venv"
         _run("uv", "venv", str(venv))
         python = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        fanest = venv / ("Scripts/fanest.exe" if sys.platform == "win32" else "bin/fanest")
         _run("uv", "pip", "install", "--python", str(python), str(distribution))
         _run(
             str(python),
@@ -122,10 +148,28 @@ def _smoke_install(distribution: Path) -> None:
                 "assert callable(app); assert callable(cli)"
             ),
         )
+        _run(str(fanest), "info", cwd=workspace)
+        _run(str(fanest), "new", "smoke_api", cwd=workspace)
+        project = workspace / "smoke_api"
+        _run(str(fanest), "check", "main.py", cwd=project)
+        _run(str(fanest), "build", cwd=project)
+        _run(
+            str(python),
+            "-c",
+            (
+                "import importlib, sys\n"
+                "from fastapi.testclient import TestClient\n"
+                f"sys.path.insert(0, {str(project)!r})\n"
+                "generated = importlib.import_module('main')\n"
+                "with TestClient(generated.app) as client:\n"
+                "    assert client.get('/').status_code == 200\n"
+            ),
+            cwd=project,
+        )
 
 
-def _run(*command: str) -> None:
-    subprocess.run(command, cwd=ROOT, check=True)
+def _run(*command: str, cwd: Path | None = None) -> None:
+    subprocess.run(command, cwd=cwd or ROOT, check=True)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,8 @@
 import asyncio
 import importlib.util
+import io
+import json
+import logging
 import os
 import subprocess
 import sys
@@ -11,15 +14,30 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from fanest import Controller, FaNestFactory, Get, Injectable, Module
+from fanest import (
+    Catch,
+    Controller,
+    FaNestFactory,
+    Get,
+    Injectable,
+    Module,
+    UseFilters,
+    UseGuards,
+    UseInterceptors,
+    UsePipes,
+)
 from fanest.cache import RedisCacheStore
 from fanest.cli.main import app as cli_app
+from fanest.graphql import GraphQLModule, Query, Resolver
+from fanest.health import HealthIndicator, HealthModule
+from fanest.logger import Logger, LoggerModule
 from fanest.mailer import MailAttachment, MailerModule, MailerService, SmtpMailerTransport
 from fanest.microservices import (
     ClientProxy,
     EventPattern,
     KafkaTransport,
     MessagePattern,
+    MicroserviceTransportError,
     MicroserviceServer,
     NatsTransport,
     RabbitMqTransport,
@@ -369,6 +387,229 @@ def test_cli_generated_project_check_and_lifespan_shutdown_smoke(tmp_path: Path,
         sys.modules.pop("main", None)
 
 
+def test_cli_project_hosts_raw_body_versioning_and_security_headers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    new_result = runner.invoke(cli_app, ["new", "edge_api"])
+    assert new_result.exit_code == 0, new_result.output
+
+    project = tmp_path / "edge_api"
+    (project / "integration_app.py").write_text(
+        """
+from fanest import Controller, FaNestFactory, Get, Module, Post, Req, Version, VersioningType
+from fanest.security import HelmetModule
+
+
+@Controller("hooks")
+class HooksController:
+    @Post("raw")
+    async def raw(self, req=Req()):
+        return {
+            "raw": req.raw_body.decode(),
+            "state_raw": req.state.raw_body.decode(),
+            "parsed": await req.json(),
+        }
+
+    @Version("2")
+    @Get("versioned")
+    async def versioned(self):
+        return {"version": "2"}
+
+
+@Module(
+    imports=[HelmetModule.for_root(headers={"x-frame-options": "SAMEORIGIN"})],
+    controllers=[HooksController],
+)
+class AppModule:
+    pass
+
+
+app = FaNestFactory.create(
+    AppModule,
+    raw_body=True,
+    versioning={"type": VersioningType.HEADER, "header": "x-api-version"},
+)
+        """.lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+    check_result = runner.invoke(cli_app, ["check", "integration_app.py", "--app", "app"])
+    build_result = runner.invoke(cli_app, ["build"])
+
+    assert check_result.exit_code == 0, check_result.output
+    assert build_result.exit_code == 0, build_result.output
+
+    sys.path.insert(0, str(project))
+    try:
+        import importlib
+
+        generated_main = importlib.import_module("main")
+        integration_app = importlib.import_module("integration_app")
+        with TestClient(generated_main.app) as generated_client:
+            assert generated_client.get("/").status_code == 200
+        with TestClient(integration_app.app) as client:
+            raw = client.post("/hooks/raw", json={"event": "created"})
+            versioned = client.get("/hooks/versioned", headers={"x-api-version": "2"})
+            missing_version = client.get("/hooks/versioned")
+    finally:
+        sys.path.remove(str(project))
+        for module_name in ("main", "integration_app"):
+            sys.modules.pop(module_name, None)
+
+    assert raw.json() == {
+        "raw": '{"event":"created"}',
+        "state_raw": '{"event":"created"}',
+        "parsed": {"event": "created"},
+    }
+    assert raw.headers["x-frame-options"] == "SAMEORIGIN"
+    assert raw.headers["x-content-type-options"] == "nosniff"
+    assert versioned.json() == {"version": "2"}
+    assert missing_version.status_code == 404
+
+
+def test_graphql_di_health_and_logger_context_smoke() -> None:
+    stream = io.StringIO()
+
+    @Injectable()
+    class GreetingService:
+        def __init__(self, logger: Logger):
+            self.logger = logger
+
+        def hello(self) -> dict[str, str]:
+            with self.logger.bind_context(trace_id="gql-smoke"):
+                self.logger.log("resolved greeting", operation="hello")
+            return {"message": "hello from DI"}
+
+    @Module(providers=[GreetingService], exports=[GreetingService])
+    class GreetingModule:
+        pass
+
+    @Resolver
+    class GreetingResolver:
+        def __init__(self, greetings: GreetingService):
+            self.greetings = greetings
+
+        @Query()
+        async def hello(self):
+            return self.greetings.hello()
+
+    @Module(
+        imports=[
+            LoggerModule.register(
+                level=logging.INFO,
+                context="Smoke",
+                structured=True,
+                include_timestamp=False,
+                stream=stream,
+                extra={"service": "fanest"},
+                is_global=True,
+            ),
+            HealthModule.register(
+                [
+                    HealthIndicator(
+                        "graphql",
+                        lambda: {"status": "ok", "source": "di"},
+                        tags=["readiness", "liveness"],
+                    )
+                ],
+                is_global=True,
+            ),
+            GraphQLModule.for_root(
+                imports=[GreetingModule],
+                resolvers=[GreetingResolver],
+                path="ops/graphql",
+            ),
+        ]
+    )
+    class OpsModule:
+        pass
+
+    with TestClient(FaNestFactory.create(OpsModule)) as client:
+        graphql = client.post("/ops/graphql", json={"query": "{ hello { message } }"})
+        readiness = client.get("/health/ready")
+        liveness = client.get("/health/live")
+
+    assert graphql.json() == {"data": {"hello": {"message": "hello from DI"}}}
+    assert readiness.json() == {
+        "status": "ok",
+        "details": {"graphql": {"status": "ok", "source": "di"}},
+    }
+    assert liveness.status_code == 200
+    log_payload = json.loads(stream.getvalue())
+    assert log_payload == {
+        "level": "info",
+        "message": "resolved greeting",
+        "context": "Smoke",
+        "service": "fanest",
+        "trace_id": "gql-smoke",
+        "operation": "hello",
+    }
+
+
+def test_microservice_message_scope_runs_enhancer_chain_smoke() -> None:
+    class HeaderGuard:
+        def can_activate(self, context):
+            return context.request.headers.get("x-allow") == "yes"
+
+    class TitlePipe:
+        def transform(self, value, metadata):
+            assert metadata["source"] == "message"
+            return str(value).title()
+
+    class EnvelopeInterceptor:
+        async def intercept(self, context, call_next):
+            result = await call_next()
+            return {
+                "result": result,
+                "transport": context.request.transport,
+                "pattern": context.request.pattern,
+            }
+
+    @Catch(MicroserviceTransportError)
+    class DeniedFilter:
+        def catch(self, exc, context):
+            return {"error": str(exc), "pattern": context.request.pattern}
+
+    @UseFilters(DeniedFilter)
+    class WorkflowHandler:
+        @MessagePattern("workflow.run")
+        @UseGuards(HeaderGuard)
+        @UsePipes(TitlePipe())
+        @UseInterceptors(EnvelopeInterceptor())
+        async def run(self, data, context):
+            return {"name": data, "headers": dict(context.headers)}
+
+    @Module(providers=[WorkflowHandler, HeaderGuard, DeniedFilter])
+    class WorkflowModule:
+        pass
+
+    server = MicroserviceServer(WorkflowModule).compile()
+
+    async def run() -> tuple[dict[str, Any], dict[str, Any]]:
+        allowed = await server.transport._dispatch_message(
+            "workflow.run",
+            "ada lovelace",
+            headers={"x-allow": "yes", "x-trace": "smoke"},
+        )
+        denied = await server.client().send("workflow.run", "grace hopper")
+        return allowed, denied
+
+    allowed, denied = asyncio.run(run())
+
+    assert allowed == {
+        "result": {
+            "name": "Ada Lovelace",
+            "headers": {"x-allow": "yes", "x-trace": "smoke"},
+        },
+        "transport": "memory",
+        "pattern": "workflow.run",
+    }
+    assert denied == {"error": "Forbidden", "pattern": "workflow.run"}
+
+
 def test_asgi_lifespan_startup_and_shutdown_calls_hooks() -> None:
     events: list[str] = []
 
@@ -447,10 +688,11 @@ def test_wheel_installs_and_cli_imports_in_temp_venv(tmp_path: Path) -> None:
     venv = tmp_path / "venv"
     subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True, timeout=120)
     python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    fanest = venv / ("Scripts/fanest.exe" if os.name == "nt" else "bin/fanest")
     wheel = next(dist_dir.glob("fanest-*.whl"))
     subprocess.run([str(python), "-m", "pip", "install", str(wheel)], check=True, timeout=180)
     result = subprocess.run(
-        [str(python), "-m", "fanest.cli.main", "info"],
+        [str(fanest), "info"],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -458,6 +700,46 @@ def test_wheel_installs_and_cli_imports_in_temp_venv(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stdout
     assert "FaNest" in result.stdout
+    new_result = subprocess.run(
+        [str(fanest), "new", "wheel_api"],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=60,
+    )
+    assert new_result.returncode == 0, new_result.stdout
+    project = tmp_path / "wheel_api"
+    for command in (["check", "main.py"], ["build"]):
+        project_result = subprocess.run(
+            [str(fanest), *command],
+            cwd=project,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+        )
+        assert project_result.returncode == 0, project_result.stdout
+    app_result = subprocess.run(
+        [
+            str(python),
+            "-c",
+            (
+                "import importlib, sys\n"
+                "from fastapi.testclient import TestClient\n"
+                f"sys.path.insert(0, {str(project)!r})\n"
+                "main = importlib.import_module('main')\n"
+                "with TestClient(main.app) as client:\n"
+                "    assert client.get('/').status_code == 200\n"
+            ),
+        ],
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=60,
+    )
+    assert app_result.returncode == 0, app_result.stdout
 
 
 @pytest.mark.live_redis

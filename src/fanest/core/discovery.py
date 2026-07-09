@@ -8,6 +8,9 @@ class DiscoveredProvider:
     instance: Any
     module_key: Any | None = None
     module_type: type | None = None
+    provider: Any | None = None
+    metatype: type | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class DiscoveryService:
@@ -29,7 +32,16 @@ class DiscoveryService:
         discovered: list[DiscoveredProvider] = []
         for provider in self.providers:
             token = self.container.provider_token(provider)
-            discovered.append(DiscoveredProvider(token=token, instance=self.container.resolve(token)))
+            instance = self.container.resolve(token)
+            discovered.append(
+                DiscoveredProvider(
+                    token=token,
+                    instance=instance,
+                    provider=provider,
+                    metatype=self._metatype(provider, instance),
+                    metadata=self._metadata(provider, instance),
+                )
+            )
         return discovered
 
     def _get_module_providers(self) -> list[DiscoveredProvider]:
@@ -48,6 +60,9 @@ class DiscoveryService:
                         instance=self.container.resolve(token, module_key=module_key),
                         module_key=module_key,
                         module_type=record.module_type,
+                        provider=provider,
+                        metatype=self._metatype(provider),
+                        metadata=self._metadata(provider),
                     )
                 )
         return discovered
@@ -59,5 +74,25 @@ class DiscoveryService:
         return [
             provider
             for provider in self.get_providers()
-            if hasattr(provider.instance.__class__, key)
+            if hasattr(provider.metatype or provider.instance.__class__, key)
+            or key in (provider.metadata or {})
         ]
+
+    def _metatype(self, provider: Any, instance: Any | None = None) -> type | None:
+        use_class = getattr(provider, "use_class", None)
+        if use_class is not None:
+            return use_class
+        if isinstance(provider, type):
+            return provider
+        if instance is not None:
+            return instance.__class__
+        return None
+
+    def _metadata(self, provider: Any, instance: Any | None = None) -> dict[str, Any]:
+        metatype = self._metatype(provider, instance)
+        metadata: dict[str, Any] = {}
+        if metatype is not None:
+            metadata.update(getattr(metatype, "__fanest_metadata__", {}))
+        if instance is not None:
+            metadata.update(getattr(instance.__class__, "__fanest_metadata__", {}))
+        return metadata

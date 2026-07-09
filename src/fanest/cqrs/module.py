@@ -2,11 +2,12 @@ import inspect
 import logging
 from collections.abc import AsyncIterable, Iterable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, cast
 
 from fanest import Injectable, Module, Optional, use_value
 from fanest.core.metadata import InjectMarker
 from fanest.core.providers import token
+from fanest.core.providers import use_factory as provider_factory
 
 CQRS_OPTIONS = token("CQRS_OPTIONS")
 logger = logging.getLogger("fanest.cqrs")
@@ -297,8 +298,26 @@ class EventPublisher:
         for event in events:
             await self.event_bus.publish(event)
 
+    def merge_object_context(self, model: Any) -> Any:
+        return self.merge_context(model)
+
+    def merge_class_context(self, model_cls: type) -> type:
+        publisher = self
+
+        class PublishedModel(model_cls):  # type: ignore[misc, valid-type]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                publisher.merge_context(self)
+
+        PublishedModel.__name__ = model_cls.__name__
+        PublishedModel.__qualname__ = model_cls.__qualname__
+        PublishedModel.__module__ = model_cls.__module__
+        return PublishedModel
+
     def merge_context(self, model: Any) -> Any:
         publisher = self
+        if hasattr(model, "_publisher"):
+            setattr(model, "_publisher", publisher)
 
         async def publish(event: Any) -> None:
             await publisher.publish(event)
@@ -317,9 +336,83 @@ class EventPublisher:
         return model
 
 
-def _normalize_options(options: CqrsOptions | None) -> CqrsOptions:
+class AggregateRoot:
+    def __init__(self, *, auto_commit: bool = False) -> None:
+        self.auto_commit = auto_commit
+        self._events: list[Any] = []
+        self._publisher: EventPublisher | None = None
+
+    @property
+    def events(self) -> list[Any]:
+        return self._events
+
+    def apply(self, event: Any, *, is_from_history: bool = False) -> Any:
+        result = self._apply_event(event)
+        if inspect.isawaitable(result):
+            raise RuntimeError("Async aggregate event appliers require apply_async().")
+        if is_from_history:
+            return event
+        if self.auto_commit and self._publisher is not None:
+            result = self._publisher.publish(event)
+            if inspect.isawaitable(result):
+                raise RuntimeError("Async event publishing requires await aggregate.commit().")
+            return result
+        self._events.append(event)
+        return event
+
+    async def apply_async(self, event: Any, *, is_from_history: bool = False) -> Any:
+        result = self._apply_event(event)
+        if inspect.isawaitable(result):
+            await result
+        if is_from_history:
+            return event
+        if self.auto_commit and self._publisher is not None:
+            await self._publisher.publish(event)
+            return event
+        self._events.append(event)
+        return event
+
+    async def publish(self, event: Any) -> None:
+        if self._publisher is None:
+            raise RuntimeError("AggregateRoot is not attached to an EventPublisher.")
+        await self._publisher.publish(event)
+
+    async def commit(self) -> None:
+        if self._publisher is None:
+            raise RuntimeError("AggregateRoot is not attached to an EventPublisher.")
+        await self._publisher.publish_all(tuple(self._events))
+        self.clear_events()
+
+    def uncommit(self) -> None:
+        self.clear_events()
+
+    def clear_events(self) -> None:
+        self._events.clear()
+
+    def get_uncommitted_events(self) -> tuple[Any, ...]:
+        return tuple(self._events)
+
+    def load_from_history(self, events: Iterable[Any]) -> None:
+        for event in events:
+            self.apply(event, is_from_history=True)
+
+    def _apply_event(self, event: Any) -> Any:
+        handler = getattr(self, f"on_{type(event).__name__}", None)
+        if handler is None:
+            handler = getattr(self, "on_event", None)
+        if handler is not None:
+            return handler(event)
+        return None
+
+
+def _normalize_options(options: CqrsOptions | dict[str, Any] | None) -> CqrsOptions:
     if options is None or isinstance(options, InjectMarker):
         return CqrsOptions()
+    if isinstance(options, dict):
+        return CqrsOptions(
+            rethrow_unhandled_exceptions=options.get("rethrow_unhandled_exceptions", False),
+            allow_subclass_handlers=options.get("allow_subclass_handlers", True),
+        )
     return options
 
 
@@ -364,4 +457,43 @@ class CqrsModule:
             pass
 
         CqrsModule._root_modules[cache_key] = DynamicCqrsModule
+        return DynamicCqrsModule
+
+    @staticmethod
+    def for_root_async(
+        *,
+        use_factory: Callable[..., CqrsOptions | dict[str, Any] | Awaitable[CqrsOptions | dict[str, Any]]],
+        inject: list[Any] | None = None,
+        imports: list[Any] | None = None,
+        is_global: bool = False,
+    ) -> type:
+        async def options_factory(*dependencies: Any) -> CqrsOptions:
+            result = use_factory(*dependencies)
+            if inspect.isawaitable(result):
+                result = await cast(Awaitable[Any], result)
+            return _normalize_options(result)
+
+        @Module(
+            imports=imports or [],
+            providers=[
+                provider_factory(CQRS_OPTIONS, options_factory, inject=inject or []),
+                UnhandledExceptionBus,
+                CommandBus,
+                QueryBus,
+                EventBus,
+                EventPublisher,
+            ],
+            exports=[
+                CommandBus,
+                QueryBus,
+                EventBus,
+                EventPublisher,
+                UnhandledExceptionBus,
+                CQRS_OPTIONS,
+            ],
+            global_module=is_global,
+        )
+        class DynamicCqrsModule:
+            pass
+
         return DynamicCqrsModule

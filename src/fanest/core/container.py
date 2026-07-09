@@ -12,6 +12,7 @@ from fanest.core.metadata import (
     ValueProvider,
 )
 from fanest.core.enhancers import APP_ENHANCER_TOKENS
+from fanest.core.lazy_loader import LazyModuleLoader
 from fanest.core.module_ref import ModuleRef
 from fanest.core.reflector import Reflector
 from fanest.schedule.registry import SchedulerRegistry
@@ -62,6 +63,7 @@ class FaNestContainer:
         self._provider_dependency_cache: dict[Any, list[Any]] = {}
         self._scope_cache: dict[Any, str] = {}
         self.register(ValueProvider(provide=ModuleRef, use_value=ModuleRef(self)))
+        self.register(ValueProvider(provide=LazyModuleLoader, use_value=LazyModuleLoader(self)))
         self.register(ValueProvider(provide=Reflector, use_value=Reflector()))
         self.register(ValueProvider(provide=SchedulerRegistry, use_value=SchedulerRegistry()))
         websocket_manager = WebSocketManager()

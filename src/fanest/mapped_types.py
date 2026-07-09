@@ -6,13 +6,15 @@ from pydantic import BaseModel, create_model, field_validator
 
 def PartialType(model: type[BaseModel]) -> type[BaseModel]:
     fields: dict[str, tuple[Any, Any]] = {}
+    graphql_fields: dict[str, Any] = {}
     for name, field in model.model_fields.items():
         annotation = _optional(field.annotation)
         field_info = deepcopy(field)
         field_info.default = None
         field_info.default_factory = None
         fields[name] = (annotation, field_info)
-    return cast(
+        graphql_fields[name] = annotation
+    mapped = cast(
         type[BaseModel],
         create_model(
             f"Partial{model.__name__}",
@@ -21,14 +23,17 @@ def PartialType(model: type[BaseModel]) -> type[BaseModel]:
             **cast(Any, fields),
         ),
     )
+    return _copy_graphql_metadata(model, mapped, graphql_fields, f"Partial{model.__name__}")
 
 
 def PickType(model: type[BaseModel], fields: list[str]) -> type[BaseModel]:
     model_fields: dict[str, tuple[Any, Any]] = {}
+    graphql_fields: dict[str, Any] = {}
     for name in fields:
         field = model.model_fields[name]
         model_fields[name] = (field.annotation, deepcopy(field))
-    return cast(
+        graphql_fields[name] = field.annotation
+    mapped = cast(
         type[BaseModel],
         create_model(
             f"Pick{model.__name__}",
@@ -37,6 +42,7 @@ def PickType(model: type[BaseModel], fields: list[str]) -> type[BaseModel]:
             **cast(Any, model_fields),
         ),
     )
+    return _copy_graphql_metadata(model, mapped, graphql_fields, f"Pick{model.__name__}")
 
 
 def OmitType(model: type[BaseModel], fields: list[str]) -> type[BaseModel]:
@@ -46,10 +52,12 @@ def OmitType(model: type[BaseModel], fields: list[str]) -> type[BaseModel]:
 
 def IntersectionType(left: type[BaseModel], right: type[BaseModel]) -> type[BaseModel]:
     model_fields: dict[str, tuple[Any, Any]] = {}
+    graphql_fields: dict[str, Any] = {}
     for model in [left, right]:
         for name, field in model.model_fields.items():
             model_fields[name] = (field.annotation, deepcopy(field))
-    return cast(
+            graphql_fields[name] = field.annotation
+    mapped = cast(
         type[BaseModel],
         create_model(
             f"{left.__name__}{right.__name__}Intersection",
@@ -60,6 +68,13 @@ def IntersectionType(left: type[BaseModel], right: type[BaseModel]) -> type[Base
             },
             **cast(Any, model_fields),
         ),
+    )
+    return _copy_graphql_metadata(
+        left,
+        mapped,
+        graphql_fields,
+        f"{left.__name__}{right.__name__}Intersection",
+        secondary=right,
     )
 
 
@@ -90,3 +105,41 @@ def _field_validators_for(model: type[BaseModel], selected_fields: list[str]) ->
             json_schema_input_type=decorator.info.json_schema_input_type,
         )(classmethod(function))
     return validators
+
+
+def _copy_graphql_metadata(
+    source: type[BaseModel],
+    target: type[BaseModel],
+    fields: dict[str, Any],
+    name: str,
+    *,
+    secondary: type[BaseModel] | None = None,
+) -> type[BaseModel]:
+    metadata = getattr(source, "__fanest_graphql_type__", None)
+    secondary_metadata = getattr(secondary, "__fanest_graphql_type__", None) if secondary is not None else None
+    if metadata is None and secondary_metadata is None:
+        return target
+    owner = metadata or secondary_metadata
+    metadata_type = cast(Any, type(owner))
+    directives = list(getattr(metadata, "directives", ()))
+    field_directives = dict(getattr(metadata, "field_directives", {}))
+    if secondary_metadata is not None:
+        directives.extend(getattr(secondary_metadata, "directives", ()))
+        field_directives.update(getattr(secondary_metadata, "field_directives", {}))
+    setattr(
+        target,
+        "__fanest_graphql_type__",
+        metadata_type(
+            name=name,
+            kind=getattr(owner, "kind", "input"),
+            fields=fields,
+            federation=dict(getattr(owner, "federation", {})),
+            directives=tuple(directives),
+            field_directives={
+                field_name: value
+                for field_name, value in field_directives.items()
+                if field_name in fields
+            },
+        ),
+    )
+    return target

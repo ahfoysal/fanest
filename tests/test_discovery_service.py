@@ -1,6 +1,17 @@
 from fastapi.testclient import TestClient
 
-from fanest import Controller, DiscoveryService, FaNestFactory, Get, Inject, Injectable, Module, token, use_value
+from fanest import (
+    Controller,
+    DiscoveryService,
+    FaNestFactory,
+    Get,
+    Inject,
+    Injectable,
+    Module,
+    SetMetadata,
+    token,
+    use_value,
+)
 
 
 @Injectable()
@@ -92,4 +103,40 @@ def test_discovery_service_resolves_providers_in_their_module_context():
     assert response.json() == {
         "FirstDiscoveryFeatureModule": "first",
         "SecondDiscoveryFeatureModule": "second",
+    }
+
+
+@SetMetadata("discovery:role", "worker")
+@Injectable()
+class MetadataDiscoverableService:
+    pass
+
+
+@Controller("discovery-metadata")
+class DiscoveryMetadataController:
+    def __init__(self, discovery: DiscoveryService):
+        self.discovery = discovery
+
+    @Get("/")
+    async def index(self):
+        [provider] = self.discovery.with_metadata("discovery:role")
+        return {
+            "token": provider.token.__name__,
+            "metatype": provider.metatype.__name__,
+            "metadata": provider.metadata,
+        }
+
+
+@Module(controllers=[DiscoveryMetadataController], providers=[MetadataDiscoverableService])
+class DiscoveryMetadataModule:
+    pass
+
+
+def test_discovery_service_exposes_provider_metadata_wrappers():
+    response = TestClient(FaNestFactory.create(DiscoveryMetadataModule)).get("/discovery-metadata")
+
+    assert response.json() == {
+        "token": "MetadataDiscoverableService",
+        "metatype": "MetadataDiscoverableService",
+        "metadata": {"discovery:role": "worker"},
     }

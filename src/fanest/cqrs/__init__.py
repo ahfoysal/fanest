@@ -1,4 +1,5 @@
 from fanest.cqrs.module import (
+    AggregateRoot,
     CommandBus,
     CommandHandler,
     CQRS_OPTIONS,
@@ -17,6 +18,7 @@ from fanest.cqrs.module import (
 )
 
 __all__ = [
+    "AggregateRoot",
     "CQRS_OPTIONS",
     "CommandBus",
     "CommandHandler",

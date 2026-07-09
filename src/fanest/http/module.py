@@ -63,14 +63,25 @@ class HttpService:
         request = self.client.build_request(method, url, **kwargs)
         return await self._send_with_retries(request)
 
+    async def request_json(self, method: str, url: str | httpx.URL, **kwargs: Any) -> Any:
+        response = await self.request(method, url, **kwargs)
+        response.raise_for_status()
+        return response.json()
+
     async def send(self, request: httpx.Request) -> httpx.Response:
         return await self._send_with_retries(request)
 
     async def get(self, url: str | httpx.URL, **kwargs: Any) -> httpx.Response:
         return await self.request("GET", url, **kwargs)
 
+    async def get_json(self, url: str | httpx.URL, **kwargs: Any) -> Any:
+        return await self.request_json("GET", url, **kwargs)
+
     async def post(self, url: str | httpx.URL, **kwargs: Any) -> httpx.Response:
         return await self.request("POST", url, **kwargs)
+
+    async def post_json(self, url: str | httpx.URL, **kwargs: Any) -> Any:
+        return await self.request_json("POST", url, **kwargs)
 
     async def put(self, url: str | httpx.URL, **kwargs: Any) -> httpx.Response:
         return await self.request("PUT", url, **kwargs)
@@ -86,6 +97,9 @@ class HttpService:
 
     async def options(self, url: str | httpx.URL, **kwargs: Any) -> httpx.Response:
         return await self.request("OPTIONS", url, **kwargs)
+
+    def stream(self, method: str, url: str | httpx.URL, **kwargs: Any):
+        return self.client.stream(method, url, **kwargs)
 
     async def on_application_shutdown(self) -> None:
         await self.client.aclose()
@@ -217,10 +231,40 @@ def _normalize_options(options: HttpModuleOptions | dict[str, Any] | None) -> Ht
     )
 
 
+def _merge_options(
+    options: HttpModuleOptions | dict[str, Any] | None,
+    overrides: dict[str, Any],
+) -> HttpModuleOptions:
+    if not overrides:
+        return _normalize_options(options)
+    if isinstance(options, HttpModuleOptions):
+        values = {
+            "base_url": options.base_url,
+            "headers": options.headers,
+            "timeout": options.timeout,
+            "retries": options.retries,
+            "retry_status_codes": options.retry_status_codes,
+            "retry_methods": options.retry_methods,
+            "retry_backoff": options.retry_backoff,
+            "request_interceptors": options.request_interceptors,
+            "response_interceptors": options.response_interceptors,
+            "error_interceptors": options.error_interceptors,
+            **options.client_options,
+            **overrides,
+        }
+        return _normalize_options(values)
+    return _normalize_options({**(options or {}), **overrides})
+
+
 class HttpModule:
     @staticmethod
-    def register(is_global: bool = False, **options: Any) -> type:
-        normalized_options = _normalize_options(options)
+    def register(
+        options: HttpModuleOptions | dict[str, Any] | None = None,
+        *,
+        is_global: bool = False,
+        **kwargs: Any,
+    ) -> type:
+        normalized_options = _merge_options(options, kwargs)
 
         @Module(
             providers=[use_value(HTTP_OPTIONS, normalized_options), HttpService],

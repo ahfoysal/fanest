@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 from uuid import UUID
 
-from fanest.common.exceptions import BadRequestException
+from fanest.common.exceptions import BadRequestException, FaNestHttpException
 from fanest.common.pydantic_compat import (
     BaseModel,
     ValidationError,
@@ -22,31 +22,58 @@ class ValidationPipe:
         transform: bool = True,
         whitelist: bool = False,
         forbid_non_whitelisted: bool = False,
+        forbid_unknown_values: bool = False,
+        skip_missing_properties: bool = False,
+        skip_null_properties: bool = False,
+        stop_at_first_error: bool = False,
+        disable_error_messages: bool = False,
+        error_http_status_code: int = 400,
         exception_factory: Callable[[list[dict[str, Any]]], Exception] | None = None,
     ) -> None:
         self.transform_enabled = transform
         self.whitelist = whitelist
         self.forbid_non_whitelisted = forbid_non_whitelisted
+        self.forbid_unknown_values = forbid_unknown_values
+        self.skip_missing_properties = skip_missing_properties
+        self.skip_null_properties = skip_null_properties
+        self.stop_at_first_error = stop_at_first_error
+        self.disable_error_messages = disable_error_messages
+        self.error_http_status_code = error_http_status_code
         self.exception_factory = exception_factory
 
     def transform(self, value: Any, metadata: dict[str, Any]) -> Any:
         annotation = metadata.get("annotation")
         if annotation is None or annotation is Any:
+            if self.forbid_unknown_values and value is not None:
+                self._raise_errors(
+                    [{"type": "unknown_value", "loc": (), "msg": "Unknown value", "input": value}]
+                )
             return value
         try:
             if isinstance(annotation, type) and issubclass(annotation, BaseModel):
                 self._check_forbidden_extra_fields(annotation, value)
+                value = self._skip_null_fields(value)
                 if isinstance(value, annotation):
                     return value
                 validated = pydantic_validate_model(annotation, value)
-                return validated if self.transform_enabled else self._strip_extra_fields(annotation, value)
+                return (
+                    validated
+                    if self.transform_enabled
+                    else self._strip_extra_fields(annotation, value)
+                )
             validated = pydantic_validate_type(annotation, value)
             return validated if self.transform_enabled else value
         except ValidationError as exc:
-            errors = _json_safe_errors(exc.errors())
-            if self.exception_factory is not None:
-                raise self.exception_factory(errors) from exc
-            raise BadRequestException(errors) from exc
+            errors = self._filter_errors(_json_safe_errors(exc.errors()))
+            if not errors and isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                if (
+                    self.transform_enabled
+                    and hasattr(annotation, "model_construct")
+                    and isinstance(value, dict)
+                ):
+                    return annotation.model_construct(**self._strip_extra_fields(annotation, value))
+                return self._strip_extra_fields(annotation, value)
+            self._raise_errors(errors, cause=exc)
 
     def _check_forbidden_extra_fields(self, annotation: type[BaseModel], value: Any) -> None:
         if not self.forbid_non_whitelisted or not isinstance(value, dict):
@@ -62,14 +89,43 @@ class ValidationPipe:
                 }
                 for field in extra_fields
             ]
-            if self.exception_factory is not None:
-                raise self.exception_factory(errors)
-            raise BadRequestException(errors)
+            self._raise_errors(self._filter_errors(errors))
 
     def _strip_extra_fields(self, annotation: type[BaseModel], value: Any) -> Any:
         if not self.whitelist or not isinstance(value, dict):
             return value
         return {key: value[key] for key in pydantic_model_fields(annotation) if key in value}
+
+    def _skip_null_fields(self, value: Any) -> Any:
+        if not self.skip_null_properties or not isinstance(value, dict):
+            return value
+        return {key: item for key, item in value.items() if item is not None}
+
+    def _filter_errors(self, errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if self.skip_missing_properties:
+            errors = [error for error in errors if error.get("type") != "missing"]
+        if self.skip_null_properties:
+            errors = [error for error in errors if error.get("input") is not None]
+        if self.stop_at_first_error and errors:
+            errors = errors[:1]
+        if self.disable_error_messages:
+            return [{"type": error.get("type"), "loc": error.get("loc")} for error in errors]
+        return errors
+
+    def _raise_errors(
+        self,
+        errors: list[dict[str, Any]],
+        *,
+        cause: Exception | None = None,
+    ) -> None:
+        if self.exception_factory is not None:
+            raise self.exception_factory(errors) from cause
+        exception: Exception
+        if self.error_http_status_code == 400:
+            exception = BadRequestException(errors)
+        else:
+            exception = FaNestHttpException(self.error_http_status_code, errors)
+        raise exception from cause
 
 
 def _json_safe_errors(errors: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

@@ -19,6 +19,7 @@ from fanest import (
     UseGuards,
     UseInterceptors,
     UsePipes,
+    ValidationPipe,
 )
 
 
@@ -137,3 +138,43 @@ def test_param_query_body_pipes_guards_interceptors_and_filters():
         "user": {"sub": "local"},
     }
     assert TrackingPipe.seen == ["value"]
+
+
+def test_validation_pipe_transform_whitelist_and_skip_options():
+    class UpdateUserDto(BaseModel):
+        name: str
+        age: int
+
+    raw = {"name": "Ada", "extra": "ignored"}
+    pipe = ValidationPipe(transform=False, whitelist=True, skip_missing_properties=True)
+
+    assert pipe.transform(raw, {"annotation": UpdateUserDto}) == {"name": "Ada"}
+
+    transformed = ValidationPipe(transform=True).transform(
+        {"name": "Ada", "age": "37"},
+        {"annotation": UpdateUserDto},
+    )
+
+    assert isinstance(transformed, UpdateUserDto)
+    assert transformed.age == 37
+
+
+def test_validation_pipe_forbid_extra_custom_status_and_error_shape():
+    class CreateUserDto(BaseModel):
+        name: str
+        age: int
+
+    pipe = ValidationPipe(
+        forbid_non_whitelisted=True,
+        stop_at_first_error=True,
+        disable_error_messages=True,
+        error_http_status_code=422,
+    )
+
+    try:
+        pipe.transform({"age": "old", "extra": "blocked"}, {"annotation": CreateUserDto})
+    except Exception as exc:
+        assert getattr(exc, "status_code") == 422
+        assert exc.detail[0] == {"type": "extra_forbidden", "loc": ("extra",)}
+    else:
+        raise AssertionError("ValidationPipe should reject extra fields")

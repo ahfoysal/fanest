@@ -131,9 +131,12 @@ def SetMetadata(key: str, value: Any) -> Callable[[T], T]:
     return decorator
 
 
-def Version(version: str | int) -> Callable[[T], T]:
+def Version(version: str | int | list[str | int] | tuple[str | int, ...]) -> Callable[[T], T]:
     def decorator(target: T) -> T:
-        setattr(target, "__fanest_version__", str(version))
+        if isinstance(version, list | tuple):
+            setattr(target, "__fanest_version__", tuple(str(item) for item in version))
+        else:
+            setattr(target, "__fanest_version__", str(version))
         return target
 
     return decorator

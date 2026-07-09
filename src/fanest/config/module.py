@@ -96,6 +96,12 @@ class ConfigService:
             return typing_cast(T, pydantic_validate_model(schema, self._values))
         return typing_cast(T, pydantic_validate_type(schema, self._values))
 
+    def namespace(self, key: str) -> "ConfigService":
+        value = self.get(key, {})
+        if not isinstance(value, dict):
+            raise TypeError(f"Config namespace {key!r} is not an object")
+        return ConfigService(value)
+
 
 class ConfigModule:
     @staticmethod
@@ -103,20 +109,30 @@ class ConfigModule:
         *,
         env_file: str | list[str] | None,
         values: dict[str, Any] | None = None,
+        load: list[Callable[[], dict[str, Any]]] | tuple[Callable[[], dict[str, Any]], ...] | None = None,
         env_file_encoding: str = "utf-8",
         expand_variables: bool = False,
+        ignore_env_file: bool = False,
+        ignore_env_vars: bool = False,
     ) -> dict[str, Any]:
         config_values: dict[str, Any] = {}
         env_files = [env_file] if isinstance(env_file, str) else env_file or []
-        for file in env_files:
-            config_values.update(
-                ConfigService.read_env_file(
-                    file,
-                    encoding=env_file_encoding,
-                    expand_variables=expand_variables,
+        if not ignore_env_file:
+            for file in env_files:
+                config_values.update(
+                    ConfigService.read_env_file(
+                        file,
+                        encoding=env_file_encoding,
+                        expand_variables=expand_variables,
+                    )
                 )
-            )
-        config_values.update(os.environ)
+        for factory in load or ():
+            loaded = factory()
+            if not isinstance(loaded, dict):
+                raise TypeError("Config load factories must return dictionaries")
+            config_values.update(loaded)
+        if not ignore_env_vars:
+            config_values.update(os.environ)
         config_values.update(values or {})
         return config_values
 
@@ -128,6 +144,9 @@ class ConfigModule:
         expand_variables: bool = False,
         schema: type[BaseModel] | None = None,
         values: dict[str, Any] | None = None,
+        load: list[Callable[[], dict[str, Any]]] | tuple[Callable[[], dict[str, Any]], ...] | None = None,
+        ignore_env_file: bool = False,
+        ignore_env_vars: bool = False,
         is_global: bool = False,
     ) -> type:
         config_values = ConfigModule._load_values(
@@ -135,6 +154,9 @@ class ConfigModule:
             env_file_encoding=env_file_encoding,
             expand_variables=expand_variables,
             values=values,
+            load=load,
+            ignore_env_file=ignore_env_file,
+            ignore_env_vars=ignore_env_vars,
         )
         if schema is not None:
             config_values = pydantic_dump_model(pydantic_validate_model(schema, config_values))
@@ -158,6 +180,9 @@ class ConfigModule:
         env_file_encoding: str = "utf-8",
         expand_variables: bool = False,
         schema: type[BaseModel] | None = None,
+        load: list[Callable[[], dict[str, Any]]] | tuple[Callable[[], dict[str, Any]], ...] | None = None,
+        ignore_env_file: bool = False,
+        ignore_env_vars: bool = False,
         is_global: bool = False,
     ) -> type:
         async def load_values(*dependencies: Any) -> dict[str, Any]:
@@ -165,6 +190,9 @@ class ConfigModule:
                 env_file=env_file,
                 env_file_encoding=env_file_encoding,
                 expand_variables=expand_variables,
+                load=load,
+                ignore_env_file=ignore_env_file,
+                ignore_env_vars=ignore_env_vars,
             )
             result = use_factory(*dependencies)
             if inspect.isawaitable(result):

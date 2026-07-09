@@ -1,3 +1,15 @@
-from fanest.websockets.manager import SocketIoRoomEmitter, SocketIoServer, WebSocketManager
+from fanest.websockets.manager import (
+    SocketIoNamespace,
+    SocketIoRoomEmitter,
+    SocketIoServer,
+    UnsupportedSocketIoProtocolError,
+    WebSocketManager,
+)
 
-__all__ = ["SocketIoRoomEmitter", "SocketIoServer", "WebSocketManager"]
+__all__ = [
+    "SocketIoNamespace",
+    "SocketIoRoomEmitter",
+    "SocketIoServer",
+    "UnsupportedSocketIoProtocolError",
+    "WebSocketManager",
+]

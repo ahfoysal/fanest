@@ -1,3 +1,7 @@
+import base64
+import hashlib
+import hmac
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -77,6 +81,82 @@ class HelmetModule:
             ],
         )
         return DynamicHelmetModule
+
+
+class UnsupportedSecurityFeatureError(NotImplementedError):
+    pass
+
+
+class CsrfModule:
+    @staticmethod
+    def for_root(**_: Any) -> type:
+        raise UnsupportedSecurityFeatureError(
+            "CSRF protection is not built into FaNest yet. "
+            "Install a Starlette/FastAPI CSRF middleware explicitly and register it with @Module middleware."
+        )
+
+
+class PasswordHasher:
+    def __init__(
+        self,
+        *,
+        algorithm: str = "sha256",
+        iterations: int = 600_000,
+        salt_bytes: int = 16,
+    ) -> None:
+        if algorithm not in hashlib.algorithms_available:
+            raise ValueError(f"Unsupported password hash algorithm: {algorithm}")
+        if iterations < 100_000:
+            raise ValueError("PasswordHasher iterations must be at least 100000")
+        if salt_bytes < 16:
+            raise ValueError("PasswordHasher salt_bytes must be at least 16")
+        self.algorithm = algorithm
+        self.iterations = iterations
+        self.salt_bytes = salt_bytes
+
+    def hash(self, password: str | bytes) -> str:
+        password_bytes = _password_bytes(password)
+        salt = os.urandom(self.salt_bytes)
+        digest = hashlib.pbkdf2_hmac(self.algorithm, password_bytes, salt, self.iterations)
+        return "pbkdf2_{algorithm}${iterations}${salt}${digest}".format(
+            algorithm=self.algorithm,
+            iterations=self.iterations,
+            salt=base64.urlsafe_b64encode(salt).decode().rstrip("="),
+            digest=base64.urlsafe_b64encode(digest).decode().rstrip("="),
+        )
+
+    def verify(self, password: str | bytes, encoded_hash: str) -> bool:
+        try:
+            scheme, iterations, salt, expected = encoded_hash.split("$", 3)
+            prefix, algorithm = scheme.split("_", 1)
+            if prefix != "pbkdf2":
+                return False
+            iteration_count = int(iterations)
+            salt_bytes = _urlsafe_b64decode(salt)
+            expected_digest = _urlsafe_b64decode(expected)
+        except (ValueError, TypeError):
+            return False
+        try:
+            digest = hashlib.pbkdf2_hmac(
+                algorithm,
+                _password_bytes(password),
+                salt_bytes,
+                iteration_count,
+            )
+        except ValueError:
+            return False
+        return hmac.compare_digest(digest, expected_digest)
+
+
+def _password_bytes(password: str | bytes) -> bytes:
+    if isinstance(password, bytes):
+        return password
+    return password.encode("utf-8")
+
+
+def _urlsafe_b64decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}")
 
 
 def _validate_headers(headers: dict[str, str | None]) -> dict[str, str]:

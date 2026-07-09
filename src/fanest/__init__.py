@@ -81,7 +81,7 @@ from fanest.common.pipes import (
 )
 from fanest.common.middleware import MiddlewareConsumer
 from fanest.common.responses import StreamableFile
-from fanest.common.serialization import ClassSerializerInterceptor, Serialize
+from fanest.common.serialization import ClassSerializerInterceptor, Exclude, Expose, Serialize
 from fanest.common.upload import (
     AnyFilesInterceptor,
     DiskStorage,
@@ -93,10 +93,12 @@ from fanest.common.upload import (
     disk_storage,
     memory_storage,
 )
+from fanest.common.versioning import VERSION_NEUTRAL, VersioningOptions, VersioningType
 from fanest.core.application import FaNestApplication
 from fanest.core.enhancers import APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE
 from fanest.core.factory import FaNestFactory
 from fanest.core.discovery import DiscoveryService, DiscoveredProvider
+from fanest.core.lazy_loader import LazyModuleLoader
 from fanest.core.metadata import DynamicModule
 from fanest.core.module import Global, Module, dynamic_module
 from fanest.core.module_ref import ModuleRef
@@ -116,7 +118,7 @@ from fanest.core.providers import (
 from fanest.mapped_types import IntersectionType, OmitType, PartialType, PickType
 from fanest.websockets import SocketIoServer, WebSocketManager
 
-__version__ = "0.3.0b1"
+__version__ = "0.3.0b2"
 
 __all__ = [
     "__version__",
@@ -140,6 +142,8 @@ __all__ = [
     "DiskStorage",
     "DynamicModule",
     "DefaultValuePipe",
+    "Exclude",
+    "Expose",
     "FaNestFactory",
     "FaNestApplication",
     "FaNestHttpException",
@@ -164,6 +168,7 @@ __all__ = [
     "Ip",
     "InternalServerErrorException",
     "Injectable",
+    "LazyModuleLoader",
     "MessageBody",
     "Inject",
     "IntersectionType",
@@ -224,6 +229,9 @@ __all__ = [
     "UsePipes",
     "ValidationPipe",
     "Version",
+    "VERSION_NEUTRAL",
+    "VersioningOptions",
+    "VersioningType",
     "Body",
     "Catch",
     "WebSocketGateway",

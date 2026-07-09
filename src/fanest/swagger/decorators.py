@@ -326,7 +326,7 @@ def ApiConsumes(*mime_types: str):
             {
                 "requestBody": {
                     "content": {
-                        mime_type: {"schema": {"type": "object"}} for mime_type in mime_types
+                        mime_type: {} for mime_type in mime_types
                     }
                 }
             },

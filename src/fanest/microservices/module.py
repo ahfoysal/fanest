@@ -5,6 +5,7 @@ import subprocess
 import sys
 import warnings
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 from uuid import uuid4
 
 from fanest.core.container import FaNestContainer
-from fanest.core.metadata import ValueProvider
+from fanest.core.metadata import ExecutionContext, ValueProvider
 from fanest.core.scanner import ModuleScanner
 from fanest import Inject, Module, use_value
 
@@ -28,6 +29,12 @@ class MicroserviceContext:
     message: Any | None = None
     correlation_id: str | None = None
     reply_to: str | None = None
+
+
+@dataclass(frozen=True)
+class TcpContext(MicroserviceContext):
+    remote_address: str | None = None
+    remote_port: int | None = None
 
 
 @dataclass(frozen=True)
@@ -53,13 +60,21 @@ class GrpcContext(MicroserviceContext):
     method: str | None = None
 
 
+@dataclass(frozen=True)
+class MqttContext(MicroserviceContext):
+    topic: str | None = None
+
+
 class Transport(str, Enum):
     MEMORY = "memory"
+    TCP = "tcp"
     REDIS = "redis"
     NATS = "nats"
     RABBITMQ = "rabbitmq"
     KAFKA = "kafka"
     GRPC = "grpc"
+    MQTT = "mqtt"
+    CUSTOM = "custom"
 
 
 class MicroservicePatternError(KeyError):
@@ -469,6 +484,201 @@ class RedisTransport(InMemoryTransport):
         if isinstance(value, bytes):
             return value.decode()
         return str(value)
+
+
+class TcpTransport(InMemoryTransport):
+    context_type = TcpContext
+
+    def __init__(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8877,
+        bind_host: str | None = None,
+        response_timeout: float = 5,
+        serializer: MicroserviceSerializer | None = None,
+        deserializer: MicroserviceSerializer | None = None,
+    ) -> None:
+        super().__init__("tcp", serializer=serializer, deserializer=deserializer)
+        self.host = host
+        self.port = port
+        self.bind_host = bind_host or host
+        self.response_timeout = response_timeout
+        self._server: asyncio.AbstractServer | None = None
+
+    async def connect(self) -> None:
+        if (self.message_handlers or self.event_handlers) and self._server is None:
+            self._server = await asyncio.start_server(self._handle_client, self.bind_host, self.port)
+            sockets = self._server.sockets or []
+            if sockets:
+                bound_host, bound_port = sockets[0].getsockname()[:2]
+                self.bind_host = str(bound_host)
+                self.port = int(bound_port)
+        await super().connect()
+
+    async def close(self) -> None:
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+        await super().close()
+
+    async def send(self, pattern: Any, data: Any) -> Any:
+        if serialize_pattern(pattern) in self.message_handlers:
+            return await super().send(pattern, data)
+        response = await self._round_trip(
+            {
+                "__fanest_ms__": True,
+                "type": "request",
+                "id": str(uuid4()),
+                "pattern": serialize_pattern(pattern),
+                "data": data,
+                "headers": {},
+            }
+        )
+        if response.get("error"):
+            raise MicroserviceRemoteError(
+                str(response["error"]),
+                error_type=str(response.get("error_type") or "Error"),
+            )
+        return response.get("data")
+
+    async def emit(self, pattern: Any, data: Any) -> None:
+        if self.event_handlers.get(serialize_pattern(pattern)):
+            await super().emit(pattern, data)
+            return
+        await self._write_frame(
+            {
+                "__fanest_ms__": True,
+                "type": "event",
+                "id": str(uuid4()),
+                "pattern": serialize_pattern(pattern),
+                "data": data,
+                "headers": {},
+            },
+            wait_for_response=False,
+        )
+
+    async def _round_trip(self, frame: dict[str, Any]) -> dict[str, Any]:
+        response = await self._write_frame(frame, wait_for_response=True)
+        if not isinstance(response, dict):
+            raise MicroserviceTransportError("TCP microservice response must be an object envelope")
+        return response
+
+    async def _write_frame(self, frame: dict[str, Any], *, wait_for_response: bool) -> Any:
+        try:
+            reader, writer = await asyncio.open_connection(self.host, self.port)
+        except OSError as exc:
+            raise MicroserviceTransportError(
+                f"Could not connect to TCP microservice at {self.host}:{self.port}"
+            ) from exc
+        try:
+            writer.write(self.serializer.serialize(frame) + b"\n")
+            await writer.drain()
+            if not wait_for_response:
+                return None
+            line = await asyncio.wait_for(reader.readline(), timeout=self.response_timeout)
+            if not line:
+                raise MicroserviceTransportError("TCP microservice closed before sending a response")
+            return self._load(line.rstrip(b"\r\n"))
+        except asyncio.TimeoutError as exc:
+            raise MicroserviceTimeoutError(
+                f"No TCP microservice response for pattern: {frame.get('pattern')!r}"
+            ) from exc
+        finally:
+            writer.close()
+            with suppress(OSError, RuntimeError):
+                await writer.wait_closed()
+
+    async def _handle_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        peer = writer.get_extra_info("peername")
+        try:
+            line = await reader.readline()
+            if not line:
+                return
+            frame = self._load(line.rstrip(b"\r\n"))
+            if not isinstance(frame, dict):
+                raise MicroserviceTransportError("TCP microservice frame must be an object envelope")
+            frame_type = frame.get("type")
+            if frame_type == "request":
+                response = await self._handle_request_frame(frame, peer)
+                writer.write(self.serializer.serialize(response) + b"\n")
+                await writer.drain()
+            elif frame_type == "event":
+                await self._handle_event_frame(frame, peer)
+            else:
+                raise MicroserviceTransportError(f"Unsupported TCP microservice frame type: {frame_type!r}")
+        except Exception as exc:
+            error = {
+                "__fanest_ms__": True,
+                "id": None,
+                "data": None,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+            with suppress(OSError, RuntimeError):
+                writer.write(self.serializer.serialize(error) + b"\n")
+                await writer.drain()
+        finally:
+            writer.close()
+            with suppress(OSError, RuntimeError):
+                await writer.wait_closed()
+
+    async def _handle_request_frame(self, frame: dict[str, Any], peer: Any) -> dict[str, Any]:
+        correlation_id = str(frame.get("id") or "")
+        try:
+            result = await self._dispatch_message(
+                frame.get("pattern", ""),
+                frame.get("data"),
+                headers=dict(frame.get("headers") or {}),
+                metadata=self._peer_metadata(peer),
+                raw=frame,
+                correlation_id=correlation_id,
+                reply_to="tcp",
+            )
+            return {
+                "__fanest_ms__": True,
+                "id": correlation_id,
+                "data": result,
+                "error": "",
+                "error_type": "",
+            }
+        except Exception as exc:
+            return {
+                "__fanest_ms__": True,
+                "id": correlation_id,
+                "data": None,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+
+    async def _handle_event_frame(self, frame: dict[str, Any], peer: Any) -> None:
+        await self._dispatch_event(
+            frame.get("pattern", ""),
+            frame.get("data"),
+            headers=dict(frame.get("headers") or {}),
+            metadata=self._peer_metadata(peer),
+            raw=frame,
+            correlation_id=frame.get("id"),
+        )
+
+    def _peer_metadata(self, peer: Any) -> dict[str, Any]:
+        if isinstance(peer, tuple) and len(peer) >= 2:
+            return {"remote_address": str(peer[0]), "remote_port": int(peer[1])}
+        return {}
+
+    def create_context(self, **kwargs: Any) -> MicroserviceContext:
+        metadata = kwargs.get("metadata") or {}
+        kwargs.setdefault("transport", self.name)
+        return TcpContext(
+            **kwargs,
+            remote_address=metadata.get("remote_address"),
+            remote_port=metadata.get("remote_port"),
+        )
 
 
 class _BrokerTransport(InMemoryTransport):
@@ -1111,6 +1321,72 @@ class GrpcTransport(_BrokerTransport):
         return GrpcContext(**kwargs, method=str(kwargs.get("pattern")))
 
 
+class MqttTransport(_BrokerTransport):
+    _broker = "mqtt"
+    context_type = MqttContext
+    _install_hint = "MqttTransport requires asyncio-mqtt. Install it with: pip install asyncio-mqtt"
+
+    def __init__(
+        self,
+        *,
+        client: Any | None = None,
+        adapter: TransportAdapter | None = None,
+        serializer: MicroserviceSerializer | None = None,
+        deserializer: MicroserviceSerializer | None = None,
+    ) -> None:
+        super().__init__(adapter=adapter, serializer=serializer, deserializer=deserializer)
+        self._client = client
+
+    async def connect(self) -> None:
+        if self.adapter is not None:
+            await self.adapter.connect()
+        connect = getattr(self._client, "connect", None)
+        if connect is not None:
+            result = connect()
+            if inspect.isawaitable(result):
+                await result
+        self.connected = True
+
+    async def close(self) -> None:
+        if self.adapter is not None:
+            await self.adapter.close()
+        disconnect = getattr(self._client, "disconnect", None)
+        if disconnect is not None:
+            result = disconnect()
+            if inspect.isawaitable(result):
+                await result
+        self.connected = False
+
+    async def send(self, pattern: Any, data: Any) -> Any:
+        if serialize_pattern(pattern) in self.message_handlers or self.adapter is None:
+            return await super().send(pattern, data)
+        return await self.adapter.send(pattern, data)
+
+    async def emit(self, pattern: Any, data: Any) -> None:
+        if self.event_handlers.get(serialize_pattern(pattern)) or self.adapter is None:
+            await super().emit(pattern, data)
+            return
+        await self.adapter.emit(pattern, data)
+
+    def create_context(self, **kwargs: Any) -> MicroserviceContext:
+        metadata = kwargs.get("metadata") or {}
+        kwargs.setdefault("transport", self.name)
+        return MqttContext(**kwargs, topic=metadata.get("topic") or str(kwargs.get("pattern")))
+
+
+class CustomTransport(_BrokerTransport):
+    _broker = "custom"
+
+    def __init__(
+        self,
+        adapter: TransportAdapter,
+        *,
+        serializer: MicroserviceSerializer | None = None,
+        deserializer: MicroserviceSerializer | None = None,
+    ) -> None:
+        super().__init__(adapter=adapter, serializer=serializer, deserializer=deserializer)
+
+
 @dataclass(frozen=True)
 class GrpcProtoArtifacts:
     proto_file: Path
@@ -1273,11 +1549,14 @@ class MicroserviceServer:
         transport_name = transport.value if isinstance(transport, Transport) else transport
         transports = {
             "memory": InMemoryTransport,
+            "tcp": TcpTransport,
             "redis": RedisTransport,
             "nats": NatsTransport,
             "rabbitmq": RabbitMqTransport,
             "kafka": KafkaTransport,
             "grpc": GrpcTransport,
+            "mqtt": MqttTransport,
+            "custom": CustomTransport,
         }
         try:
             transport_class = transports[transport_name]
@@ -1322,16 +1601,143 @@ class MicroserviceServer:
             request_scope = self.container.begin_request() if owns_scope else None
             try:
                 instance = await self.container.resolve_async(provider, module_key=module_key)
-                result = getattr(instance, method_name)(data, context)
-                if inspect.isawaitable(result):
-                    return await result
-                return result
+                method = getattr(instance, method_name)
+                execution_context = ExecutionContext(
+                    handler=method,
+                    controller=instance,
+                    request=context,
+                    kwargs={"data": data, "context": context},
+                )
+                try:
+                    await self._run_guards(instance, method, execution_context, module_key)
+                    execution_context.kwargs["data"] = await self._run_pipes(
+                        instance,
+                        method,
+                        execution_context.kwargs["data"],
+                        execution_context,
+                        module_key,
+                    )
+
+                    async def call_handler() -> Any:
+                        result = method(execution_context.kwargs["data"], context)
+                        if inspect.isawaitable(result):
+                            return await result
+                        return result
+
+                    return await self._run_interceptors(
+                        instance,
+                        method,
+                        execution_context,
+                        call_handler,
+                        module_key,
+                    )
+                except Exception as exc:
+                    handled = await self._run_filters(instance, method, execution_context, exc, module_key)
+                    if handled is not None:
+                        return handled
+                    raise
             finally:
                 if owns_scope and request_scope is not None:
                     self.container.end_request(request_scope)
 
         setattr(handler, "__fanest_registration_key__", (module_key, provider, method_name, "microservice"))
         return handler
+
+    async def _run_guards(
+        self,
+        provider: Any,
+        handler: Callable[..., Any],
+        context: ExecutionContext,
+        module_key: Any,
+    ) -> None:
+        for guard in self._collect(provider, handler, "__fanest_guards__"):
+            instance = await self._resolve_component_async(guard, module_key)
+            result = instance.can_activate(context)
+            if inspect.isawaitable(result):
+                result = await result
+            if not result:
+                raise MicroserviceTransportError("Forbidden")
+
+    async def _run_pipes(
+        self,
+        provider: Any,
+        handler: Callable[..., Any],
+        data: Any,
+        context: ExecutionContext,
+        module_key: Any,
+    ) -> Any:
+        result = data
+        for pipe in self._collect(provider, handler, "__fanest_pipes__"):
+            instance = await self._resolve_component_async(pipe, module_key)
+            transformed = instance.transform(
+                result,
+                {"name": "data", "handler": handler, "annotation": Any, "source": "message"},
+            )
+            if inspect.isawaitable(transformed):
+                transformed = await transformed
+            result = transformed
+            context.kwargs["data"] = result
+        return result
+
+    async def _run_interceptors(
+        self,
+        provider: Any,
+        handler: Callable[..., Any],
+        context: ExecutionContext,
+        call_handler: Callable[[], Any],
+        module_key: Any,
+    ) -> Any:
+        interceptors = self._collect(provider, handler, "__fanest_interceptors__")
+
+        async def dispatch(index: int) -> Any:
+            if index >= len(interceptors):
+                return await call_handler()
+            instance = await self._resolve_component_async(interceptors[index], module_key)
+            result = instance.intercept(context, lambda: dispatch(index + 1))
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        return await dispatch(0)
+
+    async def _run_filters(
+        self,
+        provider: Any,
+        handler: Callable[..., Any],
+        context: ExecutionContext,
+        exc: Exception,
+        module_key: Any,
+    ) -> Any:
+        for exception_filter in self._collect(provider, handler, "__fanest_filters__"):
+            instance = await self._resolve_component_async(exception_filter, module_key)
+            catch_types = getattr(instance.__class__, "__fanest_catch_exceptions__", (Exception,))
+            if not isinstance(exc, catch_types):
+                continue
+            result = instance.catch(exc, context)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        return None
+
+    def _collect(self, provider: Any, handler: Callable[..., Any], key: str) -> list[Any]:
+        provider_values = getattr(provider.__class__, key, [])
+        handler_values = self._metadata(handler, key, [])
+        if key == "__fanest_filters__":
+            return [*handler_values, *provider_values]
+        return [*provider_values, *handler_values]
+
+    async def _resolve_component_async(self, component: Any, module_key: Any) -> Any:
+        if inspect.isclass(component):
+            return await self.container.resolve_async(component, module_key=module_key)
+        return component
+
+    def _metadata(self, target: Any, key: str, default: Any = None) -> Any:
+        if hasattr(target, key):
+            return getattr(target, key)
+        func = getattr(target, "__func__", None)
+        if func is not None and hasattr(func, key):
+            return getattr(func, key)
+        return default
 
 
 class ClientProxy:

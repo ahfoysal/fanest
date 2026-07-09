@@ -1,7 +1,8 @@
 from fastapi.testclient import TestClient
 
 from fanest import Controller, FaNestFactory, Get, Module
-from fanest.metrics import Counted, MetricsModule, MetricsRegistry
+from fanest.core.discovery import DiscoveredProvider
+from fanest.metrics import Counted, DiscoveryGraphExporter, MetricsModule, MetricsRegistry
 
 
 @Controller("work")
@@ -68,3 +69,55 @@ def test_metrics_registry_rejects_invalid_names_labels_and_values():
             pass
         else:
             raise AssertionError("invalid metric input should fail")
+
+
+def test_discovery_graph_exporter_snapshots_providers_controllers_and_module_edges():
+    class OrdersModule:
+        pass
+
+    class OrdersService:
+        pass
+
+    class OrdersController:
+        pass
+
+    class FakeDiscovery:
+        def get_providers(self):
+            return [
+                DiscoveredProvider(
+                    token=OrdersService,
+                    instance=OrdersService(),
+                    module_type=OrdersModule,
+                    metatype=OrdersService,
+                )
+            ]
+
+        def get_controllers(self):
+            return [OrdersController]
+
+    graph = DiscoveryGraphExporter(FakeDiscovery()).snapshot().to_dict()
+
+    assert graph == {
+        "nodes": [
+            {"id": "module:OrdersModule", "label": "OrdersModule", "kind": "module", "module": None},
+            {
+                "id": "provider:OrdersModule:OrdersService",
+                "label": "OrdersService",
+                "kind": "provider",
+                "module": "OrdersModule",
+            },
+            {
+                "id": "controller:OrdersController",
+                "label": "OrdersController",
+                "kind": "controller",
+                "module": None,
+            },
+        ],
+        "edges": [
+            {
+                "source": "module:OrdersModule",
+                "target": "provider:OrdersModule:OrdersService",
+                "kind": "provides",
+            }
+        ],
+    }

@@ -3,7 +3,27 @@ from sqlalchemy import String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from fanest import FaNestFactory, Injectable, Module
-from fanest.sqlalchemy import InjectRepository, SqlAlchemyRepository, SqlAlchemyService, TypeOrmModule
+from fanest.sqlalchemy import (
+    InjectConnection,
+    InjectDataSource,
+    InjectEntityManager,
+    InjectManager,
+    InjectRepository,
+    MikroOrmModule,
+    PrismaModule,
+    SequelizeModule,
+    SqlAlchemyRepository,
+    SqlAlchemyService,
+    Transaction,
+    TypeOrmModule,
+    UnsupportedDatabaseRecipeError,
+    get_current_session,
+    get_connection_token,
+    get_data_source_token,
+    get_entity_manager_token,
+    get_repository_token,
+    repository_token,
+)
 
 
 class Base(DeclarativeBase):
@@ -28,6 +48,31 @@ class UsersOrmService:
         return await self.users.save(User(email=email, name=name))
 
 
+@Injectable()
+class UsersEntityManagerService:
+    def __init__(self, db: SqlAlchemyService = InjectEntityManager()):
+        self.db = db
+
+
+@Injectable()
+class UsersTypeOrmAliasService:
+    def __init__(
+        self,
+        data_source: SqlAlchemyService = InjectDataSource(),
+        connection: SqlAlchemyService = InjectConnection(),
+        manager: SqlAlchemyService = InjectManager(),
+    ):
+        self.data_source = data_source
+        self.connection = connection
+        self.manager = manager
+
+    @Transaction("data_source")
+    async def create_in_transaction(self, users: SqlAlchemyRepository, *, session=None) -> int:
+        assert session is get_current_session()
+        await users.save(User(email="decorator@example.com", name="Decorator"))
+        return await users.count()
+
+
 def make_orm_module(database_url: str) -> type:
     @Module(
         imports=[
@@ -40,6 +85,34 @@ def make_orm_module(database_url: str) -> type:
         pass
 
     return OrmAppModule
+
+
+def make_orm_module_with_manager(database_url: str) -> type:
+    @Module(
+        imports=[
+            TypeOrmModule.for_root(database_url=database_url),
+            TypeOrmModule.for_feature((User,)),
+        ],
+        providers=[UsersEntityManagerService],
+    )
+    class OrmManagerAppModule:
+        pass
+
+    return OrmManagerAppModule
+
+
+def make_orm_module_with_aliases(database_url: str) -> type:
+    @Module(
+        imports=[
+            TypeOrmModule.for_root(database_url=database_url),
+            TypeOrmModule.for_feature([User]),
+        ],
+        providers=[UsersTypeOrmAliasService],
+    )
+    class OrmAliasAppModule:
+        pass
+
+    return OrmAliasAppModule
 
 
 @pytest.mark.anyio
@@ -236,6 +309,13 @@ def test_sqlalchemy_dynamic_modules_are_stable_for_identical_options():
 
     assert TypeOrmModule.for_root(database_url=database_url) is TypeOrmModule.for_root(database_url=database_url)
     assert TypeOrmModule.for_feature([User]) is TypeOrmModule.for_feature([User])
+    assert get_repository_token(User) == repository_token(User)
+    assert get_repository_token(User, "default") == repository_token(User)
+    assert get_connection_token() == get_data_source_token("default")
+    assert get_data_source_token() != get_entity_manager_token()
+    assert get_data_source_token() != get_repository_token(User)
+    with pytest.raises(UnsupportedDatabaseRecipeError, match="Named TypeORM data sources"):
+        get_repository_token(User, "reporting")
 
     async def options_factory():
         return {"database_url": database_url}
@@ -243,3 +323,69 @@ def test_sqlalchemy_dynamic_modules_are_stable_for_identical_options():
     assert TypeOrmModule.for_root_async(use_factory=options_factory) is TypeOrmModule.for_root_async(
         use_factory=options_factory
     )
+
+
+@pytest.mark.anyio
+async def test_sqlalchemy_session_helpers_and_entity_manager_injection(tmp_path):
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'session-helpers.db'}"
+    app = FaNestFactory.create(make_orm_module_with_manager(database_url))
+    container = app.state.fanest_container
+    manager = container.resolve(UsersEntityManagerService)
+
+    async with manager.db.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    repository = manager.db.get_repository(User)
+
+    async with manager.db.session_scope() as session:
+        session.add(User(email="scope@example.com", name="Scope"))
+        await session.commit()
+
+    async def create_in_transaction(session):
+        assert get_current_session() is session
+        await repository.save(User(email="tx-helper@example.com", name="Tx Helper"))
+        return await repository.count()
+
+    assert await manager.db.run_in_transaction(create_in_transaction) == 2
+    assert get_current_session() is None
+    assert await repository.exists(email="tx-helper@example.com") is True
+    await manager.db.close()
+
+
+@pytest.mark.anyio
+async def test_typeorm_data_source_connection_and_transaction_aliases(tmp_path):
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'typeorm-aliases.db'}"
+    app = FaNestFactory.create(make_orm_module_with_aliases(database_url))
+    container = app.state.fanest_container
+    db = container.resolve(SqlAlchemyService)
+
+    async with db.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    service = container.resolve(UsersTypeOrmAliasService)
+    repository = container.resolve(get_repository_token(User))
+
+    assert service.data_source is db
+    assert service.connection is db
+    assert service.manager is db
+    assert container.resolve(get_data_source_token()) is db
+    assert container.resolve(get_entity_manager_token()) is db
+    assert await service.create_in_transaction(repository) == 1
+    assert await repository.exists(email="decorator@example.com") is True
+    await db.close()
+
+
+def test_javascript_orm_recipe_modules_raise_clear_python_native_error():
+    for module in (SequelizeModule, MikroOrmModule, PrismaModule):
+        with pytest.raises(UnsupportedDatabaseRecipeError, match="Python-native"):
+            module.for_root()
+
+
+def test_javascript_orm_stub_packages_import_and_raise_clear_alternatives():
+    from fanest.mikroorm import MikroOrmModule as StubMikroOrmModule
+    from fanest.prisma import PrismaModule as StubPrismaModule
+    from fanest.sequelize import SequelizeModule as StubSequelizeModule
+
+    for module in (StubSequelizeModule, StubMikroOrmModule, StubPrismaModule):
+        with pytest.raises(UnsupportedDatabaseRecipeError, match="SqlAlchemyModule / TypeOrmModule"):
+            module.for_feature([])

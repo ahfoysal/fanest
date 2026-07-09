@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from fanest import (
     ClassSerializerInterceptor,
+    Catch,
     Controller,
     FaNestFactory,
     Get,
@@ -18,13 +19,17 @@ from fanest import (
     PartialType,
     PickType,
     Serialize,
+    UseFilters,
+    UseGuards,
     UseInterceptors,
+    UsePipes,
 )
 from fanest.microservices import EventPattern, MessagePattern, MicroserviceServer, RedisTransport
 from fanest.microservices import (
     ClientProxy,
     ClientProxyFactory,
     ClientsModule,
+    CustomTransport,
     GrpcTransport,
     GrpcProtoLoader,
     InjectClient,
@@ -36,6 +41,8 @@ from fanest.microservices import (
     MicroserviceRemoteError,
     MicroserviceTimeoutError,
     MicroserviceTransportError,
+    MqttContext,
+    MqttTransport,
     NatsContext,
     NatsTransport,
     RabbitMqTransport,
@@ -507,11 +514,14 @@ async def test_redis_transport_accepts_client_hook_for_stream_integration():
 
 
 @pytest.mark.live_redis
-@pytest.mark.skipif(not os.getenv("FANEST_LIVE_REDIS"), reason="set FANEST_LIVE_REDIS to run live Redis checks")
+@pytest.mark.skipif(
+    not os.getenv("FANEST_LIVE_REDIS_URL"),
+    reason="set FANEST_LIVE_REDIS_URL to run live Redis checks",
+)
 @pytest.mark.anyio
 async def test_live_redis_transport_connects_when_enabled():
     transport = RedisTransport(
-        url=os.getenv("FANEST_LIVE_REDIS_URL", "redis://localhost:6379/0"),
+        url=os.environ["FANEST_LIVE_REDIS_URL"],
         prefix="fanest:live-micro:",
     )
 
@@ -537,6 +547,56 @@ async def test_network_transports_delegate_to_custom_adapter_for_broker_integrat
 
 
 @pytest.mark.anyio
+async def test_mqtt_and_custom_transporter_contracts_delegate_to_adapters():
+    assert CustomTransport.__name__ == "CustomTransport"
+    mqtt_adapter = FakeBrokerAdapter()
+    mqtt_client = ClientProxy(MqttTransport(adapter=mqtt_adapter))
+    assert await mqtt_client.send("devices.status", {"id": 1}) == {
+        "pattern": "devices.status",
+        "data": {"id": 1},
+    }
+    await mqtt_client.close()
+
+    custom_adapter = FakeBrokerAdapter()
+    custom_client = ClientProxyFactory.create(
+        transport=Transport.CUSTOM,
+        adapter=custom_adapter,
+    )
+    await custom_client.emit("custom.event", {"ok": True})
+    await custom_client.close()
+
+    assert mqtt_adapter.connected is True
+    assert mqtt_adapter.closed is True
+    assert custom_adapter.connected is True
+    assert custom_adapter.closed is True
+    assert custom_adapter.emitted == [("custom.event", {"ok": True})]
+
+
+@pytest.mark.anyio
+async def test_mqtt_transport_preserves_local_context_shape():
+    seen: list[MqttContext] = []
+
+    class MqttService:
+        @MessagePattern("devices.status")
+        async def status(self, data, context):
+            seen.append(context)
+            return {"data": data, "topic": context.topic, "transport": context.transport}
+
+    @Module(providers=[MqttService])
+    class MqttModule:
+        pass
+
+    server = MicroserviceServer(MqttModule, transport=MqttTransport()).compile()
+
+    assert await server.client().send("devices.status", {"id": 1}) == {
+        "data": {"id": 1},
+        "topic": "devices.status",
+        "transport": "mqtt",
+    }
+    assert isinstance(seen[-1], MqttContext)
+
+
+@pytest.mark.anyio
 async def test_client_proxy_factory_accepts_nest_style_options_object():
     adapter = FakeBrokerAdapter()
     client = ClientProxyFactory.create(
@@ -554,6 +614,63 @@ async def test_client_proxy_factory_accepts_nest_style_options_object():
 
     assert adapter.connected is True
     assert adapter.closed is True
+
+
+class MicroGuard:
+    def can_activate(self, context):
+        return context.request.headers.get("x-allow") == "yes"
+
+
+class MicroUpperPipe:
+    def transform(self, value, metadata):
+        return str(value).upper()
+
+
+class MicroEnvelopeInterceptor:
+    async def intercept(self, context, call_next):
+        result = await call_next()
+        return {"wrapped": result, "transport": context.request.transport}
+
+
+@Catch(MicroserviceTransportError)
+class MicroErrorFilter:
+    def catch(self, exc, context):
+        return {"error": str(exc), "pattern": context.request.pattern}
+
+
+@UseFilters(MicroErrorFilter)
+class EnhancedMicroservice:
+    @MessagePattern("enhanced.ok")
+    @UseGuards(MicroGuard)
+    @UsePipes(MicroUpperPipe())
+    @UseInterceptors(MicroEnvelopeInterceptor())
+    async def ok(self, data, context):
+        return {"value": data}
+
+    @MessagePattern("enhanced.denied")
+    @UseGuards(MicroGuard)
+    async def denied(self, data, context):
+        return data
+
+
+@Module(providers=[EnhancedMicroservice, MicroGuard, MicroErrorFilter])
+class EnhancedMicroModule:
+    pass
+
+
+@pytest.mark.anyio
+async def test_microservice_handlers_run_guards_pipes_interceptors_and_filters():
+    server = MicroserviceServer(EnhancedMicroModule).compile()
+
+    assert await server.transport._dispatch_message(
+        "enhanced.ok",
+        "hello",
+        headers={"x-allow": "yes"},
+    ) == {"wrapped": {"value": "HELLO"}, "transport": "memory"}
+    assert await server.client().send("enhanced.denied", "nope") == {
+        "error": "Forbidden",
+        "pattern": "enhanced.denied",
+    }
 
 
 @pytest.mark.anyio

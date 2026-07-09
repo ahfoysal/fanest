@@ -397,6 +397,31 @@ def test_cache_service_remember_and_has_use_default_ttl():
     assert cache.has("remembered") is True
 
 
+def test_cache_service_exposes_cache_manager_style_bulk_wrap_and_reset_apis():
+    cache = CacheService({"ttl": None})
+    calls = 0
+
+    def load():
+        nonlocal calls
+        calls += 1
+        return {"value": calls}
+
+    cache.mset({"a": 1, "b": 2})
+
+    assert cache.mget("a", "b", "missing") == [1, 2, None]
+    assert cache.wrap("wrapped", load) == {"value": 1}
+    assert cache.wrap("wrapped", load) == {"value": 1}
+    assert calls == 1
+
+    cache.mdel("a", "wrapped")
+
+    assert cache.mget("a", "wrapped", "b") == [None, None, 2]
+
+    cache.reset()
+
+    assert cache.mget("a", "b") == [None, None]
+
+
 class AsyncCacheStore:
     def __init__(self) -> None:
         self.values: dict[str, object] = {}
@@ -622,9 +647,12 @@ def test_throttler_supports_custom_trackers_and_skip_decorator():
 
 
 @pytest.mark.live_redis
-@pytest.mark.skipif(not os.getenv("FANEST_LIVE_REDIS"), reason="set FANEST_LIVE_REDIS to run live Redis checks")
+@pytest.mark.skipif(
+    not os.getenv("FANEST_LIVE_REDIS_URL"),
+    reason="set FANEST_LIVE_REDIS_URL to run live Redis checks",
+)
 def test_live_redis_cache_session_and_throttler_when_enabled():
-    url = os.getenv("FANEST_LIVE_REDIS_URL", "redis://localhost:6379/0")
+    url = os.environ["FANEST_LIVE_REDIS_URL"]
     cache = RedisCacheStore(url=url, prefix="fanest:live-cache:")
     session = RedisSessionStore(url=url, prefix="fanest:live-session:")
     throttler = RedisThrottlerStore(url=url, prefix="fanest:live-throttle:")

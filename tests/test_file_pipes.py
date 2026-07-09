@@ -344,3 +344,50 @@ def test_any_files_interceptor_applies_limits_across_declared_file_parameters():
     assert accepted.json() == {"count": 2}
     assert too_many.status_code == 400
     assert too_large.status_code == 413
+
+
+def test_upload_interceptors_enforce_files_and_fields_limits():
+    @Controller("upload-limits")
+    class UploadLimitController:
+        @UseInterceptors(FilesInterceptor("photos", limits={"files": 1}))
+        @Post("/files")
+        async def files(self, photos=UploadedFiles("photos")):
+            return {"count": len(photos)}
+
+        @UseInterceptors(
+            FileFieldsInterceptor(
+                [{"name": "avatar"}, {"name": "gallery"}],
+                limits={"fields": 1},
+            )
+        )
+        @Post("/fields")
+        async def fields(
+            self,
+            avatar=UploadedFile("avatar"),
+            gallery=UploadedFiles("gallery", default=None),
+        ):
+            return {"avatar": avatar.filename, "count": len(gallery or [])}
+
+    @Module(controllers=[UploadLimitController])
+    class UploadLimitModule:
+        pass
+
+    client = TestClient(FaNestFactory.create(UploadLimitModule))
+
+    too_many_files = client.post(
+        "/upload-limits/files",
+        files=[
+            ("photos", ("one.txt", b"1", "text/plain")),
+            ("photos", ("two.txt", b"2", "text/plain")),
+        ],
+    )
+    too_many_fields = client.post(
+        "/upload-limits/fields",
+        files=[
+            ("avatar", ("avatar.txt", b"1", "text/plain")),
+            ("gallery", ("one.txt", b"2", "text/plain")),
+        ],
+    )
+
+    assert too_many_files.status_code == 400
+    assert too_many_fields.status_code == 400

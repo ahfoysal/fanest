@@ -1,4 +1,5 @@
 import asyncio
+import enum
 import inspect
 import re
 from collections.abc import AsyncIterator, Callable
@@ -29,6 +30,7 @@ class GraphQLField:
     args: dict[str, Any]
     selection: list["GraphQLField"] | None = None
     location: tuple[int, int] | None = None
+    type_condition: str | None = None
 
 
 class GraphQLParseError(ValueError):
@@ -37,6 +39,14 @@ class GraphQLParseError(ValueError):
 
 class GraphQLUnsupportedFeatureError(NotImplementedError):
     pass
+
+
+_UNSUPPORTED_FEDERATION_DIRECTIVES = {
+    "extends": "@extends",
+    "external": "@external",
+    "provides": "@provides",
+    "requires": "@requires",
+}
 
 
 @dataclass(frozen=True)
@@ -52,6 +62,8 @@ class GraphQLObjectMetadata:
     kind: str
     fields: dict[str, Any] = field(default_factory=dict)
     federation: dict[str, Any] = field(default_factory=dict)
+    directives: tuple[str, ...] = ()
+    field_directives: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -59,6 +71,13 @@ class GraphQLValidationIssue:
     message: str
     path: list[str] | None = None
     location: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True)
+class GraphQLDirectiveMetadata:
+    name: str
+    locations: tuple[str, ...] = ()
+    repeatable: bool = False
 
 
 def _format_validation_issue(schema: "GraphQLSchema", issue: GraphQLValidationIssue) -> dict[str, Any]:
@@ -133,6 +152,54 @@ def _copy_enhancer_metadata(source: Any, target: Any) -> None:
             setattr(target, key, list(values))
 
 
+def _set_federation_metadata(target: Any, values: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(getattr(target, "__fanest_graphql_federation__", {}))
+    metadata.update(values)
+    setattr(target, "__fanest_graphql_federation__", metadata)
+    existing_type = getattr(target, "__fanest_graphql_type__", None)
+    if existing_type is not None:
+        setattr(
+            target,
+            "__fanest_graphql_type__",
+            GraphQLObjectMetadata(
+                name=existing_type.name,
+                kind=existing_type.kind,
+                fields=existing_type.fields,
+                federation=metadata,
+                directives=existing_type.directives,
+                field_directives=existing_type.field_directives,
+            ),
+        )
+    return metadata
+
+
+def _append_graphql_directive_usage(target: Any, directive: str) -> None:
+    usages: list[str] = list(getattr(target, "__fanest_graphql_directives__", ()))
+    usages.append(directive.strip())
+    setattr(target, "__fanest_graphql_directives__", tuple(usages))
+    field_metadata = getattr(target, "__fanest_graphql_field__", None)
+    if field_metadata is not None:
+        setattr(
+            target,
+            "__fanest_graphql_field__",
+            {**field_metadata, "directives": tuple(usages)},
+        )
+    existing_type = getattr(target, "__fanest_graphql_type__", None)
+    if existing_type is not None:
+        setattr(
+            target,
+            "__fanest_graphql_type__",
+            GraphQLObjectMetadata(
+                name=existing_type.name,
+                kind=existing_type.kind,
+                fields=existing_type.fields,
+                federation=existing_type.federation,
+                directives=tuple(usages),
+                field_directives=existing_type.field_directives,
+            ),
+        )
+
+
 def Resolver(cls=None):
     # Accept both `@Resolver` and `@Resolver()` so the wrong form does not raise.
     if cls is None:
@@ -148,7 +215,12 @@ def ObjectType(name: str | None = None):
         setattr(
             cls,
             "__fanest_graphql_type__",
-            GraphQLObjectMetadata(name=name or cls.__name__, kind="object", federation=federation),
+            GraphQLObjectMetadata(
+                name=name or cls.__name__,
+                kind="object",
+                federation=federation,
+                directives=tuple(getattr(cls, "__fanest_graphql_directives__", ())),
+            ),
         )
         return cls
 
@@ -157,7 +229,15 @@ def ObjectType(name: str | None = None):
 
 def InputType(name: str | None = None):
     def decorator(cls: type[T]) -> type[T]:
-        setattr(cls, "__fanest_graphql_type__", GraphQLObjectMetadata(name=name or cls.__name__, kind="input"))
+        setattr(
+            cls,
+            "__fanest_graphql_type__",
+            GraphQLObjectMetadata(
+                name=name or cls.__name__,
+                kind="input",
+                directives=tuple(getattr(cls, "__fanest_graphql_directives__", ())),
+            ),
+        )
         return cls
 
     return decorator
@@ -170,14 +250,128 @@ def Args(name: str | None = None, *pipes: Any, default: Any = ...) -> Any:
 def Field(type_: Any = None, *, name: str | None = None):
     def decorator(target):
         field_name = name or getattr(target, "__name__", None)
-        setattr(target, "__fanest_graphql_field__", {"name": field_name, "type": type_})
+        setattr(
+            target,
+            "__fanest_graphql_field__",
+            {
+                "name": field_name,
+                "type": type_,
+                "directives": tuple(getattr(target, "__fanest_graphql_directives__", ())),
+            },
+        )
         return target
 
     if callable(type_) and not isinstance(type_, type):
         target = type_
         type_hint = getattr(target, "__annotations__", {}).get("return")
-        setattr(target, "__fanest_graphql_field__", {"name": getattr(target, "__name__", None), "type": type_hint})
+        setattr(
+            target,
+            "__fanest_graphql_field__",
+            {
+                "name": getattr(target, "__name__", None),
+                "type": type_hint,
+                "directives": tuple(getattr(target, "__fanest_graphql_directives__", ())),
+            },
+        )
         return target
+    return decorator
+
+
+def InterfaceType(name: str | None = None):
+    def decorator(cls: type[T]) -> type[T]:
+        setattr(
+            cls,
+            "__fanest_graphql_type__",
+            GraphQLObjectMetadata(
+                name=name or cls.__name__,
+                kind="interface",
+                directives=tuple(getattr(cls, "__fanest_graphql_directives__", ())),
+            ),
+        )
+        return cls
+
+    return decorator
+
+
+def UnionType(name: str | None = None, *, types: tuple[type, ...] | list[type] = ()):
+    def decorator(cls: type[T]) -> type[T]:
+        union_types = []
+        for item in types:
+            metadata = getattr(item, "__fanest_graphql_type__", None)
+            union_types.append(metadata.name if metadata is not None else item.__name__)
+        setattr(
+            cls,
+            "__fanest_graphql_type__",
+            GraphQLObjectMetadata(
+                name=name or cls.__name__,
+                kind="union",
+                fields={"types": tuple(union_types)},
+                directives=tuple(getattr(cls, "__fanest_graphql_directives__", ())),
+            ),
+        )
+        return cls
+
+    return decorator
+
+
+def EnumType(enum_cls: type[T] | None = None, *, name: str | None = None):
+    def decorator(cls: type[T]) -> type[T]:
+        if issubclass(cls, enum.Enum):
+            values = tuple(item.name for item in cls)
+        else:
+            values = tuple(key for key, value in vars(cls).items() if key.isupper() and not callable(value))
+        setattr(
+            cls,
+            "__fanest_graphql_type__",
+            GraphQLObjectMetadata(
+                name=name or cls.__name__,
+                kind="enum",
+                fields={value: value for value in values},
+                directives=tuple(getattr(cls, "__fanest_graphql_directives__", ())),
+            ),
+        )
+        return cls
+
+    if enum_cls is None:
+        return decorator
+    return decorator(enum_cls)
+
+
+def Scalar(name: str | None = None, *, serialize: Callable[[Any], Any] | None = None, parse_value: Callable[[Any], Any] | None = None):
+    def decorator(target: T) -> T:
+        setattr(
+            target,
+            "__fanest_graphql_scalar__",
+            {
+                "name": name or getattr(target, "__name__", str(target)),
+                "serialize": serialize or getattr(target, "serialize", None),
+                "parse_value": parse_value or getattr(target, "parse_value", None),
+            },
+        )
+        return target
+
+    return decorator
+
+
+def Directive(name: str, *, locations: tuple[str, ...] | list[str] = (), repeatable: bool = False):
+    def decorator(target: T) -> T:
+        directive_name = name.strip()
+        setattr(
+            target,
+            "__fanest_graphql_directive__",
+            GraphQLDirectiveMetadata(name=directive_name.lstrip("@").split("(", 1)[0], locations=tuple(locations), repeatable=repeatable),
+        )
+        _append_graphql_directive_usage(target, directive_name if directive_name.startswith("@") else f"@{directive_name}")
+        return target
+
+    return decorator
+
+
+def UseFieldMiddleware(*middleware: Any) -> Callable[[T], T]:
+    def decorator(target: T) -> T:
+        _append_metadata(target, "__fanest_graphql_field_middleware__", middleware)
+        return target
+
     return decorator
 
 
@@ -279,24 +473,18 @@ def Key(fields: str):
 
 
 def Extends(target: T) -> T:
-    metadata = dict(getattr(target, "__fanest_graphql_federation__", {}))
-    metadata["extends"] = True
-    setattr(target, "__fanest_graphql_federation__", metadata)
+    _set_federation_metadata(target, {"extends": True})
     return target
 
 
 def External(target: T) -> T:
-    metadata = dict(getattr(target, "__fanest_graphql_federation__", {}))
-    metadata["external"] = True
-    setattr(target, "__fanest_graphql_federation__", metadata)
+    _set_federation_metadata(target, {"external": True})
     return target
 
 
 def Provides(fields: str):
     def decorator(target: T) -> T:
-        metadata = dict(getattr(target, "__fanest_graphql_federation__", {}))
-        metadata["provides"] = fields
-        setattr(target, "__fanest_graphql_federation__", metadata)
+        _set_federation_metadata(target, {"provides": fields})
         return target
 
     return decorator
@@ -304,9 +492,7 @@ def Provides(fields: str):
 
 def Requires(fields: str):
     def decorator(target: T) -> T:
-        metadata = dict(getattr(target, "__fanest_graphql_federation__", {}))
-        metadata["requires"] = fields
-        setattr(target, "__fanest_graphql_federation__", metadata)
+        _set_federation_metadata(target, {"requires": fields})
         return target
 
     return decorator
@@ -314,8 +500,12 @@ def Requires(fields: str):
 
 class GraphQLSDLParser:
     _type_pattern = re.compile(r"\b(type|input|interface)\s+([_A-Za-z][_0-9A-Za-z]*)[^{]*\{([^}]*)\}", re.DOTALL)
+    _enum_pattern = re.compile(r"\benum\s+([_A-Za-z][_0-9A-Za-z]*)[^{]*\{([^}]*)\}", re.DOTALL)
+    _scalar_pattern = re.compile(r"\bscalar\s+([_A-Za-z][_0-9A-Za-z]*)")
+    _union_pattern = re.compile(r"\bunion\s+([_A-Za-z][_0-9A-Za-z]*)\s*=\s*([^\n#]+)")
     _field_pattern = re.compile(r"^([_A-Za-z][_0-9A-Za-z]*)\s*(?:\([^)]*\))?\s*:\s*([^@#\n]+)")
     _key_pattern = re.compile(r'@key\s*\(\s*fields\s*:\s*"([^"]+)"\s*\)')
+    _directive_usage_pattern = re.compile(r"@[_A-Za-z][_0-9A-Za-z]*(?:\s*\([^)]*\))?")
 
     @classmethod
     def parse(cls, sdl: str) -> dict[str, GraphQLObjectMetadata]:
@@ -323,6 +513,7 @@ class GraphQLSDLParser:
         for match in cls._type_pattern.finditer(sdl):
             kind, name, body = match.groups()
             fields: dict[str, str] = {}
+            field_directives: dict[str, tuple[str, ...]] = {}
             for raw_line in body.splitlines():
                 line = raw_line.split("#", 1)[0].strip()
                 if not line:
@@ -332,30 +523,84 @@ class GraphQLSDLParser:
                     continue
                 field_name, field_type = field_match.groups()
                 fields[field_name] = field_type.strip()
+                directives = cls._directive_usages(line[field_match.end() :])
+                if directives:
+                    field_directives[field_name] = directives
             federation: dict[str, Any] = {}
             key_match = cls._key_pattern.search(match.group(0))
             if key_match is not None:
                 federation["keys"] = [key_match.group(1)]
+            header = match.group(0).split("{", 1)[0]
+            type_directives = cls._directive_usages(header)
             types[name] = GraphQLObjectMetadata(
                 name=name,
-                kind="input" if kind == "input" else "object",
+                kind={"type": "object", "input": "input", "interface": "interface"}[kind],
                 fields=fields,
                 federation=federation,
+                directives=type_directives,
+                field_directives=field_directives,
             )
+        for match in cls._enum_pattern.finditer(sdl):
+            name, body = match.groups()
+            values = [
+                line.split("#", 1)[0].strip().split()[0]
+                for line in body.splitlines()
+                if line.split("#", 1)[0].strip()
+            ]
+            types[name] = GraphQLObjectMetadata(
+                name=name,
+                kind="enum",
+                fields={value: value for value in values},
+            )
+        for match in cls._union_pattern.finditer(sdl):
+            name, raw_types = match.groups()
+            union_types = tuple(part.strip() for part in raw_types.split("|") if part.strip())
+            types[name] = GraphQLObjectMetadata(
+                name=name,
+                kind="union",
+                fields={"types": union_types},
+            )
+        for match in cls._scalar_pattern.finditer(sdl):
+            name = match.group(1)
+            types.setdefault(name, GraphQLObjectMetadata(name=name, kind="scalar"))
         return types
+
+    @classmethod
+    def _directive_usages(cls, source: str) -> tuple[str, ...]:
+        return tuple(" ".join(match.group(0).split()) for match in cls._directive_usage_pattern.finditer(source))
 
 
 @Injectable()
 class GraphQLSchema:
-    def __init__(self, *, federation: bool = False, federation_sdl: str | None = None):
+    _builtin_scalars = {"String", "Int", "Float", "Boolean", "ID"}
+
+    def __init__(
+        self,
+        *,
+        federation: bool = False,
+        federation_sdl: str | None = None,
+        max_complexity: int | None = None,
+        extensions: dict[str, Any] | None = None,
+        plugins: list[Any] | None = None,
+        field_middleware: list[Any] | None = None,
+    ):
         self.queries: dict[str, Any] = {}
         self.mutations: dict[str, Any] = {}
         self.subscriptions: dict[str, Any] = {}
         self.field_resolvers: dict[str, Any] = {}
         self.types: dict[str, GraphQLObjectMetadata] = {}
+        self.scalars: dict[str, dict[str, Any]] = {}
+        self.directives: dict[str, GraphQLDirectiveMetadata] = {
+            "include": GraphQLDirectiveMetadata("include", ("FIELD", "FRAGMENT_SPREAD", "INLINE_FRAGMENT")),
+            "skip": GraphQLDirectiveMetadata("skip", ("FIELD", "FRAGMENT_SPREAD", "INLINE_FRAGMENT")),
+        }
         self._field_registrations: dict[tuple[str, str], Any] = {}
         self._sdl = federation_sdl or ""
         self.federation = federation
+        self.max_complexity = max_complexity
+        self.extensions = dict(extensions or {})
+        self.plugins = list(plugins or [])
+        self.field_middleware = list(field_middleware or [])
         self._entity_resolvers: dict[str, Any] = {}
         if federation:
             self.queries["_service"] = self._service
@@ -365,17 +610,86 @@ class GraphQLSchema:
         self._sdl = f"{self._sdl}\n{sdl}".strip()
         self.types.update(GraphQLSDLParser.parse(sdl))
 
+    def register_model(self, model: type) -> None:
+        metadata = getattr(model, "__fanest_graphql_type__", None)
+        if metadata is None:
+            raise GraphQLUnsupportedFeatureError(
+                f"GraphQL model sharing requires @ObjectType, @InputType, @InterfaceType, @UnionType, or @EnumType: {model.__name__}"
+            )
+        fields = dict(metadata.fields)
+        field_directives = dict(metadata.field_directives)
+        model_fields = getattr(model, "model_fields", None)
+        if isinstance(model_fields, dict):
+            for field_name, model_field in model_fields.items():
+                fields.setdefault(field_name, getattr(model_field, "annotation", None))
+        for _, member in inspect.getmembers(model, predicate=callable):
+            field_metadata = getattr(member, "__fanest_graphql_field__", None)
+            if field_metadata is not None:
+                field_name = field_metadata["name"] or member.__name__
+                fields[field_name] = field_metadata.get("type")
+                if field_metadata.get("directives"):
+                    field_directives[field_name] = tuple(field_metadata["directives"])
+        if fields != metadata.fields or field_directives != metadata.field_directives:
+            metadata = GraphQLObjectMetadata(
+                name=metadata.name,
+                kind=metadata.kind,
+                fields=fields,
+                federation=metadata.federation,
+                directives=metadata.directives,
+                field_directives=field_directives,
+            )
+        self.types[metadata.name] = metadata
+
+    def register_scalar(self, scalar: Any, *, name: str | None = None) -> None:
+        metadata = getattr(scalar, "__fanest_graphql_scalar__", None)
+        scalar_name = name or (metadata or {}).get("name") or getattr(scalar, "__name__", str(scalar))
+        if not hasattr(self, "scalars"):
+            self.scalars = {}
+        self.scalars[str(scalar_name)] = {
+            "target": scalar,
+            "serialize": (metadata or {}).get("serialize") or getattr(scalar, "serialize", None),
+            "parse_value": (metadata or {}).get("parse_value") or getattr(scalar, "parse_value", None),
+        }
+        self.types[str(scalar_name)] = GraphQLObjectMetadata(name=str(scalar_name), kind="scalar")
+
+    def register_directive(self, directive: Any) -> None:
+        metadata = getattr(directive, "__fanest_graphql_directive__", None)
+        if metadata is None:
+            if isinstance(directive, str):
+                metadata = GraphQLDirectiveMetadata(directive.lstrip("@"))
+            else:
+                raise GraphQLUnsupportedFeatureError(
+                    f"GraphQL directives must use @Directive metadata: {directive!r}"
+                )
+        self.directives[metadata.name] = metadata
+
     def register_resolver(self, resolver: Any) -> None:
         type_metadata = getattr(resolver.__class__, "__fanest_graphql_type__", None)
         if type_metadata is not None:
+            self._ensure_supported_federation_metadata(type_metadata.federation, owner=type_metadata.name)
             self.types[type_metadata.name] = type_metadata
         for _, handler in inspect.getmembers(resolver, predicate=callable):
             metadata = getattr(handler, "__fanest_graphql__", None)
             field_metadata = getattr(handler, "__fanest_graphql_field__", None)
+            self._ensure_supported_federation_metadata(
+                getattr(handler, "__fanest_graphql_federation__", {}),
+                owner=getattr(handler, "__name__", "GraphQL field"),
+            )
             if field_metadata is not None:
                 type_name = type_metadata.name if type_metadata is not None else resolver.__class__.__name__
                 current = self.types.get(type_name) or GraphQLObjectMetadata(name=type_name, kind="object")
-                current.fields[field_metadata["name"] or handler.__name__] = field_metadata.get("type")
+                registered_field_name = field_metadata["name"] or handler.__name__
+                current.fields[registered_field_name] = field_metadata.get("type")
+                directives: list[str] = list(field_metadata.get("directives") or ())
+                federation = getattr(handler, "__fanest_graphql_federation__", {})
+                if federation.get("external"):
+                    directives.append("@external")
+                if isinstance(federation.get("provides"), str):
+                    directives.append(f'@provides(fields: "{federation["provides"]}")')
+                if isinstance(federation.get("requires"), str):
+                    directives.append(f'@requires(fields: "{federation["requires"]}")')
+                if directives:
+                    current.field_directives[registered_field_name] = tuple(directives)
                 self.types[type_name] = current
             if metadata is None:
                 continue
@@ -399,6 +713,9 @@ class GraphQLSchema:
             reference_handler = self._reference_handler(resolver)
             if reference_handler is not None:
                 self._entity_resolvers[type_metadata.name] = reference_handler
+
+    def _ensure_supported_federation_metadata(self, metadata: dict[str, Any], *, owner: str) -> None:
+        return
 
     async def _service(self) -> dict[str, str]:
         return {"sdl": self.federation_sdl()}
@@ -444,37 +761,126 @@ class GraphQLSchema:
 
     def federation_sdl(self) -> str:
         if self._sdl:
-            return self._sdl
+            base_sdl = self.sdl()
+        else:
+            base_sdl = self.sdl()
         lines = [
+            base_sdl,
             'scalar _Any',
             'type _Service { sdl: String }',
             'union _Entity = ' + (' | '.join(sorted(self._entity_resolvers)) or '_EmptyEntity'),
         ]
         if not self._entity_resolvers:
             lines.append('type _EmptyEntity { _empty: String }')
-        for graph_type in sorted(self.types.values(), key=lambda item: item.name):
-            if graph_type.kind == "input":
-                continue
-            lines.append(f"type {graph_type.name}{self._federation_directive(graph_type)} {{")
-            for field_name in self._sdl_fields(graph_type):
-                lines.append(f"  {field_name}: String")
-            lines.append("}")
-        lines.append("type Query {")
-        for name in sorted(self.queries):
-            if name == "_service":
-                lines.append("  _service: _Service")
-            elif name == "_entities":
-                lines.append("  _entities(representations: [_Any!]!): [_Entity]!")
-            else:
-                lines.append(f"  {name}: String")
+        lines.append("extend type Query {")
+        lines.append("  _service: _Service")
+        lines.append("  _entities(representations: [_Any!]!): [_Entity]!")
         lines.append("}")
-        return "\n".join(lines)
+        return "\n".join(line for line in lines if line).strip()
+
+    def sdl(self) -> str:
+        lines: list[str] = []
+        declared_types = set()
+        if self._sdl:
+            lines.append(self._sdl)
+            declared_types = set(GraphQLSDLParser.parse(self._sdl))
+        for directive in self.directives.values():
+            if directive.name in {"include", "skip"}:
+                continue
+            locations = " | ".join(directive.locations) if directive.locations else "FIELD"
+            repeatable = " repeatable" if directive.repeatable else ""
+            lines.append(f"directive @{directive.name}{repeatable} on {locations}")
+        for graph_type in sorted(self.types.values(), key=lambda item: item.name):
+            if graph_type.name in declared_types:
+                continue
+            if graph_type.kind == "scalar":
+                if graph_type.name not in self._builtin_scalars:
+                    lines.append(f"scalar {graph_type.name}")
+                continue
+            if graph_type.kind == "enum":
+                lines.append(f"enum {graph_type.name} {{")
+                for value in graph_type.fields:
+                    lines.append(f"  {value}")
+                lines.append("}")
+                continue
+            if graph_type.kind == "union":
+                union_types = graph_type.fields.get("types", ())
+                lines.append(f"union {graph_type.name} = {' | '.join(map(str, union_types))}")
+                continue
+            keyword = {
+                "object": "type",
+                "input": "input",
+                "interface": "interface",
+            }.get(graph_type.kind, "type")
+            lines.append(f"{keyword} {graph_type.name}{self._type_directives(graph_type)} {{")
+            for field_name, field_type in graph_type.fields.items():
+                lines.append(
+                    f"  {field_name}: {self._sdl_type_ref(field_type)}"
+                    f"{self._field_directives(graph_type, field_name)}"
+                )
+            lines.append("}")
+        self._append_root_sdl(lines, "Query", self.queries)
+        self._append_root_sdl(lines, "Mutation", self.mutations)
+        self._append_root_sdl(lines, "Subscription", self.subscriptions)
+        return "\n".join(line for line in lines if line).strip()
+
+    def _append_root_sdl(self, lines: list[str], name: str, handlers: dict[str, Any]) -> None:
+        public_handlers = {key: value for key, value in handlers.items() if not key.startswith("_")}
+        if not public_handlers:
+            return
+        lines.append(f"type {name} {{")
+        for field_name, handler in sorted(public_handlers.items()):
+            lines.append(f"  {field_name}: {self._handler_return_type(handler)}")
+        lines.append("}")
+
+    def _handler_return_type(self, handler: Any) -> str:
+        signature = getattr(handler, "__fanest_target_signature__", inspect.signature(handler))
+        return_annotation = signature.return_annotation
+        if return_annotation is inspect.Signature.empty:
+            return "String"
+        return self._sdl_type_ref(return_annotation)
+
+    def _sdl_type_ref(self, field_type: Any) -> str:
+        if isinstance(field_type, str):
+            return field_type.strip()
+        if isinstance(field_type, type):
+            metadata = getattr(field_type, "__fanest_graphql_type__", None)
+            if metadata is not None:
+                return metadata.name
+            scalar_metadata = getattr(field_type, "__fanest_graphql_scalar__", None)
+            if scalar_metadata is not None:
+                return str(scalar_metadata["name"])
+            return {
+                str: "String",
+                int: "Int",
+                float: "Float",
+                bool: "Boolean",
+            }.get(field_type, field_type.__name__)
+        return "String"
 
     def _federation_directive(self, graph_type: GraphQLObjectMetadata) -> str:
+        directives: list[str] = []
+        if graph_type.federation.get("extends"):
+            directives.append("@extends")
         keys = graph_type.federation.get("keys")
         if isinstance(keys, list):
-            return "".join(f' @key(fields: "{key}")' for key in keys)
-        return ""
+            directives.extend(f'@key(fields: "{key}")' for key in keys)
+        return "".join(f" {directive}" for directive in directives)
+
+    def _type_directives(self, graph_type: GraphQLObjectMetadata) -> str:
+        usages = "".join(f" {directive}" for directive in graph_type.directives if directive)
+        return f"{usages}{self._federation_directive(graph_type)}"
+
+    def _field_directives(self, graph_type: GraphQLObjectMetadata, field_name: str) -> str:
+        directives = list(graph_type.field_directives.get(field_name, ()))
+        federation = graph_type.federation
+        if federation.get("external") and field_name in self._sdl_fields(graph_type):
+            directives.append("@external")
+        if isinstance(federation.get("provides"), str):
+            directives.append(f'@provides(fields: "{federation["provides"]}")')
+        if isinstance(federation.get("requires"), str):
+            directives.append(f'@requires(fields: "{federation["requires"]}")')
+        return "".join(f" {directive}" for directive in directives)
 
     def _sdl_fields(self, graph_type: GraphQLObjectMetadata) -> list[str]:
         fields = list(graph_type.fields)
@@ -494,6 +900,7 @@ class GraphQLSchema:
         operation_name: str | None = None,
     ) -> dict[str, Any]:
         try:
+            await self._run_plugin_hook("before_execute", document, variables or {}, operation_name)
             operation_start = self._operation_start(document, operation_name)
             variables = {
                 **self._variable_defaults(document, operation_start),
@@ -502,16 +909,23 @@ class GraphQLSchema:
             operation = self._operation_type(document, operation_start)
             fields = self._operation_fields(document, variables, operation_start)
         except GraphQLParseError as exc:
-            return {"errors": [self._format_error(str(exc))]}
+            return await self._finalize_response({"errors": [self._format_error(str(exc))]})
         blocking_issues = [
             issue
             for issue in self.validate_fields(operation, fields)
             if issue.message.startswith("Field conflict")
         ]
         if blocking_issues:
-            return {"errors": [_format_validation_issue(self, issue) for issue in blocking_issues]}
+            return await self._finalize_response(
+                {"errors": [_format_validation_issue(self, issue) for issue in blocking_issues]}
+            )
+        complexity_issue = self._complexity_issue(fields)
+        if complexity_issue is not None:
+            return await self._finalize_response({"errors": [self._format_validation_issue(complexity_issue)]})
         if not fields:
-            return {"errors": [self._format_error("GraphQL document must contain at least one field")]}
+            return await self._finalize_response(
+                {"errors": [self._format_error("GraphQL document must contain at least one field")]}
+            )
         handlers = {
             "query": self.queries,
             "mutation": self.mutations,
@@ -535,15 +949,16 @@ class GraphQLSchema:
             handler = handlers.get(graphql_field.handler_name)
             if handler is None:
                 data[graphql_field.response_key] = None
-                errors.append(
-                    self._format_error(
-                        f"Unknown {operation} field: {graphql_field.handler_name}",
-                        path=[graphql_field.response_key],
-                        location=graphql_field.location,
-                    )
+                error = self._format_error(
+                    f"Unknown {operation} field: {graphql_field.handler_name}",
+                    path=[graphql_field.response_key],
+                    location=graphql_field.location,
                 )
+                await self._run_plugin_hook("on_error", error, graphql_field, operation)
+                errors.append(error)
                 continue
             try:
+                await self._run_plugin_hook("before_resolve", graphql_field, operation)
                 result = await self._execute_handler(
                     handler,
                     variables,
@@ -551,6 +966,14 @@ class GraphQLSchema:
                     graphql_field,
                     operation=operation,
                 )
+                for hook_result in await self._run_plugin_hook(
+                    "after_resolve",
+                    result,
+                    graphql_field,
+                    operation,
+                ):
+                    if hook_result is not None:
+                        result = hook_result
                 data[graphql_field.response_key] = await self._shape_result(
                     result,
                     graphql_field,
@@ -558,17 +981,17 @@ class GraphQLSchema:
                 )
             except Exception as exc:
                 data[graphql_field.response_key] = None
-                errors.append(
-                    self._format_error(
-                        str(exc),
-                        path=[graphql_field.response_key],
-                        location=graphql_field.location,
-                    )
+                error = self._format_error(
+                    str(exc),
+                    path=[graphql_field.response_key],
+                    location=graphql_field.location,
                 )
+                await self._run_plugin_hook("on_error", error, graphql_field, operation)
+                errors.append(error)
         response: dict[str, Any] = {"data": data}
         if errors:
             response["errors"] = errors
-        return response
+        return await self._finalize_response(response)
 
     async def subscribe(
         self,
@@ -577,6 +1000,7 @@ class GraphQLSchema:
         operation_name: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         try:
+            await self._run_plugin_hook("before_execute", document, variables or {}, operation_name)
             operation_start = self._operation_start(document, operation_name)
             variables = {
                 **self._variable_defaults(document, operation_start),
@@ -584,18 +1008,28 @@ class GraphQLSchema:
             }
             operation = self._operation_type(document, operation_start)
             if operation != "subscription":
-                yield {"errors": [self._format_error("GraphQL WebSocket subscribe requires a subscription operation")]}
+                yield await self._finalize_response(
+                    {"errors": [self._format_error("GraphQL WebSocket subscribe requires a subscription operation")]}
+                )
                 return
             fields = self._operation_fields(document, variables, operation_start)
         except GraphQLParseError as exc:
-            yield {"errors": [self._format_error(str(exc))]}
+            yield await self._finalize_response({"errors": [self._format_error(str(exc))]})
             return
-        issues = self.validate_fields("subscription", fields)
-        if issues:
-            yield {"errors": [_format_validation_issue(self, issue) for issue in issues]}
+        blocking_issues = [
+            issue
+            for issue in self.validate_fields("subscription", fields)
+            if issue.message.startswith("Field conflict")
+        ]
+        if blocking_issues:
+            yield await self._finalize_response({"errors": [_format_validation_issue(self, issue) for issue in blocking_issues]})
+            return
+        complexity_issue = self._complexity_issue(fields)
+        if complexity_issue is not None:
+            yield await self._finalize_response({"errors": [self._format_validation_issue(complexity_issue)]})
             return
         async for payload in self._subscribe_fields(fields, variables):
-            yield payload
+            yield await self._finalize_response(payload)
 
     async def _subscribe_fields(
         self,
@@ -605,40 +1039,69 @@ class GraphQLSchema:
         for graphql_field in fields:
             handler = self.subscriptions.get(graphql_field.handler_name)
             if handler is None:
+                error = self._format_error(
+                    f"Unknown subscription field: {graphql_field.handler_name}",
+                    path=[graphql_field.response_key],
+                    location=graphql_field.location,
+                )
+                await self._run_plugin_hook("on_error", error, graphql_field, "subscription")
                 yield {
                     "data": {graphql_field.response_key: None},
-                    "errors": [
-                        self._format_error(
-                            f"Unknown subscription field: {graphql_field.handler_name}",
-                            path=[graphql_field.response_key],
-                            location=graphql_field.location,
-                        )
-                    ],
+                    "errors": [error],
                 }
                 continue
             try:
-                kwargs = self._handler_kwargs(handler, variables, graphql_field.args)
-                result = handler(**kwargs)
-                if inspect.isawaitable(result):
-                    result = await result
+                await self._run_plugin_hook("before_resolve", graphql_field, "subscription")
+                result = await self._execute_subscription_source(
+                    handler,
+                    variables,
+                    graphql_field.args,
+                    graphql_field,
+                )
                 if hasattr(result, "__aiter__"):
                     async for item in result:
                         item = await self._apply_subscription_hooks(handler, item, variables, graphql_field.args)
+                        for hook_result in await self._run_plugin_hook(
+                            "after_resolve",
+                            item,
+                            graphql_field,
+                            "subscription",
+                        ):
+                            if hook_result is not None:
+                                item = hook_result
                         shaped = await self._shape_result(item, graphql_field, [graphql_field.response_key])
                         yield {"data": {graphql_field.response_key: shaped}}
                 elif inspect.isgenerator(result):
                     for item in result:
                         item = await self._apply_subscription_hooks(handler, item, variables, graphql_field.args)
+                        for hook_result in await self._run_plugin_hook(
+                            "after_resolve",
+                            item,
+                            graphql_field,
+                            "subscription",
+                        ):
+                            if hook_result is not None:
+                                item = hook_result
                         shaped = await self._shape_result(item, graphql_field, [graphql_field.response_key])
                         yield {"data": {graphql_field.response_key: shaped}}
                 else:
                     result = await self._apply_subscription_hooks(handler, result, variables, graphql_field.args)
+                    for hook_result in await self._run_plugin_hook(
+                        "after_resolve",
+                        result,
+                        graphql_field,
+                        "subscription",
+                    ):
+                        if hook_result is not None:
+                            result = hook_result
                     shaped = await self._shape_result(result, graphql_field, [graphql_field.response_key])
                     yield {"data": {graphql_field.response_key: shaped}}
             except Exception as exc:
+                error = self._format_error(str(exc), path=[graphql_field.response_key], location=graphql_field.location)
+                await self._run_plugin_hook("on_error", error, graphql_field, "subscription")
                 yield {
                     "data": {graphql_field.response_key: None},
-                    "errors": [self._format_error(str(exc), path=[graphql_field.response_key], location=graphql_field.location)],
+                    "errors": [error],
                 }
 
     def validate(
@@ -657,7 +1120,51 @@ class GraphQLSchema:
             fields = self._operation_fields(document, merged_variables, operation_start)
         except GraphQLParseError as exc:
             return [self._format_error(str(exc))]
-        return [_format_validation_issue(self, issue) for issue in self.validate_fields(operation, fields)]
+        issues = self.validate_fields(operation, fields)
+        complexity_issue = self._complexity_issue(fields)
+        if complexity_issue is not None:
+            issues.append(complexity_issue)
+        return [_format_validation_issue(self, issue) for issue in issues]
+
+    def _complexity_issue(self, fields: list[GraphQLField]) -> GraphQLValidationIssue | None:
+        if self.max_complexity is None:
+            return None
+        complexity = self._field_complexity(fields)
+        if complexity <= self.max_complexity:
+            return None
+        return GraphQLValidationIssue(
+            f"GraphQL query complexity {complexity} exceeds max_complexity {self.max_complexity}"
+        )
+
+    def _field_complexity(self, fields: list[GraphQLField]) -> int:
+        total = 0
+        for graphql_field in fields:
+            total += 1
+            if graphql_field.selection:
+                total += self._field_complexity(graphql_field.selection)
+        return total
+
+    async def _run_plugin_hook(self, hook_name: str, *args: Any) -> Any:
+        results = []
+        for plugin in self.plugins:
+            hook = getattr(plugin, hook_name, None)
+            if hook is None and isinstance(plugin, dict):
+                hook = plugin.get(hook_name)
+            if hook is None:
+                continue
+            result = hook(self, *args)
+            if inspect.isawaitable(result):
+                result = await result
+            results.append(result)
+        return results
+
+    async def _finalize_response(self, response: dict[str, Any]) -> dict[str, Any]:
+        if self.extensions:
+            response = {**response, "extensions": dict(self.extensions)}
+        for result in await self._run_plugin_hook("after_execute", response):
+            if result is not None:
+                response = result
+        return response
 
     def validate_fields(self, operation: str, fields: list[GraphQLField]) -> list[GraphQLValidationIssue]:
         handlers = {
@@ -703,18 +1210,24 @@ class GraphQLSchema:
                 "queryType": {"name": "Query"},
                 "mutationType": {"name": "Mutation"},
                 "subscriptionType": {"name": "Subscription"},
-                "directives": [{"name": "include"}, {"name": "skip"}],
+                "directives": [
+                    {
+                        "name": directive.name,
+                        "locations": list(directive.locations),
+                        "isRepeatable": directive.repeatable,
+                    }
+                    for directive in self.directives.values()
+                ],
                 "types": [
                     {"kind": "OBJECT", "name": "Query"},
                     {"kind": "OBJECT", "name": "Mutation"},
                     {"kind": "OBJECT", "name": "Subscription"},
-                    {"kind": "SCALAR", "name": "String"},
-                    {"kind": "SCALAR", "name": "Int"},
-                    {"kind": "SCALAR", "name": "Float"},
-                    {"kind": "SCALAR", "name": "Boolean"},
-                    {"kind": "SCALAR", "name": "ID"},
                     *[
-                        {"kind": "INPUT_OBJECT" if item.kind == "input" else "OBJECT", "name": item.name}
+                        {"kind": "SCALAR", "name": scalar_name}
+                        for scalar_name in sorted(self._builtin_scalars)
+                    ],
+                    *[
+                        {"kind": self._introspection_kind(item.kind), "name": item.name}
                         for item in self.types.values()
                     ],
                 ],
@@ -728,23 +1241,51 @@ class GraphQLSchema:
                     "name": name,
                     "fields": self._introspection_fields_for(name),
                 }
-            if name in {"String", "Int", "Float", "Boolean", "ID"}:
+            if name in self._builtin_scalars:
                 return {"kind": "SCALAR", "name": name, "fields": None}
             if not isinstance(name, str):
                 return None
             graph_type = self.types.get(name)
             if graph_type is not None:
                 return {
-                    "kind": "INPUT_OBJECT" if graph_type.kind == "input" else "OBJECT",
+                    "kind": self._introspection_kind(graph_type.kind),
                     "name": graph_type.name,
-                    "fields": [
-                        {"name": field_name, "type": self._introspection_type_ref(field_type)}
-                        for field_name, field_type in graph_type.fields.items()
-                    ],
+                    "fields": self._introspection_fields_for_metadata(graph_type),
+                    "possibleTypes": self._possible_types_for(graph_type),
+                    "enumValues": self._enum_values_for(graph_type),
                     "federation": graph_type.federation,
                 }
             return None
         return None
+
+    def _introspection_kind(self, kind: str) -> str:
+        return {
+            "object": "OBJECT",
+            "input": "INPUT_OBJECT",
+            "interface": "INTERFACE",
+            "union": "UNION",
+            "enum": "ENUM",
+            "scalar": "SCALAR",
+        }.get(kind, "OBJECT")
+
+    def _introspection_fields_for_metadata(self, graph_type: GraphQLObjectMetadata) -> list[dict[str, Any]] | None:
+        if graph_type.kind in {"enum", "scalar", "union"}:
+            return None
+        return [
+            {"name": field_name, "type": self._introspection_type_ref(field_type)}
+            for field_name, field_type in graph_type.fields.items()
+        ]
+
+    def _possible_types_for(self, graph_type: GraphQLObjectMetadata) -> list[dict[str, str]] | None:
+        if graph_type.kind != "union":
+            return None
+        union_types = graph_type.fields.get("types", ())
+        return [{"name": str(type_name)} for type_name in union_types]
+
+    def _enum_values_for(self, graph_type: GraphQLObjectMetadata) -> list[dict[str, str]] | None:
+        if graph_type.kind != "enum":
+            return None
+        return [{"name": str(value)} for value in graph_type.fields]
 
     def _introspection_fields_for(self, type_name: str) -> list[dict[str, str]]:
         handlers = {
@@ -799,7 +1340,32 @@ class GraphQLSchema:
                 result = await result
             if operation == "subscription":
                 result = await self._apply_subscription_hooks(handler, result, variables, args)
-            return result
+            return await self._serialize_handler_result(handler, result)
+
+        return await self._run_interceptors(handler, context, call_handler)
+
+    async def _execute_subscription_source(
+        self,
+        handler: Any,
+        variables: dict[str, Any],
+        args: dict[str, Any],
+        field: GraphQLField,
+    ) -> Any:
+        kwargs = self._handler_kwargs(handler, variables, args)
+        context = ExecutionContext(
+            handler=handler,
+            controller=None,
+            request=None,
+            kwargs={"graphql_field": field, "graphql_operation": "subscription", **kwargs},
+        )
+        await self._run_guards(handler, context)
+        kwargs = await self._run_pipes(handler, context, kwargs)
+
+        async def call_handler() -> Any:
+            result = handler(**kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            return await self._serialize_handler_result(handler, result)
 
         return await self._run_interceptors(handler, context, call_handler)
 
@@ -883,6 +1449,43 @@ class GraphQLSchema:
     def _component_instance(self, component: Any) -> Any:
         return component() if inspect.isclass(component) else component
 
+    async def _serialize_handler_result(self, handler: Any, value: Any) -> Any:
+        signature = getattr(handler, "__fanest_target_signature__", inspect.signature(handler))
+        return await self._coerce_scalar(
+            value,
+            signature.return_annotation,
+            hook_name="serialize",
+        )
+
+    async def _coerce_scalar(self, value: Any, annotation: Any, *, hook_name: str) -> Any:
+        if value is None:
+            return None
+        scalar = self._scalar_for_annotation(annotation)
+        if scalar is None:
+            return value
+        hook = scalar.get(hook_name)
+        if hook is None:
+            return value
+        instance = self._component_instance(scalar["target"])
+        bound_hook = getattr(instance, hook_name, hook)
+        result = bound_hook(value)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    def _scalar_for_annotation(self, annotation: Any) -> dict[str, Any] | None:
+        if annotation is inspect.Signature.empty:
+            return None
+        metadata = getattr(annotation, "__fanest_graphql_scalar__", None)
+        if metadata is not None:
+            return self.scalars.get(str(metadata["name"]))
+        if isinstance(annotation, str):
+            return self.scalars.get(annotation)
+        name = getattr(annotation, "__name__", None)
+        if name is not None:
+            return self.scalars.get(str(name))
+        return None
+
     async def _shape_result(self, value: Any, field: GraphQLField, path: list[str | int]) -> Any:
         selection = field.selection or []
         if not selection:
@@ -899,6 +1502,8 @@ class GraphQLSchema:
     async def _shape_selection(self, value: Any, selection: list[GraphQLField], path: list[str | int]) -> dict[str, Any]:
         shaped: dict[str, Any] = {}
         for child in selection:
+            if child.type_condition is not None and not self._matches_type_condition(value, child.type_condition):
+                continue
             if child.handler_name == "__typename":
                 shaped[child.response_key] = self._typename_for(value)
                 continue
@@ -908,16 +1513,59 @@ class GraphQLSchema:
 
     async def _resolve_child_field(self, value: Any, child: GraphQLField, path: list[str | int]) -> Any:
         field_resolver = self.field_resolvers.get(child.handler_name)
+        middleware = list(self.field_middleware)
         if field_resolver is not None:
-            return await self._execute_handler(
-                field_resolver,
-                {},
-                child.args,
-                child,
-                operation="field",
-                parent=value,
-            )
-        return await self._read_result_field(value, child.handler_name)
+            middleware.extend(getattr(field_resolver, "__fanest_graphql_field_middleware__", []))
+
+            async def resolve() -> Any:
+                return await self._execute_handler(
+                    field_resolver,
+                    {},
+                    child.args,
+                    child,
+                    operation="field",
+                    parent=value,
+                )
+
+        else:
+
+            async def resolve() -> Any:
+                return await self._read_result_field(value, child.handler_name)
+
+        return await self._run_field_middleware(middleware, value, child, path, resolve)
+
+    async def _run_field_middleware(
+        self,
+        middleware: list[Any],
+        parent: Any,
+        field: GraphQLField,
+        path: list[str | int],
+        resolve: Callable[[], Any],
+    ) -> Any:
+        context = {
+            "parent": parent,
+            "field": field,
+            "path": path,
+            "args": field.args,
+        }
+
+        async def dispatch(index: int) -> Any:
+            if index >= len(middleware):
+                return await resolve()
+            instance = self._component_instance(middleware[index])
+            hook = getattr(instance, "resolve", None) or getattr(instance, "use", None)
+            if hook is None and callable(instance):
+                hook = instance
+            if hook is None:
+                raise GraphQLUnsupportedFeatureError(
+                    f"GraphQL field middleware must be callable or expose resolve/use: {instance!r}"
+                )
+            result = hook(context, lambda: dispatch(index + 1))
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        return await dispatch(0)
 
     async def _read_result_field(self, value: Any, field_name: str) -> Any:
         if isinstance(value, dict):
@@ -938,6 +1586,13 @@ class GraphQLSchema:
         if isinstance(value, dict):
             return value.get("__typename") or "Object"
         return type(value).__name__
+
+    def _matches_type_condition(self, value: Any, type_condition: str) -> bool:
+        typename = self._typename_for(value)
+        if typename == type_condition:
+            return True
+        metadata = self.types.get(type_condition)
+        return metadata is not None and metadata.kind == "interface"
 
     def _operation_names(self, document: str) -> list[str]:
         return [field.handler_name for field in self._operation_fields(document, {})]
@@ -1072,8 +1727,9 @@ class GraphQLSchema:
         index = self._skip_ignored(document, index)
         if self._name_at(document, index, "on"):
             index = self._skip_ignored(document, index + len("on"))
+            type_condition = ""
             if index < len(document) and (document[index].isalpha() or document[index] == "_"):
-                _, index = self._read_name(document, index)
+                type_condition, index = self._read_name(document, index)
             include, index = self._read_directives(document, index, variables)
             selection_start = self._next_selection_start(document, index)
             end = self._skip_balanced(document, selection_start, "{", "}")
@@ -1086,7 +1742,7 @@ class GraphQLSchema:
                 fragments,
                 seen_fragments,
             )
-            return fields, end
+            return self._with_type_condition(fields, type_condition), end
         if index >= len(document) or not (document[index].isalpha() or document[index] == "_"):
             raise GraphQLParseError("Expected fragment name")
         name, index = self._read_name(document, index)
@@ -1099,16 +1755,64 @@ class GraphQLSchema:
         if not include:
             return [], index
         nested_seen = {*seen_fragments, name}
+        type_condition = self._fragment_type_conditions(document).get(name)
         return (
-            self._fields_from_selection(
-                document,
-                variables,
-                selection_start,
-                fragments,
-                nested_seen,
+            self._with_type_condition(
+                self._fields_from_selection(
+                    document,
+                    variables,
+                    selection_start,
+                    fragments,
+                    nested_seen,
+                ),
+                type_condition,
             ),
             index,
         )
+
+    def _fragment_type_conditions(self, document: str) -> dict[str, str]:
+        conditions: dict[str, str] = {}
+        index = self._skip_ignored(document, 0)
+        while index < len(document):
+            if not self._name_at(document, index, "fragment"):
+                index += 1
+                index = self._skip_ignored(document, index)
+                continue
+            cursor = self._skip_ignored(document, index + len("fragment"))
+            if cursor >= len(document) or not (document[cursor].isalpha() or document[cursor] == "_"):
+                raise GraphQLParseError("Expected fragment name")
+            name, cursor = self._read_name(document, cursor)
+            cursor = self._skip_ignored(document, cursor)
+            if not self._name_at(document, cursor, "on"):
+                raise GraphQLParseError(f"Expected type condition for fragment: {name}")
+            cursor = self._skip_ignored(document, cursor + len("on"))
+            if cursor >= len(document) or not (document[cursor].isalpha() or document[cursor] == "_"):
+                raise GraphQLParseError(f"Expected type condition for fragment: {name}")
+            type_condition, cursor = self._read_name(document, cursor)
+            conditions[name] = type_condition
+            selection_start = self._next_selection_start(document, cursor)
+            index = self._skip_balanced(document, selection_start, "{", "}")
+            index = self._skip_ignored(document, index)
+        return conditions
+
+    def _with_type_condition(
+        self,
+        fields: list[GraphQLField],
+        type_condition: str | None,
+    ) -> list[GraphQLField]:
+        if not type_condition:
+            return fields
+        return [
+            GraphQLField(
+                response_key=field.response_key,
+                handler_name=field.handler_name,
+                args=field.args,
+                selection=field.selection,
+                location=field.location,
+                type_condition=type_condition,
+            )
+            for field in fields
+        ]
 
     def _skip_fragment_directives(self, document: str, index: int) -> int:
         index = self._skip_ignored(document, index)
@@ -1136,8 +1840,11 @@ class GraphQLSchema:
                 raise GraphQLParseError("Expected directive name")
             name, index = self._read_name(document, index)
             args, index = self._read_args(document, index, variables)
-            if name not in {"skip", "include"}:
+            if name not in self.directives:
                 raise GraphQLParseError(f"Unknown directive: {name}")
+            if name not in {"skip", "include"}:
+                index = self._skip_ignored(document, index)
+                continue
             if "if" not in args:
                 raise GraphQLParseError(f"Directive @{name} requires an if argument")
             if name == "skip" and bool(args.get("if")):
@@ -1639,10 +2346,31 @@ class GraphQLSchema:
                     values[name] = default.default
             elif name in {"parent", "root"} and parent is not None:
                 values[name] = parent
+            if name in values:
+                coerced = self._coerce_scalar_sync(values[name], parameter.annotation, hook_name="parse_value")
+                values[name] = coerced
         if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
             return values
         accepted = set(parameters)
         return {key: value for key, value in values.items() if key in accepted}
+
+    def _coerce_scalar_sync(self, value: Any, annotation: Any, *, hook_name: str) -> Any:
+        if value is None:
+            return None
+        scalar = self._scalar_for_annotation(annotation)
+        if scalar is None:
+            return value
+        hook = scalar.get(hook_name)
+        if hook is None:
+            return value
+        instance = self._component_instance(scalar["target"])
+        bound_hook = getattr(instance, hook_name, hook)
+        result = bound_hook(value)
+        if inspect.isawaitable(result):
+            raise GraphQLUnsupportedFeatureError(
+                f"Async GraphQL scalar {hook_name} hooks are not supported during argument coercion"
+            )
+        return result
 
 
 class GraphQLModule:
@@ -1655,18 +2383,53 @@ class GraphQLModule:
         schema: str | None = None,
         websocket: bool = True,
         federation: bool = False,
+        types: list[type] | None = None,
+        scalars: list[Any] | None = None,
+        directives: list[Any] | None = None,
+        max_complexity: int | None = None,
+        extensions: dict[str, Any] | None = None,
+        plugins: list[Any] | None = None,
+        field_middleware: list[Any] | None = None,
     ) -> type:
         controller_path = path.strip("/")
         module_imports = imports or []
         sdl = schema or ""
 
         def schema_factory() -> GraphQLSchema:
-            graph_schema = GraphQLSchema(federation=federation)
+            graph_schema = GraphQLSchema(
+                federation=federation,
+                max_complexity=max_complexity,
+                extensions=extensions,
+                plugins=plugins,
+                field_middleware=field_middleware,
+            )
             if sdl:
                 graph_schema.register_sdl(sdl)
+            for model in types or []:
+                graph_schema.register_model(model)
+            for scalar in scalars or []:
+                graph_schema.register_scalar(scalar)
+            for directive in directives or []:
+                graph_schema.register_directive(directive)
             return graph_schema
 
-        schema_provider = use_factory(GraphQLSchema, schema_factory) if federation or sdl else GraphQLSchema
+        schema_provider = (
+            use_factory(GraphQLSchema, schema_factory)
+            if any(
+                [
+                    federation,
+                    sdl,
+                    types,
+                    scalars,
+                    directives,
+                    max_complexity is not None,
+                    extensions,
+                    plugins,
+                    field_middleware,
+                ]
+            )
+            else GraphQLSchema
+        )
 
         @Controller(controller_path)
         class GraphQLController:
@@ -1756,6 +2519,13 @@ class GraphQLModule:
         imports: list[Any] | None = None,
         path: str = "graphql",
         websocket: bool = True,
+        types: list[type] | None = None,
+        scalars: list[Any] | None = None,
+        directives: list[Any] | None = None,
+        max_complexity: int | None = None,
+        extensions: dict[str, Any] | None = None,
+        plugins: list[Any] | None = None,
+        field_middleware: list[Any] | None = None,
     ) -> type:
         return GraphQLModule.for_root(
             resolvers=resolvers,
@@ -1763,6 +2533,13 @@ class GraphQLModule:
             path=path,
             schema=schema,
             websocket=websocket,
+            types=types,
+            scalars=scalars,
+            directives=directives,
+            max_complexity=max_complexity,
+            extensions=extensions,
+            plugins=plugins,
+            field_middleware=field_middleware,
         )
 
     @staticmethod
@@ -1773,6 +2550,13 @@ class GraphQLModule:
         path: str = "graphql",
         schema: str | None = None,
         websocket: bool = True,
+        types: list[type] | None = None,
+        scalars: list[Any] | None = None,
+        directives: list[Any] | None = None,
+        max_complexity: int | None = None,
+        extensions: dict[str, Any] | None = None,
+        plugins: list[Any] | None = None,
+        field_middleware: list[Any] | None = None,
     ) -> type:
         return GraphQLModule.for_root(
             resolvers=resolvers,
@@ -1781,4 +2565,11 @@ class GraphQLModule:
             schema=schema,
             websocket=websocket,
             federation=True,
+            types=types,
+            scalars=scalars,
+            directives=directives,
+            max_complexity=max_complexity,
+            extensions=extensions,
+            plugins=plugins,
+            field_middleware=field_middleware,
         )

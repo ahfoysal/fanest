@@ -16,6 +16,7 @@ from fanest.core.metadata import (
 )
 from fanest.core.module_ref import ModuleRef
 from fanest.core.discovery import DiscoveryService
+from fanest.core.lazy_loader import LazyModuleLoader
 from fanest.core.reflector import Reflector
 from fanest.schedule.registry import SchedulerRegistry
 from fanest.websockets import SocketIoServer, WebSocketManager
@@ -23,6 +24,7 @@ from fanest.websockets import SocketIoServer, WebSocketManager
 
 FRAMEWORK_PROVIDER_TOKENS = {
     ModuleRef,
+    LazyModuleLoader,
     DiscoveryService,
     Reflector,
     SchedulerRegistry,
@@ -181,18 +183,37 @@ class ModuleScanner:
 
     def _validate_module_boundaries(self) -> None:
         for record in self.records.values():
+            self._validate_module_exports(record)
             visible_tokens = self._visible_tokens(record)
             for target in [*record.metadata.controllers, *record.metadata.providers, *record.metadata.gateways]:
                 self._validate_target_dependencies(record, target, visible_tokens)
+
+    def _validate_module_exports(self, record: ModuleRecord) -> None:
+        exportable = set(record.local_tokens) | FRAMEWORK_PROVIDER_TOKENS
+        for imported_module in record.metadata.imports:
+            imported_record = self.records[self._module_key(imported_module)]
+            exportable.update(self.export_tokens(imported_record.key))
+        for exported in record.metadata.exports:
+            exported_module_key = self._exported_module_key(exported)
+            if exported_module_key is not None:
+                continue
+            token = self._unwrap_token(exported)
+            token = self._resolve_named_token(token, exportable)
+            if token not in exportable:
+                raise TypeError(
+                    f"{record.module_type.__name__} exports {token!r}, "
+                    "but that provider is not local or exported by an imported module. "
+                    "Register it in providers=[...] or import a module that exports it."
+                )
 
     def _visible_tokens(self, record: ModuleRecord) -> set[Any]:
         visible = set(record.local_tokens) | FRAMEWORK_PROVIDER_TOKENS
         for imported_module in record.metadata.imports:
             imported_record = self.records[self._module_key(imported_module)]
-            visible.update(imported_record.export_tokens)
+            visible.update(self.export_tokens(imported_record.key))
         for global_record in self.records.values():
             if global_record.metadata.global_module and global_record is not record:
-                visible.update(global_record.export_tokens)
+                visible.update(self.export_tokens(global_record.key))
         return visible
 
     def _validate_target_dependencies(
@@ -266,11 +287,45 @@ class ModuleScanner:
         visible = set(FRAMEWORK_PROVIDER_TOKENS)
         for imported_module in record.metadata.imports:
             imported_record = self.records[self._module_key(imported_module)]
-            visible.update(imported_record.export_tokens)
+            visible.update(self.export_tokens(imported_record.key))
         for global_record in self.records.values():
             if global_record.metadata.global_module and global_record is not record:
-                visible.update(global_record.export_tokens)
+                visible.update(self.export_tokens(global_record.key))
         return visible
+
+    def export_tokens(self, module_key: Any, seen: set[Any] | None = None) -> set[Any]:
+        seen = seen or set()
+        if module_key in seen:
+            return set()
+        seen = {*seen, module_key}
+        record = self.records[module_key]
+        tokens: set[Any] = set()
+        exportable = set(record.local_tokens) | FRAMEWORK_PROVIDER_TOKENS
+        for imported_module in record.metadata.imports:
+            imported_key = self._module_key(imported_module)
+            exportable.update(self.export_tokens(imported_key, seen))
+        for exported in record.metadata.exports:
+            exported_module_key = self._exported_module_key(exported)
+            if exported_module_key is not None:
+                tokens.update(self.export_tokens(exported_module_key, seen))
+                continue
+            token = self._unwrap_token(exported)
+            tokens.add(self._resolve_named_token(token, exportable))
+        return tokens
+
+    def _exported_module_key(self, exported: Any) -> Any | None:
+        try:
+            exported_ref = self._normalize_module_ref(exported)
+            exported_key = self._module_key(exported_ref)
+        except Exception:
+            return None
+        if exported_key in self.records:
+            return exported_key
+        exported_type = self._module_type(exported_ref) if isinstance(exported_ref, DynamicModule) else exported_ref
+        for module_key, record in self.records.items():
+            if record.module is exported_ref or record.module_type is exported_type:
+                return module_key
+        return None
 
     def _target_type(self, target: ProviderDefinition) -> type | None:
         use_class = getattr(target, "use_class", None)
@@ -327,16 +382,25 @@ class ModuleScanner:
         base_metadata: ModuleMetadata | None = getattr(module_type, "__fanest_module__", None)
         if base_metadata is None:
             return None
+        base_copy = ModuleMetadata(
+            imports=list(base_metadata.imports),
+            controllers=list(base_metadata.controllers),
+            providers=list(base_metadata.providers),
+            gateways=list(base_metadata.gateways),
+            middlewares=list(base_metadata.middlewares),
+            exports=list(base_metadata.exports),
+            global_module=base_metadata.global_module,
+        )
         if not isinstance(module, DynamicModule):
-            return base_metadata
+            return base_copy
         return ModuleMetadata(
-            imports=[*base_metadata.imports, *module.imports],
-            controllers=[*base_metadata.controllers, *module.controllers],
-            providers=[*base_metadata.providers, *module.providers],
-            gateways=[*base_metadata.gateways, *module.gateways],
-            middlewares=[*base_metadata.middlewares, *module.middlewares],
-            exports=[*base_metadata.exports, *module.exports],
-            global_module=base_metadata.global_module or module.global_module,
+            imports=[*base_copy.imports, *module.imports],
+            controllers=[*base_copy.controllers, *module.controllers],
+            providers=[*base_copy.providers, *module.providers],
+            gateways=[*base_copy.gateways, *module.gateways],
+            middlewares=[*base_copy.middlewares, *module.middlewares],
+            exports=[*base_copy.exports, *module.exports],
+            global_module=base_copy.global_module or module.global_module,
         )
 
     def _unwrap_token(self, token: Any) -> Any:

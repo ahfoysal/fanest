@@ -67,6 +67,7 @@ class FileInterceptor:
 
     async def intercept(self, context: ExecutionContext, call_next: Callable[[], Any]) -> Any:
         for upload in _iter_uploads(context, self.field_name, many=False):
+            _enforce_total_upload_limits([upload], self.options, expected_fields={self.field_name})
             await _process_upload(upload, context, self.options)
         return await call_next()
 
@@ -95,6 +96,7 @@ class FilesInterceptor:
         uploads = list(_iter_uploads(context, self.field_name, many=True))
         if self.max_count is not None and len(uploads) > self.max_count:
             raise BadRequestException(f"{self.field_name} accepts at most {self.max_count} files")
+        _enforce_total_upload_limits(uploads, self.options, expected_fields={self.field_name})
         for upload in uploads:
             await _process_upload(upload, context, self.options)
         return await call_next()
@@ -119,12 +121,16 @@ class FileFieldsInterceptor:
         )
 
     async def intercept(self, context: ExecutionContext, call_next: Callable[[], Any]) -> Any:
+        field_names = {field.name for field in self.upload_fields}
+        all_selected: list[Any] = []
         for field in self.upload_fields:
             uploads = list(_iter_uploads(context, field.name, many=True))
             if field.max_count is not None and len(uploads) > field.max_count:
                 raise BadRequestException(f"{field.name} accepts at most {field.max_count} files")
-            for upload in uploads:
-                await _process_upload(upload, context, self.options)
+            all_selected.extend(uploads)
+        _enforce_total_upload_limits(all_selected, self.options, expected_fields=field_names)
+        for upload in all_selected:
+            await _process_upload(upload, context, self.options)
         return await call_next()
 
 
@@ -150,6 +156,7 @@ class AnyFilesInterceptor:
         uploads = _all_uploads(context)
         if self.max_count is not None and len(uploads) > self.max_count:
             raise BadRequestException(f"request accepts at most {self.max_count} files")
+        _enforce_total_upload_limits(uploads, self.options)
         for upload in uploads:
             await _process_upload(upload, context, self.options)
         return await call_next()
@@ -213,6 +220,35 @@ def _normalize_upload_field(field: UploadField | dict[str, Any]) -> UploadField:
         raise ValueError("upload field requires a non-empty name")
     max_count = field.get("maxCount", field.get("max_count"))
     return UploadField(name=name, max_count=_normalize_max_count(max_count))
+
+
+def _enforce_total_upload_limits(
+    uploads: list[Any],
+    options: FileUploadOptions,
+    *,
+    expected_fields: set[str] | None = None,
+) -> None:
+    limits = options.limits or {}
+    files_limit = limits.get("files")
+    if files_limit is not None and len(uploads) > files_limit:
+        raise BadRequestException(f"request accepts at most {files_limit} files")
+    fields_limit = limits.get("fields")
+    if (
+        fields_limit is not None
+        and len(_upload_field_names(uploads, expected_fields)) > fields_limit
+    ):
+        raise BadRequestException(f"request accepts at most {fields_limit} file fields")
+
+
+def _upload_field_names(uploads: list[Any], expected_fields: set[str] | None) -> set[str]:
+    names = {
+        name
+        for name in (getattr(upload, "name", None) for upload in uploads)
+        if isinstance(name, str) and name
+    }
+    if names:
+        return names
+    return expected_fields or set()
 
 
 def _iter_uploads(context: ExecutionContext, field_name: str, *, many: bool) -> list[Any]:

@@ -596,7 +596,7 @@ uv run pytest
 # 407 passed, 22 skipped
 ```
 
-Current package candidate: `0.3.0b1`.
+Current package candidate: `0.3.0b2`.
 
 ## License
 
