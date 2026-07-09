@@ -1,3 +1,5 @@
+import asyncio
+import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -7,7 +9,7 @@ from typing import Any, Awaitable, Callable, NoReturn
 
 from sqlalchemy import and_, or_  # type: ignore[reportAttributeAccessIssue]
 from sqlalchemy import delete as sqlalchemy_delete  # type: ignore[reportAttributeAccessIssue]
-from sqlalchemy import func, select  # type: ignore[reportAttributeAccessIssue]
+from sqlalchemy import func, select, text  # type: ignore[reportAttributeAccessIssue]
 from sqlalchemy import update as sqlalchemy_update  # type: ignore[reportAttributeAccessIssue]
 from sqlalchemy.ext.asyncio import (  # type: ignore[reportMissingImports]
     AsyncEngine,
@@ -51,6 +53,7 @@ class SqlAlchemyService:
         self._engine = create_async_engine(options["database_url"], echo=options.get("echo", False))
         self._sessionmaker = async_sessionmaker(self._engine, expire_on_commit=False)
         self._closed = False
+        self._advisory_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def engine(self) -> AsyncEngine:
@@ -107,6 +110,76 @@ class SqlAlchemyService:
 
     async def on_application_shutdown(self) -> None:
         await self.close()
+
+    @staticmethod
+    def _advisory_lock_key(name: str) -> int:
+        digest = hashlib.sha256(name.encode()).digest()
+        # signed 64-bit integer, compatible with pg_advisory_lock(bigint)
+        return int.from_bytes(digest[:8], "big", signed=True)
+
+    @asynccontextmanager
+    async def advisory_lock(self, name: str, *, timeout: float | None = None) -> AsyncIterator[None]:
+        """Acquire a cross-instance lock so concurrent app replicas don't race on
+        one-time work such as schema creation or migrations.
+
+        Uses a database advisory lock on Postgres (``pg_advisory_lock``) and
+        MySQL/MariaDB (``GET_LOCK``); on other backends (e.g. SQLite) it falls
+        back to an in-process lock — safe for single-instance deployments. Wrap
+        bootstrap/migration in it::
+
+            async with db.advisory_lock("schema-bootstrap"):
+                await db.create_all(Base.metadata)
+        """
+        if self._closed or self._engine is None:
+            raise RuntimeError("SqlAlchemyModule.for_root(...) has not been configured.")
+        dialect = self._engine.dialect.name
+        key = self._advisory_lock_key(name)
+        if dialect == "postgresql":
+            connection = await self._engine.connect()
+            try:
+                await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": key})
+                yield
+            finally:
+                try:
+                    await connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+                finally:
+                    await connection.close()
+            return
+        if dialect in {"mysql", "mariadb"}:
+            connection = await self._engine.connect()
+            lock_name = f"fanest:{key}"
+            wait = -1 if timeout is None else int(timeout)
+            try:
+                await connection.execute(
+                    text("SELECT GET_LOCK(:name, :timeout)"),
+                    {"name": lock_name, "timeout": wait},
+                )
+                yield
+            finally:
+                try:
+                    await connection.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": lock_name})
+                finally:
+                    await connection.close()
+            return
+        lock = self._advisory_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            yield
+
+    async def create_all(self, metadata: Any, *, lock: str | None = "fanest:schema") -> None:
+        """Create all tables in ``metadata``, guarded by an advisory lock so that
+        multiple instances booting at once don't race. ``create_all`` is
+        idempotent, so replicas that lose the race simply no-op. Pass
+        ``lock=None`` to skip locking (single-instance/dev)."""
+
+        async def _run() -> None:
+            async with self._engine.begin() as connection:
+                await connection.run_sync(metadata.create_all)
+
+        if lock is None:
+            await _run()
+            return
+        async with self.advisory_lock(lock):
+            await _run()
 
 
 class SqlAlchemyRepository:
