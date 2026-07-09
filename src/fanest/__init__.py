@@ -68,6 +68,7 @@ from fanest.common.pipes import (
     ParseBoolPipe,
     ParseEnumPipe,
     ParseFilePipe,
+    ParseFilePipeBuilder,
     ParseFloatPipe,
     ParseIntPipe,
     ParseUUIDPipe,
@@ -76,6 +77,17 @@ from fanest.common.pipes import (
 from fanest.common.middleware import MiddlewareConsumer
 from fanest.common.responses import StreamableFile
 from fanest.common.serialization import ClassSerializerInterceptor, Serialize
+from fanest.common.upload import (
+    AnyFilesInterceptor,
+    DiskStorage,
+    FileInterceptor,
+    FileFieldsInterceptor,
+    FileUploadOptions,
+    FilesInterceptor,
+    UploadField,
+    disk_storage,
+    memory_storage,
+)
 from fanest.core.application import FaNestApplication
 from fanest.core.enhancers import APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE
 from fanest.core.factory import FaNestFactory
@@ -87,6 +99,8 @@ from fanest.core.reflector import Reflector
 from fanest.core.providers import (
     Inject,
     Optional,
+    Self,
+    SkipSelf,
     forward_ref,
     token,
     use_class,
@@ -97,7 +111,7 @@ from fanest.core.providers import (
 from fanest.mapped_types import IntersectionType, OmitType, PartialType, PickType
 from fanest.websockets import SocketIoServer, WebSocketManager
 
-__version__ = "0.2.0"
+__version__ = "0.3.0b1"
 
 __all__ = [
     "__version__",
@@ -108,6 +122,7 @@ __all__ = [
     "APP_PIPE",
     "BaseExceptionFilter",
     "All",
+    "AnyFilesInterceptor",
     "BackgroundTasks",
     "ConnectedSocket",
     "Controller",
@@ -117,13 +132,18 @@ __all__ = [
     "Delete",
     "DiscoveredProvider",
     "DiscoveryService",
+    "DiskStorage",
     "DynamicModule",
     "DefaultValuePipe",
     "FaNestFactory",
     "FaNestApplication",
     "FaNestHttpException",
+    "FileInterceptor",
+    "FileFieldsInterceptor",
     "FileTypeValidator",
+    "FileUploadOptions",
     "FileValidator",
+    "FilesInterceptor",
     "Form",
     "ForbiddenException",
     "Get",
@@ -156,6 +176,7 @@ __all__ = [
     "ParseBoolPipe",
     "ParseEnumPipe",
     "ParseFilePipe",
+    "ParseFilePipeBuilder",
     "ParseFloatPipe",
     "ParseIntPipe",
     "ParseUUIDPipe",
@@ -170,16 +191,19 @@ __all__ = [
     "ResponseModel",
     "Res",
     "Session",
+    "Self",
     "SetHeader",
     "SetMetadata",
     "Serialize",
     "ServiceUnavailableException",
     "SocketIoServer",
+    "SkipSelf",
     "Sse",
     "State",
     "StreamableFile",
     "UploadedFile",
     "UploadedFiles",
+    "UploadField",
     "SubscribeMessage",
     "UnauthorizedException",
     "TooManyRequestsException",
@@ -195,8 +219,10 @@ __all__ = [
     "WebSocketGateway",
     "WebSocketManager",
     "create_param_decorator",
+    "disk_storage",
     "dynamic_module",
     "forward_ref",
+    "memory_storage",
     "token",
     "use_class",
     "use_existing",

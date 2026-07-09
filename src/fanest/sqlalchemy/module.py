@@ -3,12 +3,18 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
-from sqlalchemy import delete as sqlalchemy_delete
-from sqlalchemy import func, select
-from sqlalchemy import update as sqlalchemy_update
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import and_, or_  # type: ignore[reportAttributeAccessIssue]
+from sqlalchemy import delete as sqlalchemy_delete  # type: ignore[reportAttributeAccessIssue]
+from sqlalchemy import func, select  # type: ignore[reportAttributeAccessIssue]
+from sqlalchemy import update as sqlalchemy_update  # type: ignore[reportAttributeAccessIssue]
+from sqlalchemy.ext.asyncio import (  # type: ignore[reportMissingImports]
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from fanest import Inject, Injectable, Module, use_value
 from fanest.core.providers import token
@@ -16,6 +22,9 @@ from fanest.core.providers import use_factory as provider_factory
 
 SQLALCHEMY_OPTIONS = token("SQLALCHEMY_OPTIONS")
 _current_session: ContextVar[AsyncSession | None] = ContextVar("fanest_sqlalchemy_session", default=None)
+_root_module_cache: dict[tuple[str, bool, bool], type] = {}
+_async_root_module_cache: dict[tuple[int, tuple[Any, ...], bool], type] = {}
+_feature_module_cache: dict[tuple[type, ...], type] = {}
 
 
 @Injectable()
@@ -23,6 +32,7 @@ class SqlAlchemyService:
     def __init__(self, options: dict[str, Any] = Inject(SQLALCHEMY_OPTIONS)):
         self._engine = create_async_engine(options["database_url"], echo=options.get("echo", False))
         self._sessionmaker = async_sessionmaker(self._engine, expire_on_commit=False)
+        self._closed = False
 
     @property
     def engine(self) -> AsyncEngine:
@@ -31,6 +41,8 @@ class SqlAlchemyService:
         return self._engine
 
     async def session(self) -> AsyncIterator[AsyncSession]:
+        if self._closed:
+            raise RuntimeError("SqlAlchemyService has been closed.")
         if self._sessionmaker is None:
             raise RuntimeError("SqlAlchemyModule.for_root(...) has not been configured.")
         async with self._sessionmaker() as session:
@@ -38,8 +50,14 @@ class SqlAlchemyService:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[AsyncSession]:
+        if self._closed:
+            raise RuntimeError("SqlAlchemyService has been closed.")
         if self._sessionmaker is None:
             raise RuntimeError("SqlAlchemyModule.for_root(...) has not been configured.")
+        active_session = _current_session.get()
+        if active_session is not None:
+            yield active_session
+            return
         async with self._sessionmaker() as session:
             async with session.begin():
                 token = _current_session.set(session)
@@ -52,6 +70,9 @@ class SqlAlchemyService:
         return SqlAlchemyRepository(self, model)
 
     async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         await self._engine.dispose()
 
     async def on_application_shutdown(self) -> None:
@@ -74,13 +95,17 @@ class SqlAlchemyRepository:
         where: dict[str, Any] | None = None,
         skip: int | None = None,
         take: int | None = None,
-        order_by: str | tuple[str, str] | None = None,
+        order_by: str | tuple[str, str] | list[str | tuple[str, str]] | None = None,
     ) -> list[Any]:
         statement = select(self.model)
         if where:
             statement = statement.where(*self._filters(where))
         if order_by:
-            statement = statement.order_by(self._order_by(order_by))
+            order_expressions = self._order_by(order_by)
+            if isinstance(order_expressions, list):
+                statement = statement.order_by(*order_expressions)
+            else:
+                statement = statement.order_by(order_expressions)
         if skip is not None:
             statement = statement.offset(skip)
         if take is not None:
@@ -88,6 +113,18 @@ class SqlAlchemyRepository:
         async with self._session() as session:
             result = await session.execute(statement)
             return list(result.scalars().all())
+
+    async def find_and_count(
+        self,
+        *,
+        where: dict[str, Any] | None = None,
+        skip: int | None = None,
+        take: int | None = None,
+        order_by: str | tuple[str, str] | list[str | tuple[str, str]] | None = None,
+    ) -> tuple[list[Any], int]:
+        rows = await self.find(where=where, skip=skip, take=take, order_by=order_by)
+        total = await self.count_where(where or {})
+        return rows, total
 
     async def find_by(self, **criteria: Any) -> list[Any]:
         async with self._session() as session:
@@ -98,10 +135,33 @@ class SqlAlchemyRepository:
         async with self._session() as session:
             return await session.get(self.model, primary_key)
 
+    async def find_one_where(
+        self,
+        where: dict[str, Any],
+        *,
+        order_by: str | tuple[str, str] | list[str | tuple[str, str]] | None = None,
+    ) -> Any | None:
+        statement = select(self.model).where(*self._filters(where)).limit(1)
+        if order_by:
+            order_expressions = self._order_by(order_by)
+            if isinstance(order_expressions, list):
+                statement = statement.order_by(*order_expressions)
+            else:
+                statement = statement.order_by(order_expressions)
+        async with self._session() as session:
+            result = await session.execute(statement)
+            return result.scalars().first()
+
     async def find_one_by(self, **criteria: Any) -> Any | None:
         async with self._session() as session:
             result = await session.execute(select(self.model).where(*self._filters(criteria)).limit(1))
             return result.scalars().first()
+
+    async def find_one_or_fail_by(self, **criteria: Any) -> Any:
+        entity = await self.find_one_by(**criteria)
+        if entity is None:
+            raise LookupError(f"{self.model.__name__} not found for criteria {criteria!r}")
+        return entity
 
     async def find_one_or_fail(self, primary_key: Any) -> Any:
         entity = await self.find_one(primary_key)
@@ -113,10 +173,13 @@ class SqlAlchemyRepository:
         return await self.count(**criteria) > 0
 
     async def count(self, **criteria: Any) -> int:
+        return await self.count_where(criteria)
+
+    async def count_where(self, where: dict[str, Any] | None = None) -> int:
         async with self._session() as session:
             statement = select(func.count()).select_from(self.model)
-            if criteria:
-                statement = statement.where(*self._filters(criteria))
+            if where:
+                statement = statement.where(*self._filters(where))
             result = await session.execute(statement)
             return int(result.scalar_one())
 
@@ -127,6 +190,17 @@ class SqlAlchemyRepository:
             await session.refresh(entity)
             return entity
 
+    def create(self, values: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+        return self.model(**{**(values or {}), **kwargs})
+
+    def create_many(self, values: list[dict[str, Any]]) -> list[Any]:
+        return [self.create(item) for item in values]
+
+    def merge(self, entity: Any, values: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+        for key, value in {**(values or {}), **kwargs}.items():
+            setattr(entity, key, value)
+        return entity
+
     async def insert_many(self, entities: list[Any]) -> list[Any]:
         async with self._session(write=True) as session:
             session.add_all(entities)
@@ -134,6 +208,23 @@ class SqlAlchemyRepository:
             for entity in entities:
                 await session.refresh(entity)
             return entities
+
+    async def save_many(self, entities: list[Any]) -> list[Any]:
+        return await self.insert_many(entities)
+
+    async def upsert(self, criteria: dict[str, Any], values: dict[str, Any]) -> Any:
+        entity = await self.find_one_by(**criteria)
+        if entity is None:
+            payload = {**criteria, **values}
+            entity = self.model(**payload)
+            return await self.save(entity)
+        async with self._session(write=True) as session:
+            for key, value in values.items():
+                setattr(entity, key, value)
+            session.add(entity)
+            await self._commit_or_flush(session)
+            await session.refresh(entity)
+            return entity
 
     async def update(self, criteria: dict[str, Any], values: dict[str, Any]) -> int:
         async with self._session(write=True) as session:
@@ -148,16 +239,67 @@ class SqlAlchemyRepository:
             await session.delete(entity)
             await self._commit_or_flush(session)
 
+    async def remove(self, entity: Any) -> Any:
+        await self.delete(entity)
+        return entity
+
     async def delete_by(self, **criteria: Any) -> int:
         async with self._session(write=True) as session:
             result = await session.execute(sqlalchemy_delete(self.model).where(*self._filters(criteria)))
             await self._commit_or_flush(session)
             return int(getattr(result, "rowcount", 0) or 0)
 
-    def _filters(self, criteria: dict[str, Any]) -> list[Any]:
-        return [getattr(self.model, key) == value for key, value in criteria.items()]
+    async def clear(self) -> int:
+        async with self._session(write=True) as session:
+            result = await session.execute(sqlalchemy_delete(self.model))
+            await self._commit_or_flush(session)
+            return int(getattr(result, "rowcount", 0) or 0)
 
-    def _order_by(self, order_by: str | tuple[str, str]) -> Any:
+    def _filters(self, criteria: dict[str, Any]) -> list[Any]:
+        return [self._filter_expression(key, value) for key, value in criteria.items()]
+
+    def _filter_expression(self, key: str, value: Any) -> Any:
+        if key in {"$or", "or"}:
+            return or_(*[and_(*self._filters(item)) for item in value])
+        if key in {"$and", "and"}:
+            return and_(*[and_(*self._filters(item)) for item in value])
+        column = getattr(self.model, key)
+        if not isinstance(value, dict):
+            return column == value
+        expressions = []
+        for operator, operand in value.items():
+            if operator in {"$eq", "eq"}:
+                expressions.append(column == operand)
+            elif operator in {"$ne", "ne"}:
+                expressions.append(column != operand)
+            elif operator in {"$gt", "gt"}:
+                expressions.append(column > operand)
+            elif operator in {"$gte", "gte"}:
+                expressions.append(column >= operand)
+            elif operator in {"$lt", "lt"}:
+                expressions.append(column < operand)
+            elif operator in {"$lte", "lte"}:
+                expressions.append(column <= operand)
+            elif operator in {"$in", "in"}:
+                expressions.append(column.in_(operand))
+            elif operator in {"$nin", "nin"}:
+                expressions.append(~column.in_(operand))
+            elif operator in {"$like", "like"}:
+                expressions.append(column.like(operand))
+            elif operator in {"$ilike", "ilike"}:
+                expressions.append(column.ilike(operand))
+            elif operator in {"$isnull", "isnull"}:
+                expressions.append(column.is_(None) if operand else column.is_not(None))
+            elif operator in {"$between", "between"}:
+                start, end = operand
+                expressions.append(column.between(start, end))
+            else:
+                raise ValueError(f"Unsupported SQLAlchemy repository operator: {operator}")
+        return expressions[0] if len(expressions) == 1 else and_(*expressions)
+
+    def _order_by(self, order_by: str | tuple[str, str] | list[str | tuple[str, str]]) -> Any:
+        if isinstance(order_by, list):
+            return [self._order_by(item) for item in order_by]
         if isinstance(order_by, tuple):
             field, direction = order_by
         else:
@@ -232,6 +374,9 @@ async def downgrade(connection):
 class SqlAlchemyModule:
     @staticmethod
     def for_root(*, database_url: str, echo: bool = False, is_global: bool = True) -> type:
+        cache_key = (database_url, echo, is_global)
+        if cache_key in _root_module_cache:
+            return _root_module_cache[cache_key]
         options = {"database_url": database_url, "echo": echo}
 
         @Module(
@@ -242,15 +387,20 @@ class SqlAlchemyModule:
         class DynamicSqlAlchemyModule:
             pass
 
+        _root_module_cache[cache_key] = DynamicSqlAlchemyModule
         return DynamicSqlAlchemyModule
 
     @staticmethod
     def for_root_async(
         *,
-        use_factory: Callable[..., dict[str, Any]],
+        use_factory: Callable[..., dict[str, Any] | Awaitable[dict[str, Any]]],
         inject: list[Any] | None = None,
         is_global: bool = True,
     ) -> type:
+        cache_key = (id(use_factory), tuple(inject or []), is_global)
+        if cache_key in _async_root_module_cache:
+            return _async_root_module_cache[cache_key]
+
         @Module(
             providers=[
                 provider_factory(SQLALCHEMY_OPTIONS, use_factory, inject=inject or []),
@@ -262,10 +412,14 @@ class SqlAlchemyModule:
         class DynamicSqlAlchemyModule:
             pass
 
+        _async_root_module_cache[cache_key] = DynamicSqlAlchemyModule
         return DynamicSqlAlchemyModule
 
     @staticmethod
     def for_feature(models: list[type]) -> type:
+        cache_key = tuple(models)
+        if cache_key in _feature_module_cache:
+            return _feature_module_cache[cache_key]
         providers = [
             provider_factory(
                 repository_token(model),
@@ -279,6 +433,7 @@ class SqlAlchemyModule:
         class DynamicSqlAlchemyFeatureModule:
             pass
 
+        _feature_module_cache[cache_key] = DynamicSqlAlchemyFeatureModule
         return DynamicSqlAlchemyFeatureModule
 
 

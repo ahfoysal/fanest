@@ -42,3 +42,100 @@ jobs:
 
       - name: Verify release artifacts
         run: uv run python scripts/verify_release.py
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok' || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: fanest
+          POSTGRES_USER: fanest
+          POSTGRES_PASSWORD: fanest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fanest -d fanest"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      mailpit:
+        image: axllent/mailpit:latest
+        ports:
+          - 1025:1025
+      nats:
+        image: nats:2-alpine
+        ports:
+          - 4222:4222
+      rabbitmq:
+        image: rabbitmq:3-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      FANEST_LIVE_REDIS: "1"
+      FANEST_LIVE_REDIS_URL: redis://localhost:6379/0
+      FANEST_LIVE_MONGO: "1"
+      FANEST_LIVE_MONGO_URL: mongodb://localhost:27017
+      FANEST_LIVE_MONGO_URI: mongodb://localhost:27017
+      FANEST_LIVE_MONGO_DB: fanest_it
+      FANEST_LIVE_MONGO_DATABASE: fanest_it
+      FANEST_LIVE_POSTGRES_URL: postgresql+asyncpg://fanest:fanest@localhost:5432/fanest
+      FANEST_LIVE_SMTP_HOST: localhost
+      FANEST_LIVE_SMTP_PORT: "1025"
+      FANEST_LIVE_SMTP_FROM: fanest@example.com
+      FANEST_LIVE_SMTP_TO: fanest@example.com
+      FANEST_LIVE_NATS_URL: nats://localhost:4222
+      FANEST_LIVE_RABBITMQ_URL: amqp://guest:guest@localhost:5672/
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install integration dependencies
+        run: uv sync --extra dev --extra integrations
+
+      - name: Run live integration tests
+        run: >-
+          uv run pytest
+          -m "live_redis or live_mongo or live_postgres or live_smtp or live_nats or live_rabbitmq"
+          tests/test_integration_smoke.py
+          tests/test_redis_integrations.py
+          tests/test_mongodb_module.py
+          tests/test_middleware_mapped_microservices.py
+          tests/test_queue_mailer.py
+          tests/test_schedule_cache_throttler.py
+          tests/test_external_integration_contracts.py
+          tests/test_optional_integration_contracts.py

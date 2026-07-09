@@ -4,6 +4,7 @@ from fanest.mongodb.module import (
     MongoModule,
     MongoService,
     MongooseModule,
+    MotorCollection,
     collection_token,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "MongoModule",
     "MongoService",
     "MongooseModule",
+    "MotorCollection",
     "collection_token",
 ]

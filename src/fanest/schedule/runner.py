@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from croniter import croniter
+from croniter import croniter  # type: ignore[reportMissingModuleSource]
 
 from fanest.schedule.registry import SchedulerRegistry
 
@@ -20,6 +20,7 @@ class ScheduleRunner:
         self.tasks: list[asyncio.Task] = []
         self.running_jobs: set[asyncio.Task] = set()
         self.registry = registry or SchedulerRegistry()
+        self._definitions: dict[str, tuple[dict[str, Any], Any]] = {}
 
     def start(self) -> None:
         for provider in self.providers:
@@ -28,14 +29,8 @@ class ScheduleRunner:
                 if metadata is None:
                     continue
                 name = metadata.get("name") or self._default_name(provider, handler_name, metadata["type"])
-                if metadata["type"] == "interval":
-                    self._schedule(name, metadata, self._run_interval(metadata, handler))
-                elif metadata["type"] == "cron":
-                    self._schedule(name, metadata, self._run_cron(metadata, handler))
-                elif metadata["type"] == "timeout":
-                    self._schedule(name, metadata, self._run_timeout(metadata, handler))
-                else:
-                    raise ValueError(f"Unknown schedule type: {metadata['type']}")
+                self._definitions[name] = (metadata, handler)
+                self.resume_job(name)
 
     async def stop(self) -> None:
         self.registry.clear()
@@ -50,6 +45,25 @@ class ScheduleRunner:
         self.tasks.clear()
         self.running_jobs.clear()
 
+    def pause_job(self, name: str) -> None:
+        job = self.registry.get(name)
+        job.cancel()
+        self.registry.delete(name, cancel=False)
+        self._forget_task(job.task)
+
+    def resume_job(self, name: str) -> None:
+        if self.registry.has(name):
+            return
+        try:
+            metadata, handler = self._definitions[name]
+        except KeyError as exc:
+            raise KeyError(f"No scheduled job definition registered for {name!r}.") from exc
+        self._schedule(name, metadata, self._make_coroutine(metadata, handler))
+
+    def cancel_job(self, name: str) -> None:
+        self.pause_job(name)
+        self._definitions.pop(name, None)
+
     def _schedule(self, name: str, metadata: dict[str, Any], coroutine: Any) -> None:
         if metadata.get("disabled"):
             coroutine.close()
@@ -58,17 +72,35 @@ class ScheduleRunner:
         self.tasks.append(task)
         self.registry.add(name, metadata["type"], task, metadata)
 
+    def _make_coroutine(self, metadata: dict[str, Any], handler: Any) -> Any:
+        if metadata["type"] == "interval":
+            return self._run_interval(metadata, handler)
+        if metadata["type"] == "cron":
+            return self._run_cron(metadata, handler)
+        if metadata["type"] == "timeout":
+            return self._run_timeout(metadata, handler)
+        raise ValueError(f"Unknown schedule type: {metadata['type']}")
+
+    def _forget_task(self, task: asyncio.Task[Any]) -> None:
+        try:
+            self.tasks.remove(task)
+        except ValueError:
+            pass
+
     def _default_name(self, provider: Any, handler_name: str, kind: str) -> str:
         return f"{provider.__class__.__name__}.{handler_name}:{kind}"
 
     async def _run_interval(self, metadata: dict[str, Any], handler: Any) -> None:
         delay = float(metadata["seconds"])
+        wait_for_completion = bool(metadata.get("wait_for_completion"))
+        running_task: asyncio.Task[Any] | None = None
         next_run = time.monotonic() + delay
         while True:
             await asyncio.sleep(max(next_run - time.monotonic(), 0.0))
-            task = asyncio.create_task(self._safe_call(handler))
-            self.running_jobs.add(task)
-            task.add_done_callback(self.running_jobs.discard)
+            if not wait_for_completion or running_task is None or running_task.done():
+                running_task = asyncio.create_task(self._safe_call(handler))
+                self.running_jobs.add(running_task)
+                running_task.add_done_callback(self.running_jobs.discard)
             next_run += delay
 
     async def _run_timeout(self, metadata: dict[str, Any], handler: Any) -> None:
@@ -159,9 +191,25 @@ class ScheduleRunner:
             await result
 
     async def _safe_call(self, handler: Any) -> None:
+        job = self._job_for_handler(handler)
+        started_at = time.monotonic()
         try:
             await self._call(handler)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            if job is not None:
+                job.record_error(exc, at=started_at)
             logger.exception("Scheduled job %r failed", getattr(handler, "__qualname__", handler))
+        else:
+            if job is not None:
+                job.record_success(at=started_at)
+
+    def _job_for_handler(self, handler: Any) -> Any:
+        for name, (_, registered_handler) in self._definitions.items():
+            if registered_handler is handler:
+                try:
+                    return self.registry.get(name)
+                except KeyError:
+                    return None
+        return None

@@ -1,7 +1,29 @@
 import inspect
-from typing import Any
+import logging
+from collections.abc import AsyncIterable, Iterable
+from dataclasses import dataclass
+from typing import Any, Callable
 
-from fanest import Injectable, Module
+from fanest import Injectable, Module, Optional, use_value
+from fanest.core.metadata import InjectMarker
+from fanest.core.providers import token
+
+CQRS_OPTIONS = token("CQRS_OPTIONS")
+logger = logging.getLogger("fanest.cqrs")
+
+
+@dataclass(frozen=True)
+class CqrsOptions:
+    rethrow_unhandled_exceptions: bool = False
+    allow_subclass_handlers: bool = True
+
+
+@dataclass(frozen=True)
+class CqrsUnhandledException:
+    source: str
+    message: Any
+    error: BaseException
+    handler: Any | None = None
 
 
 class CqrsHandlerNotFoundError(LookupError):
@@ -11,6 +33,15 @@ class CqrsHandlerNotFoundError(LookupError):
         super().__init__(
             f"No {bus_name} handler registered for {message_type.__module__}.{message_type.__qualname__}."
         )
+
+
+class CqrsHandlerError(RuntimeError):
+    def __init__(self, source: str, message: Any, handler: Any, error: BaseException) -> None:
+        self.source = source
+        self.message = message
+        self.handler = handler
+        self.error = error
+        super().__init__(f"{source} handler {handler!r} failed for {type(message).__qualname__}: {error}")
 
 
 def CommandHandler(command: type):
@@ -39,9 +70,54 @@ def EventsHandler(event: type):
     return decorator
 
 
+def Saga(event: type | None = None):
+    def decorator(handler):
+        setattr(handler, "__fanest_cqrs_saga__", event or object)
+        return handler
+
+    return decorator
+
+
+@Injectable()
+class UnhandledExceptionBus:
+    def __init__(self) -> None:
+        self._events: list[CqrsUnhandledException] = []
+        self._subscribers: list[Callable[[CqrsUnhandledException], Any]] = []
+
+    def publish(self, exception: CqrsUnhandledException) -> None:
+        self._events.append(exception)
+        for subscriber in list(self._subscribers):
+            result = subscriber(exception)
+            if inspect.isawaitable(result):
+                raise RuntimeError("Async unhandled exception subscribers must use publish_async().")
+
+    async def publish_async(self, exception: CqrsUnhandledException) -> None:
+        self._events.append(exception)
+        for subscriber in list(self._subscribers):
+            result = subscriber(exception)
+            if inspect.isawaitable(result):
+                await result
+
+    def subscribe(self, subscriber: Callable[[CqrsUnhandledException], Any]) -> None:
+        if subscriber not in self._subscribers:
+            self._subscribers.append(subscriber)
+
+    def events(self) -> tuple[CqrsUnhandledException, ...]:
+        return tuple(self._events)
+
+    def clear(self) -> None:
+        self._events.clear()
+
+
 @Injectable()
 class CommandBus:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        options: CqrsOptions | None = Optional(CQRS_OPTIONS),
+        exceptions: UnhandledExceptionBus | None = Optional(UnhandledExceptionBus),
+    ) -> None:
+        self.options = _normalize_options(options)
+        self.exceptions = None if isinstance(exceptions, InjectMarker) else exceptions
         self._handlers: dict[type, Any] = {}
 
     def register(self, command: type, handler: Any) -> None:
@@ -49,18 +125,44 @@ class CommandBus:
 
     async def execute(self, command: Any) -> Any:
         command_type = type(command)
-        handler = self._handlers.get(command_type)
+        handler = self._handler_for(command_type)
         if handler is None:
             raise CqrsHandlerNotFoundError("command", command_type)
-        result = handler.execute(command)
-        if inspect.isawaitable(result):
-            return await result
-        return result
+        try:
+            result = handler.execute(command)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        except Exception as error:
+            await self._capture("command", command, handler, error)
+            return None
+
+    def _handler_for(self, message_type: type) -> Any | None:
+        handler = self._handlers.get(message_type)
+        if handler is not None or not self.options.allow_subclass_handlers:
+            return handler
+        for registered_type, candidate in self._handlers.items():
+            if issubclass(message_type, registered_type):
+                return candidate
+        return None
+
+    async def _capture(self, source: str, message: Any, handler: Any, error: BaseException) -> None:
+        if self.options.rethrow_unhandled_exceptions:
+            raise error
+        if self.exceptions is not None:
+            await self.exceptions.publish_async(CqrsUnhandledException(source, message, error, handler))
+        logger.exception("%s handler failed", source)
 
 
 @Injectable()
 class QueryBus:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        options: CqrsOptions | None = Optional(CQRS_OPTIONS),
+        exceptions: UnhandledExceptionBus | None = Optional(UnhandledExceptionBus),
+    ) -> None:
+        self.options = _normalize_options(options)
+        self.exceptions = None if isinstance(exceptions, InjectMarker) else exceptions
         self._handlers: dict[type, Any] = {}
 
     def register(self, query: type, handler: Any) -> None:
@@ -68,19 +170,48 @@ class QueryBus:
 
     async def execute(self, query: Any) -> Any:
         query_type = type(query)
-        handler = self._handlers.get(query_type)
+        handler = self._handler_for(query_type)
         if handler is None:
             raise CqrsHandlerNotFoundError("query", query_type)
-        result = handler.execute(query)
-        if inspect.isawaitable(result):
-            return await result
-        return result
+        try:
+            result = handler.execute(query)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        except Exception as error:
+            await self._capture("query", query, handler, error)
+            return None
+
+    def _handler_for(self, message_type: type) -> Any | None:
+        handler = self._handlers.get(message_type)
+        if handler is not None or not self.options.allow_subclass_handlers:
+            return handler
+        for registered_type, candidate in self._handlers.items():
+            if issubclass(message_type, registered_type):
+                return candidate
+        return None
+
+    async def _capture(self, source: str, message: Any, handler: Any, error: BaseException) -> None:
+        if self.options.rethrow_unhandled_exceptions:
+            raise error
+        if self.exceptions is not None:
+            await self.exceptions.publish_async(CqrsUnhandledException(source, message, error, handler))
+        logger.exception("%s handler failed", source)
 
 
 @Injectable()
 class EventBus:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        command_bus: CommandBus | None = Optional(CommandBus),
+        options: CqrsOptions | None = Optional(CQRS_OPTIONS),
+        exceptions: UnhandledExceptionBus | None = Optional(UnhandledExceptionBus),
+    ) -> None:
+        self.command_bus = None if isinstance(command_bus, InjectMarker) else command_bus
+        self.options = _normalize_options(options)
+        self.exceptions = None if isinstance(exceptions, InjectMarker) else exceptions
         self._handlers: dict[type, list[Any]] = {}
+        self._sagas: dict[type, list[Callable[[Any], Any]]] = {}
 
     def register(self, event: type, handler: Any) -> None:
         handlers = self._handlers.setdefault(event, [])
@@ -88,30 +219,149 @@ class EventBus:
             handlers.append(handler)
 
     async def publish(self, event: Any) -> None:
-        for handler in self._handlers.get(type(event), []):
-            result = handler.handle(event)
-            if inspect.isawaitable(result):
-                await result
+        for handler in self._handlers_for(type(event)):
+            try:
+                result = handler.handle(event)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as error:
+                await self._capture("event", event, handler, error)
+        await self._run_sagas(event)
+
+    def register_saga(self, event: type, handler: Callable[[Any], Any]) -> None:
+        handlers = self._sagas.setdefault(event, [])
+        if self._handler_key(handler) not in {self._handler_key(item) for item in handlers}:
+            handlers.append(handler)
+
+    def _handlers_for(self, message_type: type) -> list[Any]:
+        handlers = [*self._handlers.get(message_type, [])]
+        if not self.options.allow_subclass_handlers:
+            return handlers
+        for registered_type, candidates in self._handlers.items():
+            if registered_type is not message_type and issubclass(message_type, registered_type):
+                handlers.extend(candidates)
+        return handlers
+
+    def _sagas_for(self, message_type: type) -> list[Callable[[Any], Any]]:
+        sagas = [*self._sagas.get(message_type, []), *self._sagas.get(object, [])]
+        if not self.options.allow_subclass_handlers:
+            return sagas
+        for registered_type, candidates in self._sagas.items():
+            if registered_type not in {message_type, object} and issubclass(message_type, registered_type):
+                sagas.extend(candidates)
+        return sagas
+
+    async def _run_sagas(self, event: Any) -> None:
+        for saga in self._sagas_for(type(event)):
+            try:
+                commands = saga(event)
+                if inspect.isawaitable(commands):
+                    commands = await commands
+                await self._dispatch_saga_commands(commands)
+            except Exception as error:
+                await self._capture("saga", event, saga, error)
+
+    async def _dispatch_saga_commands(self, commands: Any) -> None:
+        if commands is None or self.command_bus is None:
+            return
+        if isinstance(commands, AsyncIterable):
+            async for command in commands:
+                await self.command_bus.execute(command)
+            return
+        if isinstance(commands, Iterable) and not isinstance(commands, (str, bytes, dict)):
+            for command in commands:
+                await self.command_bus.execute(command)
+            return
+        await self.command_bus.execute(commands)
+
+    async def _capture(self, source: str, message: Any, handler: Any, error: BaseException) -> None:
+        if self.options.rethrow_unhandled_exceptions:
+            raise error
+        if self.exceptions is not None:
+            await self.exceptions.publish_async(CqrsUnhandledException(source, message, error, handler))
+        logger.exception("%s handler failed", source)
 
     def _handler_key(self, handler: Any) -> Any:
         return getattr(handler, "__fanest_registration_key__", handler)
 
 
+@Injectable()
+class EventPublisher:
+    def __init__(self, event_bus: EventBus):
+        self.event_bus = event_bus
+
+    async def publish(self, event: Any) -> None:
+        await self.event_bus.publish(event)
+
+    async def publish_all(self, events: Iterable[Any]) -> None:
+        for event in events:
+            await self.event_bus.publish(event)
+
+    def merge_context(self, model: Any) -> Any:
+        publisher = self
+
+        async def publish(event: Any) -> None:
+            await publisher.publish(event)
+
+        async def commit() -> None:
+            for event in list(getattr(model, "events", [])):
+                await publisher.publish(event)
+            clear_events = getattr(model, "clear_events", None)
+            if clear_events is not None:
+                clear_events()
+            elif hasattr(model, "events"):
+                getattr(model, "events").clear()
+
+        setattr(model, "publish", publish)
+        setattr(model, "commit", commit)
+        return model
+
+
+def _normalize_options(options: CqrsOptions | None) -> CqrsOptions:
+    if options is None or isinstance(options, InjectMarker):
+        return CqrsOptions()
+    return options
+
+
 class CqrsModule:
-    _root_modules: dict[bool, type] = {}
+    _root_modules: dict[tuple[bool, bool, bool], type] = {}
 
     @staticmethod
-    def for_root(*, is_global: bool = False) -> type:
-        if is_global in CqrsModule._root_modules:
-            return CqrsModule._root_modules[is_global]
+    def for_root(
+        *,
+        is_global: bool = False,
+        rethrow_unhandled_exceptions: bool = False,
+        allow_subclass_handlers: bool = True,
+    ) -> type:
+        cache_key = (is_global, rethrow_unhandled_exceptions, allow_subclass_handlers)
+        if cache_key in CqrsModule._root_modules:
+            return CqrsModule._root_modules[cache_key]
+        options = CqrsOptions(
+            rethrow_unhandled_exceptions=rethrow_unhandled_exceptions,
+            allow_subclass_handlers=allow_subclass_handlers,
+        )
 
         @Module(
-            providers=[CommandBus, QueryBus, EventBus],
-            exports=[CommandBus, QueryBus, EventBus],
+            providers=[
+                use_value(CQRS_OPTIONS, options),
+                UnhandledExceptionBus,
+                CommandBus,
+                QueryBus,
+                EventBus,
+                EventPublisher,
+            ],
+            exports=[
+                CommandBus,
+                QueryBus,
+                EventBus,
+                EventPublisher,
+                UnhandledExceptionBus,
+                CQRS_OPTIONS,
+            ],
             global_module=is_global,
         )
         class DynamicCqrsModule:
             pass
 
-        CqrsModule._root_modules[is_global] = DynamicCqrsModule
+        CqrsModule._root_modules[cache_key] = DynamicCqrsModule
         return DynamicCqrsModule

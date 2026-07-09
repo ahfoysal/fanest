@@ -9,6 +9,8 @@ assert spec is not None and spec.loader is not None
 verify_release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verify_release)
 _assert_distributions = verify_release._assert_distributions
+_assert_project_metadata = verify_release._assert_project_metadata
+_source_version = verify_release._source_version
 
 
 def test_release_verifier_rejects_extra_dist_files(tmp_path: Path):
@@ -30,3 +32,11 @@ def test_release_verifier_accepts_exact_current_artifacts(tmp_path: Path):
     sdist.write_text("", encoding="utf-8")
 
     _assert_distributions(tmp_path, [wheel, sdist], "1.2.3")
+
+
+def test_release_verifier_checks_project_metadata():
+    _assert_project_metadata()
+
+
+def test_source_version_matches_package_metadata():
+    assert _source_version() == verify_release._project_version()

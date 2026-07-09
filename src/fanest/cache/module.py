@@ -1,22 +1,24 @@
 import hashlib
+import inspect
 import json
 import time
-from typing import Any, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from fanest import Injectable, Module, Optional, use_value
 from fanest.core.providers import token
+from fanest.core.providers import use_factory as provider_factory
 
 CACHE_OPTIONS = token("CACHE_OPTIONS")
 
 
 class CacheStore(Protocol):
-    def get(self, key: str) -> Any | None: ...
+    def get(self, key: str) -> Any | None | Awaitable[Any | None]: ...
 
-    def set(self, key: str, value: Any, ttl: int | None = None) -> None: ...
+    def set(self, key: str, value: Any, ttl: int | None = None) -> None | Awaitable[None]: ...
 
-    def delete(self, key: str) -> None: ...
+    def delete(self, key: str) -> None | Awaitable[None]: ...
 
-    def clear(self) -> None: ...
+    def clear(self) -> None | Awaitable[None]: ...
 
 
 class MemoryCacheStore:
@@ -51,7 +53,18 @@ class RedisCacheStore:
     only removes this cache's entries (never a blind ``FLUSHDB``).
     """
 
-    def __init__(self, *, url: str = "redis://localhost:6379/0", prefix: str = "fanest:cache:") -> None:
+    def __init__(
+        self,
+        *,
+        url: str = "redis://localhost:6379/0",
+        prefix: str = "fanest:cache:",
+        client: Any | None = None,
+    ) -> None:
+        self.url = url
+        self.prefix = prefix
+        if client is not None:
+            self._client = client
+            return
         try:
             import redis  # type: ignore[reportMissingImports]
         except ImportError as exc:  # pragma: no cover - exercised without redis installed
@@ -59,8 +72,6 @@ class RedisCacheStore:
                 "RedisCacheStore requires the 'redis' package. "
                 "Install it with: pip install 'fanest[redis]'"
             ) from exc
-        self.url = url
-        self.prefix = prefix
         self._client = redis.Redis.from_url(url)
 
     def _key(self, key: str) -> str:
@@ -70,18 +81,29 @@ class RedisCacheStore:
         raw = self._client.get(self._key(key))
         if raw is None:
             return None
+        if isinstance(raw, bytes):
+            raw = raw.decode()
         return json.loads(raw)
 
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         data = json.dumps(value)
-        self._client.set(self._key(key), data, ex=int(ttl) if ttl else None)
+        if ttl is not None and ttl <= 0:
+            self.delete(key)
+            return
+        self._client.set(self._key(key), data, ex=int(ttl) if ttl is not None else None)
 
     def delete(self, key: str) -> None:
         self._client.delete(self._key(key))
 
     def clear(self) -> None:
-        for key in self._client.scan_iter(match=f"{self.prefix}*"):
-            self._client.delete(key)
+        keys = list(self._client.scan_iter(match=f"{self.prefix}*"))
+        if keys:
+            self._client.delete(*keys)
+
+    def close(self) -> None:
+        close = getattr(self._client, "close", None)
+        if close is not None:
+            close()
 
 
 @Injectable()
@@ -92,22 +114,76 @@ class CacheService:
         store = options.get("store")
         if store is not None:
             self.store: CacheStore = store
-        elif options.get("redis_url"):
-            self.store = RedisCacheStore(url=options["redis_url"])
+        elif options.get("redis_url") or options.get("redis_client") is not None:
+            self.store = RedisCacheStore(
+                url=options.get("redis_url", "redis://localhost:6379/0"),
+                prefix=options.get("redis_prefix", "fanest:cache:"),
+                client=options.get("redis_client"),
+            )
         else:
             self.store = MemoryCacheStore()
 
     def get(self, key: str) -> Any | None:
         return self.store.get(key)
 
+    async def get_async(self, key: str) -> Any | None:
+        result = self.store.get(key)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
-        self.store.set(key, value, ttl)
+        self.store.set(key, value, self.default_ttl if ttl is None else ttl)
+
+    async def set_async(self, key: str, value: Any, ttl: int | None = None) -> None:
+        result = self.store.set(key, value, self.default_ttl if ttl is None else ttl)
+        if inspect.isawaitable(result):
+            await result
+
+    async def remember(self, key: str, factory: Callable[[], Any], ttl: int | None = None) -> Any:
+        cached = await self.get_async(key)
+        if cached is not None:
+            return cached
+        value = factory()
+        if inspect.isawaitable(value):
+            value = await value
+        await self.set_async(key, value, ttl)
+        return value
+
+    def has(self, key: str) -> bool:
+        return self.get(key) is not None
+
+    async def has_async(self, key: str) -> bool:
+        return await self.get_async(key) is not None
 
     def clear(self) -> None:
         self.store.clear()
 
+    async def clear_async(self) -> None:
+        result = self.store.clear()
+        if inspect.isawaitable(result):
+            await result
+
     def delete(self, key: str) -> None:
         self.store.delete(key)
+
+    async def delete_async(self, key: str) -> None:
+        result = self.store.delete(key)
+        if inspect.isawaitable(result):
+            await result
+
+    def close(self) -> None:
+        close = getattr(self.store, "close", None)
+        if close is not None:
+            close()
+
+    async def close_async(self) -> None:
+        close = getattr(self.store, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
 
 class CacheInterceptor:
@@ -118,19 +194,19 @@ class CacheInterceptor:
         request = context.request
         evict_key = getattr(context.handler, "__fanest_cache_evict__", None)
         if evict_key is not None:
-            self.cache_service.delete(evict_key)
+            await self.cache_service.delete_async(evict_key)
             return await call_next()
         if request.method != "GET":
             return await call_next()
         key = self._cache_key(context)
-        cached = self.cache_service.get(key)
+        cached = await self.cache_service.get_async(key)
         if cached is not None:
             return cached
         result = await call_next()
         ttl = getattr(context.handler, "__fanest_cache_ttl__", None)
         if ttl is None:
             ttl = self.cache_service.default_ttl
-        self.cache_service.set(key, result, ttl)
+        await self.cache_service.set_async(key, result, ttl)
         return result
 
     def _cache_key(self, context) -> str:
@@ -194,3 +270,28 @@ class CacheModule:
             pass
 
         return DynamicCacheModule
+
+    for_root = register
+
+    @staticmethod
+    def register_async(
+        *,
+        use_factory: Callable[..., dict[str, Any] | Awaitable[dict[str, Any]]],
+        inject: list[Any] | None = None,
+        is_global: bool = False,
+    ) -> type:
+        @Module(
+            providers=[
+                provider_factory(CACHE_OPTIONS, use_factory, inject=inject or []),
+                CacheService,
+                CacheInterceptor,
+            ],
+            exports=[CacheService, CacheInterceptor],
+            global_module=is_global,
+        )
+        class DynamicCacheModule:
+            pass
+
+        return DynamicCacheModule
+
+    for_root_async = register_async

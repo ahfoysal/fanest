@@ -15,9 +15,25 @@ class CronExpression:
     EVERY_DAY_AT_MIDNIGHT = "0 0 * * *"
 
 
-def Interval(seconds: float, name: str | None = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def Interval(
+    seconds: float,
+    name: str | None = None,
+    *,
+    disabled: bool = False,
+    wait_for_completion: bool = False,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-        setattr(handler, "__fanest_schedule__", {"type": "interval", "seconds": seconds, "name": name})
+        setattr(
+            handler,
+            "__fanest_schedule__",
+            {
+                "type": "interval",
+                "seconds": seconds,
+                "name": name,
+                "disabled": disabled,
+                "wait_for_completion": wait_for_completion,
+            },
+        )
         return handler
 
     return decorator

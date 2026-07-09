@@ -1,5 +1,7 @@
 from pathlib import Path
-import socket
+import importlib
+import os
+import py_compile
 import sys
 
 import pytest
@@ -39,6 +41,46 @@ def test_cli_new_generates_runnable_project_scaffold(tmp_path, monkeypatch):
     assert '"fanest[standard]"' in pyproject
 
 
+def test_cli_new_rejects_names_that_break_python_packaging(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["new", "bad name"])
+
+    assert result.exit_code != 0
+    assert "Project name may contain only" in result.output
+    assert not (tmp_path / "bad name").exists()
+
+
+def test_cli_new_and_workspace_report_existing_target(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "blog_api").mkdir()
+    (tmp_path / "acme").mkdir()
+
+    new_result = runner.invoke(app, ["new", "blog_api"])
+    workspace_result = runner.invoke(app, ["workspace", "acme"])
+
+    assert new_result.exit_code != 0
+    assert "Target directory already exists: blog_api" in new_result.output
+    assert workspace_result.exit_code != 0
+    assert "Target directory already exists: acme" in workspace_result.output
+
+
+def test_cli_new_force_overwrites_scaffold_files(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    project = tmp_path / "blog_api"
+    project.mkdir()
+    (project / "tests").mkdir()
+    (project / "main.py").write_text("broken\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["new", "blog_api", "--force"])
+
+    assert result.exit_code == 0
+    assert "FaNestFactory.create(AppModule)" in (project / "main.py").read_text(encoding="utf-8")
+
+
 def test_cli_build_compiles_fresh_project_scaffold(tmp_path, monkeypatch):
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
@@ -50,6 +92,17 @@ def test_cli_build_compiles_fresh_project_scaffold(tmp_path, monkeypatch):
     assert new_result.exit_code == 0
     assert build_result.exit_code == 0
     assert "Build OK: ." in build_result.output
+
+
+def test_cli_build_compiles_single_python_file(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    Path("main.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["build", "main.py"])
+
+    assert result.exit_code == 0
+    assert "Build OK: main.py" in result.output
 
 
 def test_cli_generates_resource_and_extra_artifacts(tmp_path, monkeypatch):
@@ -69,6 +122,31 @@ def test_cli_generates_resource_and_extra_artifacts(tmp_path, monkeypatch):
     assert "CreateUsersDto" in Path(tmp_path / "src/users/users_dto.py").read_text()
     assert (tmp_path / "src/request_id/request_id_middleware.py").exists()
     assert (tmp_path / "src/current_user/current_user_decorator.py").exists()
+
+
+def test_cli_accepts_kebab_case_artifact_names_and_emits_python_modules(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["generate", "resource", "user-profile"])
+
+    assert result.exit_code == 0
+    assert (tmp_path / "src/user_profile/user_profile_controller.py").exists()
+    assert (tmp_path / "src/user_profile/user_profile_service.py").exists()
+    module_content = (tmp_path / "src/user_profile/user_profile_module.py").read_text(
+        encoding="utf-8"
+    )
+    assert "class UserProfileModule" in module_content
+    sys.path.insert(0, str(tmp_path))
+    try:
+        importlib.invalidate_caches()
+        imported = importlib.import_module("src.user_profile.user_profile_module")
+    finally:
+        sys.path.remove(str(tmp_path))
+        for module_name in list(sys.modules):
+            if module_name == "src" or module_name.startswith("src."):
+                sys.modules.pop(module_name, None)
+    assert imported.UserProfileModule.__name__ == "UserProfileModule"
 
 
 def test_cli_generate_alias_and_nest_style_artifacts(tmp_path, monkeypatch):
@@ -91,6 +169,53 @@ def test_cli_generate_alias_and_nest_style_artifacts(tmp_path, monkeypatch):
     assert (tmp_path / "src/billing/billing_resolver.py").exists()
     assert (tmp_path / "src/billing/billing_repository.py").exists()
     assert (tmp_path / "tests/test_billing.py").exists()
+
+
+def test_cli_generate_short_aliases(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    results = [
+        runner.invoke(app, ["g", "mo", "users"]),
+        runner.invoke(app, ["g", "co", "users"]),
+        runner.invoke(app, ["g", "s", "users"]),
+        runner.invoke(app, ["g", "gu", "auth"]),
+        runner.invoke(app, ["g", "pi", "parse_int"]),
+        runner.invoke(app, ["g", "itc", "trace"]),
+        runner.invoke(app, ["g", "f", "http"]),
+        runner.invoke(app, ["g", "ga", "chat"]),
+        runner.invoke(app, ["g", "mi", "request_id"]),
+        runner.invoke(app, ["g", "d", "current_user"]),
+        runner.invoke(app, ["g", "lib", "common"]),
+        runner.invoke(app, ["g", "cl", "plain"]),
+        runner.invoke(app, ["g", "pr", "cache"]),
+        runner.invoke(app, ["g", "ex", "domain"]),
+        runner.invoke(app, ["g", "r", "profile"]),
+        runner.invoke(app, ["g", "repo", "users"]),
+        runner.invoke(app, ["g", "spec", "users"]),
+    ]
+
+    assert all(result.exit_code == 0 for result in results)
+    assert (tmp_path / "src/users/users_module.py").exists()
+    assert (tmp_path / "src/chat/chat_gateway.py").exists()
+    assert (tmp_path / "libs/common/common_module.py").exists()
+    assert (tmp_path / "tests/test_users.py").exists()
+
+
+def test_cli_generate_protects_existing_files_and_force_overwrites(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    service = tmp_path / "src/users/users_service.py"
+    service.parent.mkdir(parents=True)
+    service.write_text("custom user code\n", encoding="utf-8")
+
+    blocked = runner.invoke(app, ["generate", "service", "users"])
+    forced = runner.invoke(app, ["generate", "service", "users", "--force"])
+
+    assert blocked.exit_code != 0
+    assert "Refusing to overwrite existing file" in blocked.output
+    assert forced.exit_code == 0
+    assert "class UsersService" in service.read_text(encoding="utf-8")
 
 
 def test_cli_registers_generated_module_in_parent_module(tmp_path, monkeypatch):
@@ -181,8 +306,164 @@ def test_cli_generates_workspace_and_library(tmp_path, monkeypatch):
 
     assert workspace.exit_code == 0
     assert library.exit_code == 0
+    assert (tmp_path / "acme/pyproject.toml").exists()
     assert (tmp_path / "acme/apps/api/main.py").exists()
+    assert (tmp_path / "acme/apps/api/src/main.py").exists()
+    assert (tmp_path / "acme/apps/api/tests/test_app.py").exists()
+    assert (tmp_path / "acme/libs/__init__.py").exists()
     assert (tmp_path / "acme/libs/common/common_module.py").exists()
+
+
+def test_cli_generates_monorepo_application_aliases(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    app_result = runner.invoke(app, ["generate", "app", "admin-api"])
+    application_result = runner.invoke(app, ["generate", "application", "worker_api"])
+
+    assert app_result.exit_code == 0
+    assert application_result.exit_code == 0
+    assert (tmp_path / "apps/admin_api/main.py").exists()
+    assert (tmp_path / "apps/admin_api/src/main.py").exists()
+    assert (tmp_path / "apps/admin_api/tests/test_app.py").exists()
+    assert (tmp_path / "apps/worker_api/main.py").exists()
+
+
+def test_cli_generates_plugin_dynamic_module_scaffold(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["generate", "plugin", "redis-cache"])
+
+    assert result.exit_code == 0
+    plugin_file = tmp_path / "src/redis_cache/redis_cache_plugin.py"
+    assert plugin_file.exists()
+    content = plugin_file.read_text(encoding="utf-8")
+    assert "REDIS_CACHE_OPTIONS" in content
+    assert "class RedisCachePlugin" in content
+
+    sys.path.insert(0, str(tmp_path))
+    try:
+        for module_name in list(sys.modules):
+            if module_name == "src" or module_name.startswith("src."):
+                sys.modules.pop(module_name, None)
+        importlib.invalidate_caches()
+        imported = importlib.import_module("src.redis_cache.redis_cache_plugin")
+    finally:
+        sys.path.remove(str(tmp_path))
+        for module_name in list(sys.modules):
+            if module_name == "src" or module_name.startswith("src."):
+                sys.modules.pop(module_name, None)
+    dynamic = imported.RedisCachePlugin.register(url="redis://localhost")
+    assert dynamic.providers[0].use_value == {"url": "redis://localhost"}
+
+
+def test_cli_workspace_build_and_check_default_entrypoint(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    workspace = runner.invoke(app, ["workspace", "acme"])
+    monkeypatch.chdir(tmp_path / "acme/apps/api")
+    check = runner.invoke(app, ["check", "main.py"])
+    build = runner.invoke(app, ["build"])
+
+    assert workspace.exit_code == 0
+    assert check.exit_code == 0
+    assert "Application target OK: main:app" in check.output
+    assert build.exit_code == 0
+
+
+def test_cli_check_workspace_entrypoint_from_workspace_root(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    workspace = runner.invoke(app, ["workspace", "acme"])
+    monkeypatch.chdir(tmp_path / "acme")
+    check = runner.invoke(app, ["check", "apps/api/main.py"])
+
+    assert workspace.exit_code == 0
+    assert check.exit_code == 0
+    assert "Application target OK: main:app" in check.output
+
+
+def test_cli_check_cleans_local_import_cache_and_sys_path(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    package = tmp_path / "app"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "service.py").write_text("async def app(scope, receive, send):\n    pass\n", encoding="utf-8")
+    Path("main.py").write_text("from app.service import app\n", encoding="utf-8")
+    original_sys_path = list(sys.path)
+
+    first = runner.invoke(app, ["check", "main.py"])
+    (package / "service.py").write_text("app = object()\n", encoding="utf-8")
+    second = runner.invoke(app, ["check", "main.py"])
+
+    assert first.exit_code == 0
+    assert second.exit_code != 0
+    assert "Application target is not callable" in second.output
+    assert sys.path == original_sys_path
+
+
+def test_cli_check_executes_source_instead_of_stale_bytecode(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    valid = "async def app(scope, receive, send):\n    pass\n"
+    invalid = "app = object()\n" + "#" * (len(valid) - len("app = object()\n"))
+    source = Path("main.py")
+    source.write_text(valid, encoding="utf-8")
+    os.utime(source, (1_700_000_000, 1_700_000_000))
+    py_compile.compile(str(source), doraise=True)
+
+    first = runner.invoke(app, ["check", "main.py"])
+    source.write_text(invalid, encoding="utf-8")
+    os.utime(source, (1_700_000_000, 1_700_000_000))
+    second = runner.invoke(app, ["check", "main.py"])
+
+    assert first.exit_code == 0
+    assert second.exit_code != 0
+    assert "Application target is not callable" in second.output
+
+
+def test_cli_check_supports_package_relative_imports(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    package = tmp_path / "src"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "service.py").write_text(
+        "async def app(scope, receive, send):\n    pass\n",
+        encoding="utf-8",
+    )
+    (package / "main.py").write_text("from .service import app\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["check", "src/main.py"])
+
+    assert result.exit_code == 0
+    assert "Application target OK: src.main:app" in result.output
+
+
+def test_cli_rejects_project_path_traversal(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["new", "../escape"])
+
+    assert result.exit_code != 0
+    assert "Project name must be a single directory name" in result.output
+    assert not (tmp_path.parent / "escape").exists()
+
+
+def test_cli_rejects_invalid_project_distribution_names(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["new", "bad name"])
+
+    assert result.exit_code != 0
+    assert "Project name may contain only" in result.output
+    assert not (tmp_path / "bad name").exists()
 
 
 def test_cli_dev_and_run_accept_file_paths(tmp_path, monkeypatch):
@@ -200,16 +481,28 @@ def test_cli_dev_and_run_accept_file_paths(tmp_path, monkeypatch):
 
     dev = runner.invoke(app, ["dev", "main.py", "--port", "9000"])
     run = runner.invoke(app, ["run", "src/main.py", "--app", "application", "--workers", "2"])
+    absolute = runner.invoke(app, ["dev", str(tmp_path / "main.py"), "--port", "9001"])
 
     assert dev.exit_code == 0
     assert run.exit_code == 0
+    assert absolute.exit_code == 0
     assert calls[0] == (
         "main:app",
-        {"host": "127.0.0.1", "port": 9000, "reload": True},
+        {"app_dir": str(tmp_path), "host": "127.0.0.1", "port": 9000, "reload": True},
     )
     assert calls[1] == (
-        "src.main:application",
-        {"host": "0.0.0.0", "port": 8000, "reload": False, "workers": 2},
+        "main:application",
+        {
+            "app_dir": str(tmp_path / "src"),
+            "host": "0.0.0.0",
+            "port": 8000,
+            "reload": False,
+            "workers": 2,
+        },
+    )
+    assert calls[2] == (
+        "main:app",
+        {"app_dir": str(tmp_path), "host": "127.0.0.1", "port": 9001, "reload": True},
     )
 
 
@@ -246,13 +539,15 @@ def test_cli_uvicorn_runner_reports_port_in_use(monkeypatch, capsys):
             raise AssertionError("uvicorn should not start when the port is unavailable")
 
     monkeypatch.setitem(sys.modules, "uvicorn", FakeUvicorn)
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        sock.listen(1)
-        port = sock.getsockname()[1]
+    monkeypatch.setattr(
+        cli_main,
+        "_ensure_port_available",
+        lambda host, port: cli_main._port_in_use_error(port),
+    )
+    port = 8765
 
-        with pytest.raises(typer.Exit):
-            cli_main._run_uvicorn("main:app", host="127.0.0.1", port=port, reload=True)
+    with pytest.raises(typer.Exit):
+        cli_main._run_uvicorn("main:app", host="127.0.0.1", port=port, reload=True)
 
     captured = capsys.readouterr()
     assert f"Port {port} is already in use. Try running with --port {port + 1}." in captured.err
@@ -307,6 +602,9 @@ def test_cli_info_and_build(tmp_path, monkeypatch):
 
     assert info.exit_code == 0
     assert f"FaNest {__version__}" in info.output
+    assert "Executable " in info.output
+    assert "fastapi " in info.output
+    assert "uvicorn " in info.output
     assert build.exit_code == 0
     assert build_src.exit_code == 0
     assert "Build OK: ." in build.output

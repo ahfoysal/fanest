@@ -71,24 +71,28 @@ class ModuleRef:
 
     async def create(self, cls: type) -> Any:
         try:
-            return await self.container.instantiate_async(cls)
+            return await self.container.instantiate_async(cls, module_key=self.module_key)
         except KeyError as exc:
             raise UnknownProviderError(exc.args[0] if exc.args else cls) from exc
 
     def create_sync(self, cls: type) -> Any:
         try:
-            return self.container.instantiate(cls)
+            return self.container.instantiate(cls, module_key=self.module_key)
         except KeyError as exc:
             raise UnknownProviderError(exc.args[0] if exc.args else cls) from exc
 
-    def has(self, token: Any) -> bool:
-        return self.container.has_provider(token)
+    def has(self, token: Any, strict: bool = False) -> bool:
+        if strict and self.module_key is None:
+            raise StrictLookupError()
+        return self.container.has_provider(token, module_key=self.module_key, strict=strict)
 
-    def is_registered(self, token: Any) -> bool:
-        return self.has(token)
+    def is_registered(self, token: Any, strict: bool = False) -> bool:
+        return self.has(token, strict=strict)
 
     def introspect(self, token: Any) -> dict[str, Any]:
-        return self.container.describe_provider(token)
+        return self.container.describe_provider(token, module_key=self.module_key)
 
-    def provider_tokens(self) -> tuple[Any, ...]:
-        return self.container.provider_tokens()
+    def provider_tokens(self, strict: bool = False) -> tuple[Any, ...]:
+        if strict and self.module_key is None:
+            raise StrictLookupError()
+        return self.container.provider_tokens(self.module_key, strict=strict)

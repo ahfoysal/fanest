@@ -1,6 +1,6 @@
 [project]
 name = "fanest"
-version = "0.2.2"
+version = "0.3.0b1"
 description = "NestJS-style backend architecture for Python, powered by FastAPI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,6 +31,7 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "typer>=0.12.0",
     "uvicorn>=0.30.0",
+    "httpx2>=2.5.0",
 ]
 
 [project.optional-dependencies]
@@ -40,8 +41,38 @@ standard = [
 redis = [
     "redis>=5.0.0",
 ]
+nats = [
+    "nats-py>=2.7.0",
+]
+rabbitmq = [
+    "aio-pika>=9.4.0",
+]
+kafka = [
+    "aiokafka>=0.10.0",
+]
+grpc = [
+    "grpcio>=1.64.0",
+    "grpcio-tools>=1.64.0",
+]
 mongo = [
     "motor>=3.0.0",
+]
+postgres = [
+    "asyncpg>=0.29.0",
+]
+microservices = [
+    "aio-pika>=9.4.0",
+    "aiokafka>=0.10.0",
+    "nats-py>=2.7.0",
+    "redis>=5.0.0",
+]
+integrations = [
+    "aio-pika>=9.4.0",
+    "aiokafka>=0.10.0",
+    "asyncpg>=0.29.0",
+    "motor>=3.0.0",
+    "nats-py>=2.7.0",
+    "redis>=5.0.0",
 ]
 dev = [
     "build>=1.2.0",
@@ -82,6 +113,16 @@ include = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "live_redis: requires FANEST_LIVE_REDIS_URL",
+    "live_mongo: requires FANEST_LIVE_MONGO_URL",
+    "live_postgres: requires FANEST_LIVE_POSTGRES_URL",
+    "live_rabbitmq: requires FANEST_LIVE_RABBITMQ_URL",
+    "live_nats: requires FANEST_LIVE_NATS_URL",
+    "live_kafka: requires FANEST_LIVE_KAFKA_BOOTSTRAP_SERVERS",
+    "live_smtp: requires FANEST_LIVE_SMTP_HOST",
+    "wheel_smoke: requires FANEST_LIVE_WHEEL=1",
+]
 
 [tool.ruff]
 line-length = 100

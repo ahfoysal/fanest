@@ -209,7 +209,7 @@ class ModuleScanner:
         if target_type is None:
             return
         signature = inspect.signature(target_type.__init__)
-        type_hints = get_type_hints(target_type.__init__)
+        type_hints = self._safe_type_hints(target_type.__init__)
         for name, parameter in signature.parameters.items():
             if name == "self" or parameter.kind in (
                 inspect.Parameter.VAR_POSITIONAL,
@@ -230,7 +230,14 @@ class ModuleScanner:
                 continue
             if default is not inspect.Parameter.empty and not explicit_inject and not explicit_forward_ref:
                 continue
-            self._validate_dependency(record, dependency, visible_tokens, target_type.__name__)
+            self._validate_dependency(
+                record,
+                dependency,
+                visible_tokens,
+                target_type.__name__,
+                self_only=getattr(default, "self_only", False),
+                skip_self=getattr(default, "skip_self", False),
+            )
 
     def _validate_dependency(
         self,
@@ -238,15 +245,32 @@ class ModuleScanner:
         dependency: Any,
         visible_tokens: set[Any],
         target_name: Any,
+        *,
+        self_only: bool = False,
+        skip_self: bool = False,
     ) -> None:
         dependency = self._unwrap_token(dependency)
         dependency = self._resolve_named_token(dependency, visible_tokens)
+        if self_only:
+            visible_tokens = set(record.local_tokens) | FRAMEWORK_PROVIDER_TOKENS
+        elif skip_self:
+            visible_tokens = self._parent_visible_tokens(record)
         if dependency not in visible_tokens:
             raise TypeError(
                 f"{target_name} in {record.module_type.__name__} depends on {dependency!r}, "
                 "but that provider is not local or exported by an imported module. "
                 "Register it in providers=[...] or export it from an imported module."
             )
+
+    def _parent_visible_tokens(self, record: ModuleRecord) -> set[Any]:
+        visible = set(FRAMEWORK_PROVIDER_TOKENS)
+        for imported_module in record.metadata.imports:
+            imported_record = self.records[self._module_key(imported_module)]
+            visible.update(imported_record.export_tokens)
+        for global_record in self.records.values():
+            if global_record.metadata.global_module and global_record is not record:
+                visible.update(global_record.export_tokens)
+        return visible
 
     def _target_type(self, target: ProviderDefinition) -> type | None:
         use_class = getattr(target, "use_class", None)
@@ -423,12 +447,21 @@ class ModuleScanner:
             return token
         if token in candidates:
             return token
-        for candidate in candidates:
-            if not inspect.isclass(candidate):
-                continue
-            if token in {candidate.__name__, candidate.__qualname__}:
-                return candidate
+        matches = [
+            candidate
+            for candidate in candidates
+            if inspect.isclass(candidate) and token in {candidate.__name__, candidate.__qualname__}
+        ]
+        unique_matches = list(dict.fromkeys(matches))
+        if len(unique_matches) == 1:
+            return unique_matches[0]
         return token
+
+    def _safe_type_hints(self, target: Any) -> dict[str, Any]:
+        try:
+            return get_type_hints(target)
+        except Exception:
+            return dict(inspect.get_annotations(target, eval_str=False))
 
     def _configured_middlewares(self, module: type) -> list[Any]:
         configure = getattr(module, "configure", None)
@@ -482,7 +515,7 @@ class ModuleScanner:
 
     def _declared_callables(self, target: type) -> list[Any]:
         handlers: list[Any] = []
-        for name, value in vars(target).items():
+        for name, value in inspect.getmembers(target):
             if name.startswith("__"):
                 continue
             candidate = value

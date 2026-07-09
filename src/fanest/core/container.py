@@ -53,7 +53,8 @@ class FaNestContainer:
         self._module_providers: dict[Any, dict[Any, ProviderDefinition]] = {}
         self._module_imports: dict[Any, list[Any]] = {}
         self._module_exports: dict[Any, set[Any]] = {}
-        self._global_modules: set[Any] = set()
+        self._global_modules: list[Any] = []
+        self._global_module_set: set[Any] = set()
         self._multi_providers: dict[Any, list[tuple[Any | None, ProviderDefinition]]] = {}
         self._root_module_key: Any | None = None
         self._instances: dict[Any, Any] = {}
@@ -97,8 +98,9 @@ class FaNestContainer:
             module_providers[token] = provider
         self._module_imports[module_key] = list(imports)
         self._module_exports[module_key] = set(exports)
-        if global_module:
-            self._global_modules.add(module_key)
+        if global_module and module_key not in self._global_module_set:
+            self._global_module_set.add(module_key)
+            self._global_modules.append(module_key)
 
     def begin_request(self):
         return _request_instances.set({})
@@ -163,20 +165,35 @@ class FaNestContainer:
             for module_key, provider in self._multi_providers.get(token, [])
         ]
 
-    def has_provider(self, token: Any) -> bool:
+    def has_provider(
+        self,
+        token: Any,
+        module_key: Any | None = None,
+        *,
+        strict: bool = False,
+    ) -> bool:
         token = self._unwrap_token(token)
-        token = self._resolve_named_token(token)
+        token = self._resolve_named_token(token, module_key)
+        if strict:
+            return token in self._module_providers.get(module_key, {})
         if token in self._multi_providers:
             return True
-        _, provider = self._locate_provider(token)
+        _, provider = self._locate_provider(token, module_key)
         return provider is not None
 
-    def provider_tokens(self) -> tuple[Any, ...]:
-        return tuple(dict.fromkeys(self._visible_provider_tokens()))
+    def provider_tokens(
+        self,
+        module_key: Any | None = None,
+        *,
+        strict: bool = False,
+    ) -> tuple[Any, ...]:
+        if strict:
+            return tuple(dict.fromkeys(self._module_providers.get(module_key, {}).keys()))
+        return tuple(dict.fromkeys(self._visible_provider_tokens(module_key)))
 
-    def describe_provider(self, token: Any) -> dict[str, Any]:
+    def describe_provider(self, token: Any, module_key: Any | None = None) -> dict[str, Any]:
         token = self._unwrap_token(token)
-        token = self._resolve_named_token(token)
+        token = self._resolve_named_token(token, module_key)
         multi = self._multi_providers.get(token)
         if multi is not None:
             return {
@@ -186,7 +203,7 @@ class FaNestContainer:
                 "multi": True,
                 "count": len(multi),
             }
-        owner_key, provider = self._locate_provider(token)
+        owner_key, provider = self._locate_provider(token, module_key)
         if provider is None:
             raise KeyError(token)
         assert provider is not None
@@ -446,12 +463,23 @@ class FaNestContainer:
         if isinstance(marker, InjectMarker):
             try:
                 if isinstance(marker.token, ForwardRef):
-                    return self._resolve_forward_ref(marker.token, module_key)
+                    return self._resolve_forward_ref(
+                        marker.token,
+                        module_key,
+                        self_only=marker.self_only,
+                        skip_self=marker.skip_self,
+                    )
                 token = self._unwrap_token(marker.token)
                 token = self._resolve_named_token(token, module_key)
-                owner_key, _ = self._locate_provider(token, module_key)
+                if marker.self_only:
+                    return self.resolve_local(token, module_key)
+                owner_key, provider = self._locate_provider(token, module_key, skip_local=marker.skip_self)
+                if provider is None:
+                    raise KeyError(token)
                 if self._cache_key(owner_key, token) in self._current_resolving():
                     return ForwardRefProxy(self, token, module_key=owner_key)
+                if marker.skip_self:
+                    return self.resolve(token, module_key=owner_key)
                 return self.resolve(token, module_key=module_key)
             except Exception:
                 if marker.optional:
@@ -463,12 +491,23 @@ class FaNestContainer:
         if isinstance(marker, InjectMarker):
             try:
                 if isinstance(marker.token, ForwardRef):
-                    return await self._resolve_forward_ref_async(marker.token, module_key)
+                    return await self._resolve_forward_ref_async(
+                        marker.token,
+                        module_key,
+                        self_only=marker.self_only,
+                        skip_self=marker.skip_self,
+                    )
                 token = self._unwrap_token(marker.token)
                 token = self._resolve_named_token(token, module_key)
-                owner_key, _ = self._locate_provider(token, module_key)
+                if marker.self_only:
+                    return await self.resolve_local_async(token, module_key)
+                owner_key, provider = self._locate_provider(token, module_key, skip_local=marker.skip_self)
+                if provider is None:
+                    raise KeyError(token)
                 if self._cache_key(owner_key, token) in self._current_resolving():
                     return ForwardRefProxy(self, token, module_key=owner_key)
+                if marker.skip_self:
+                    return await self.resolve_async(token, module_key=owner_key)
                 return await self.resolve_async(token, module_key=module_key)
             except Exception:
                 if marker.optional:
@@ -481,11 +520,11 @@ class FaNestContainer:
             return token.factory()
         return token
 
-    def instantiate(self, provider: type) -> Any:
-        return self._instantiate(provider)
+    def instantiate(self, provider: type, module_key: Any | None = None) -> Any:
+        return self._instantiate(provider, module_key=module_key)
 
-    async def instantiate_async(self, provider: type) -> Any:
-        return await self._instantiate_async(provider)
+    async def instantiate_async(self, provider: type, module_key: Any | None = None) -> Any:
+        return await self._instantiate_async(provider, module_key=module_key)
 
     def _instantiate(self, provider: type, module_key: Any | None = None) -> Any:
         parameters, type_hints = self._constructor_metadata(provider)
@@ -563,11 +602,17 @@ class FaNestContainer:
         if cached is not None:
             return cached
         signature = inspect.signature(provider.__init__)
-        type_hints = get_type_hints(provider.__init__)
+        type_hints = self._safe_type_hints(provider.__init__)
         parameters = dict(signature.parameters)
         metadata = (parameters, type_hints)
         self._dependency_cache[provider] = metadata
         return metadata
+
+    def _safe_type_hints(self, target: Any) -> dict[str, Any]:
+        try:
+            return get_type_hints(target)
+        except Exception:
+            return dict(inspect.get_annotations(target, eval_str=False))
 
     def _invalidate_provider_cache(self, token: Any) -> None:
         token = self._unwrap_token(token)
@@ -593,6 +638,8 @@ class FaNestContainer:
         token: Any,
         module_key: Any | None = None,
         seen: set[Any] | None = None,
+        *,
+        skip_local: bool = False,
     ) -> tuple[Any | None, ProviderDefinition | None]:
         token = self._resolve_named_token(token, module_key)
         if module_key is None:
@@ -601,7 +648,7 @@ class FaNestContainer:
                 if provider is not None:
                     return owner_key, provider
             return None, self._providers.get(token)
-        module_provider = self._module_providers.get(module_key, {}).get(token)
+        module_provider = None if skip_local else self._module_providers.get(module_key, {}).get(token)
         if module_provider is not None:
             return module_key, module_provider
         seen = seen or set()
@@ -634,14 +681,46 @@ class FaNestContainer:
             raise KeyError(token)
         return ForwardRefProxy(self, token, module_key=owner_key)
 
-    def _resolve_forward_ref(self, ref: ForwardRef, module_key: Any | None = None) -> Any:
+    def _resolve_forward_ref(
+        self,
+        ref: ForwardRef,
+        module_key: Any | None = None,
+        *,
+        self_only: bool = False,
+        skip_self: bool = False,
+    ) -> Any:
         token = self._resolve_named_token(self._unwrap_token(ref), module_key)
+        if self_only:
+            return self.resolve_local(token, module_key)
+        if skip_self:
+            owner_key, provider = self._locate_provider(token, module_key, skip_local=True)
+            if provider is None:
+                raise KeyError(token)
+            if inspect.isclass(token):
+                return ForwardRefProxy(self, token, module_key=owner_key)
+            return self.resolve(token, module_key=owner_key)
         if inspect.isclass(token):
             return self._forward_ref_proxy(ref, module_key)
         return self.resolve(token, module_key=module_key)
 
-    async def _resolve_forward_ref_async(self, ref: ForwardRef, module_key: Any | None = None) -> Any:
+    async def _resolve_forward_ref_async(
+        self,
+        ref: ForwardRef,
+        module_key: Any | None = None,
+        *,
+        self_only: bool = False,
+        skip_self: bool = False,
+    ) -> Any:
         token = self._resolve_named_token(self._unwrap_token(ref), module_key)
+        if self_only:
+            return await self.resolve_local_async(token, module_key)
+        if skip_self:
+            owner_key, provider = self._locate_provider(token, module_key, skip_local=True)
+            if provider is None:
+                raise KeyError(token)
+            if inspect.isclass(token):
+                return ForwardRefProxy(self, token, module_key=owner_key)
+            return await self.resolve_async(token, module_key=owner_key)
         if inspect.isclass(token):
             return self._forward_ref_proxy(ref, module_key)
         return await self.resolve_async(token, module_key=module_key)

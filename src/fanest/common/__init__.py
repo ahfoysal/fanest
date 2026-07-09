@@ -64,6 +64,7 @@ from fanest.common.pipes import (
     ParseBoolPipe,
     ParseEnumPipe,
     ParseFilePipe,
+    ParseFilePipeBuilder,
     ParseFloatPipe,
     ParseIntPipe,
     ParseUUIDPipe,
@@ -72,11 +73,23 @@ from fanest.common.pipes import (
 from fanest.common.middleware import MiddlewareConsumer
 from fanest.common.responses import StreamableFile
 from fanest.common.serialization import ClassSerializerInterceptor, Serialize
+from fanest.common.upload import (
+    AnyFilesInterceptor,
+    DiskStorage,
+    FileInterceptor,
+    FileFieldsInterceptor,
+    FileUploadOptions,
+    FilesInterceptor,
+    UploadField,
+    disk_storage,
+    memory_storage,
+)
 
 __all__ = [
     "BadRequestException",
     "BaseExceptionFilter",
     "All",
+    "AnyFilesInterceptor",
     "BackgroundTasks",
     "Body",
     "Catch",
@@ -86,9 +99,14 @@ __all__ = [
     "Cookie",
     "Delete",
     "DefaultValuePipe",
+    "DiskStorage",
     "FaNestHttpException",
+    "FileInterceptor",
+    "FileFieldsInterceptor",
     "FileTypeValidator",
+    "FileUploadOptions",
     "FileValidator",
+    "FilesInterceptor",
     "Form",
     "ForbiddenException",
     "Get",
@@ -109,6 +127,7 @@ __all__ = [
     "ParseBoolPipe",
     "ParseEnumPipe",
     "ParseFilePipe",
+    "ParseFilePipeBuilder",
     "ParseFloatPipe",
     "ParseIntPipe",
     "ParseUUIDPipe",
@@ -131,6 +150,7 @@ __all__ = [
     "StreamableFile",
     "UploadedFile",
     "UploadedFiles",
+    "UploadField",
     "SubscribeMessage",
     "UnauthorizedException",
     "TooManyRequestsException",
@@ -143,4 +163,6 @@ __all__ = [
     "Version",
     "WebSocketGateway",
     "create_param_decorator",
+    "disk_storage",
+    "memory_storage",
 ]

@@ -1,6 +1,9 @@
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.testclient import TestClient
-from fastapi.responses import JSONResponse
 import pytest
+from starlette.websockets import WebSocketDisconnect
+from typing import Any, cast
 
 from fanest import (
     ConnectedSocket,
@@ -20,6 +23,8 @@ from fanest import (
     forward_ref,
     use_factory,
 )
+from fanest.core.container import FaNestContainer
+from fanest.platform_fastapi.adapter import FastApiAdapter
 
 
 @WebSocketGateway("/chat")
@@ -281,10 +286,109 @@ def test_websocket_exception_filter_can_return_json_response():
         }
 
 
+@Catch(ValueError)
+class WebSocketPlainResponseFilter:
+    def catch(self, exc, context):
+        return PlainTextResponse(f"plain:{exc}", status_code=418)
+
+
+@WebSocketGateway("/plain-response-filter-ws")
+@UseFilters(WebSocketPlainResponseFilter)
+class PlainResponseFilterGateway:
+    @SubscribeMessage("fail")
+    async def fail(self, data, websocket):
+        raise ValueError("response object")
+
+
+@Module(gateways=[PlainResponseFilterGateway])
+class PlainResponseFilterWsModule:
+    pass
+
+
+def test_websocket_exception_filter_can_return_plain_response():
+    client = TestClient(FaNestFactory.create(PlainResponseFilterWsModule))
+
+    with client.websocket_connect("/plain-response-filter-ws") as websocket:
+        websocket.send_json({"event": "fail", "data": None})
+        assert websocket.receive_json() == {
+            "event": "error",
+            "data": "plain:response object",
+        }
+
+
+@Catch(ValueError)
+class ConnectJsonResponseFilter:
+    def catch(self, exc, context):
+        return JSONResponse(content={"kind": "connect", "message": str(exc)})
+
+
+@WebSocketGateway("/connect-filter-ws")
+@UseFilters(ConnectJsonResponseFilter)
+class ConnectFilterGateway:
+    async def on_connect(self, websocket):
+        raise ValueError("connect failed")
+
+    @SubscribeMessage("echo")
+    async def echo(self, data, websocket):
+        return data
+
+
+@Module(gateways=[ConnectFilterGateway])
+class ConnectFilterWsModule:
+    pass
+
+
+def test_websocket_on_connect_exception_uses_filters_before_close():
+    client = TestClient(FaNestFactory.create(ConnectFilterWsModule))
+
+    with client.websocket_connect("/connect-filter-ws") as websocket:
+        assert websocket.receive_json() == {
+            "event": "error",
+            "data": {"kind": "connect", "message": "connect failed"},
+        }
+        with pytest.raises(Exception):
+            websocket.receive_json()
+
+
+@WebSocketGateway("/response-return-ws")
+class ResponseReturnGateway:
+    @SubscribeMessage("json")
+    async def json_response(self, data, websocket):
+        return JSONResponse(content={"kind": "handler-json", "payload": data})
+
+    @SubscribeMessage("plain")
+    async def plain_response(self, data, websocket):
+        return PlainTextResponse(f"plain:{data}")
+
+    @SubscribeMessage("bytes")
+    async def bytes_response(self, data, websocket):
+        return b"binary-ok"
+
+
+@Module(gateways=[ResponseReturnGateway])
+class ResponseReturnWsModule:
+    pass
+
+
+def test_websocket_handler_returned_responses_are_json_safe():
+    client = TestClient(FaNestFactory.create(ResponseReturnWsModule))
+
+    with client.websocket_connect("/response-return-ws") as websocket:
+        websocket.send_json({"event": "json", "data": {"value": 1}})
+        assert websocket.receive_json() == {
+            "event": "json",
+            "data": {"kind": "handler-json", "payload": {"value": 1}},
+        }
+        websocket.send_json({"event": "plain", "data": "ok"})
+        assert websocket.receive_json() == {"event": "plain", "data": "plain:ok"}
+        websocket.send_json({"event": "bytes", "data": None})
+        assert websocket.receive_json() == {"event": "bytes", "data": "binary-ok"}
+
+
 @WebSocketGateway("/decorated-socket")
 class DecoratedSocketGateway:
     @SubscribeMessage("rename")
-    async def rename(self, name: str = MessageBody("name"), websocket=ConnectedSocket()):
+    async def rename(self, name: str = cast(Any, MessageBody("name")), websocket=ConnectedSocket()):
         assert websocket is not None
         return {"name": name}
 
@@ -308,7 +412,7 @@ async def async_socket_dependency_factory():
 
 @WebSocketGateway("/async-factory-socket")
 class AsyncFactorySocketGateway:
-    def __init__(self, dependency: str = forward_ref(lambda: "SOCKET_DEPENDENCY")):
+    def __init__(self, dependency: str = cast(Any, forward_ref(lambda: "SOCKET_DEPENDENCY"))):
         self.dependency = dependency
 
     @SubscribeMessage("ping")
@@ -530,10 +634,99 @@ async def test_websocket_manager_prunes_failed_connections_during_broadcast():
     manager = WebSocketManager()
     healthy = RecordingSocket()
     broken = RecordingSocket(fail=True)
-    manager.connect(healthy)
-    manager.connect(broken)
+    manager.connect(cast(Any, healthy))
+    manager.connect(cast(Any, broken))
 
     await manager.broadcast_all("notice", {"ok": True})
 
     assert healthy.messages == [{"event": "notice", "data": {"ok": True}}]
     assert manager.connections() == [healthy]
+
+
+@pytest.mark.anyio
+async def test_websocket_adapter_send_failure_prunes_connection():
+    container = FaNestContainer()
+    adapter = FastApiAdapter(app=FastAPI(), container=container)
+    broken = RecordingSocket(fail=True)
+    manager = container.resolve(WebSocketManager)
+    manager.connect(cast(Any, broken))
+
+    assert await adapter._send_websocket_event(cast(Any, broken), "error", "closed") is False
+    assert manager.connections() == []
+
+
+@Catch(ValueError)
+class ConnectValueErrorFilter:
+    def catch(self, exc, context):
+        return JSONResponse({"phase": "connect", "message": str(exc)})
+
+
+@WebSocketGateway("/connect-filter")
+@UseFilters(ConnectValueErrorFilter)
+class ConnectCloseFilterGateway:
+    disconnected = 0
+
+    async def on_connect(self, websocket):
+        raise ValueError("connect failed")
+
+    async def on_disconnect(self, websocket):
+        type(self).disconnected += 1
+
+    @SubscribeMessage("echo")
+    async def echo(self, data):
+        return data
+
+
+@Module(gateways=[ConnectCloseFilterGateway])
+class ConnectFilterModule:
+    pass
+
+
+def test_websocket_on_connect_exception_uses_filters_and_closes_cleanly():
+    ConnectCloseFilterGateway.disconnected = 0
+    client = TestClient(FaNestFactory.create(ConnectFilterModule))
+
+    with client.websocket_connect("/connect-filter") as websocket:
+        assert websocket.receive_json() == {
+            "event": "error",
+            "data": {"phase": "connect", "message": "connect failed"},
+        }
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_json()
+
+    assert ConnectCloseFilterGateway.disconnected == 1
+
+
+class NonJsonPayload:
+    def __str__(self):
+        return "non-json-payload"
+
+
+@Catch(ValueError)
+class NonJsonWebSocketFilter:
+    def catch(self, exc, context):
+        return NonJsonPayload()
+
+
+@WebSocketGateway("/non-json-filter")
+@UseFilters(NonJsonWebSocketFilter)
+class NonJsonFilterGateway:
+    @SubscribeMessage("fail")
+    async def fail(self, data):
+        raise ValueError("not json")
+
+
+@Module(gateways=[NonJsonFilterGateway])
+class NonJsonFilterModule:
+    pass
+
+
+def test_websocket_filter_non_json_payload_falls_back_to_string():
+    client = TestClient(FaNestFactory.create(NonJsonFilterModule))
+
+    with client.websocket_connect("/non-json-filter") as websocket:
+        websocket.send_json({"event": "fail", "data": None})
+        assert websocket.receive_json() == {
+            "event": "error",
+            "data": "non-json-payload",
+        }

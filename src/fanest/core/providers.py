@@ -15,12 +15,33 @@ def token(name: str) -> InjectionToken:
     return InjectionToken(name)
 
 
-def Inject(token: Any, *, optional: bool = False, default: Any = None) -> Any:
-    return InjectMarker(token=token, optional=optional, default=default)
+def Inject(
+    token: Any,
+    *,
+    optional: bool = False,
+    default: Any = None,
+    self_only: bool = False,
+    skip_self: bool = False,
+) -> Any:
+    return InjectMarker(
+        token=token,
+        optional=optional,
+        default=default,
+        self_only=self_only,
+        skip_self=skip_self,
+    )
 
 
 def Optional(token: Any, default: Any = None) -> Any:
     return Inject(token, optional=True, default=default)
+
+
+def Self(token: Any, *, optional: bool = False, default: Any = None) -> Any:
+    return Inject(token, optional=optional, default=default, self_only=True)
+
+
+def SkipSelf(token: Any, *, optional: bool = False, default: Any = None) -> Any:
+    return Inject(token, optional=optional, default=default, skip_self=True)
 
 
 def forward_ref(factory: Any) -> ForwardRef:

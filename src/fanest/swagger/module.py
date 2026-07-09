@@ -77,6 +77,56 @@ class DocumentBuilder:
         self._config["security"].append({name: []})
         return self
 
+    def add_cookie_auth(
+        self,
+        cookie_name: str = "Authentication",
+        *,
+        name: str = "cookie",
+    ) -> "DocumentBuilder":
+        self._config["components"]["securitySchemes"][name] = {
+            "type": "apiKey",
+            "name": cookie_name,
+            "in": "cookie",
+        }
+        self._config["security"].append({name: []})
+        return self
+
+    def add_oauth2(
+        self,
+        *,
+        name: str = "oauth2",
+        flows: dict[str, Any] | None = None,
+        scopes: dict[str, str] | None = None,
+        authorization_url: str | None = None,
+        token_url: str | None = None,
+    ) -> "DocumentBuilder":
+        resolved_flows = flows
+        if resolved_flows is None:
+            resolved_flows = {
+                "authorizationCode": {
+                    "authorizationUrl": authorization_url or "",
+                    "tokenUrl": token_url or "",
+                    "scopes": scopes or {},
+                }
+            }
+        self._config["components"]["securitySchemes"][name] = {
+            "type": "oauth2",
+            "flows": resolved_flows,
+        }
+        self._config["security"].append({name: list(scopes or {})})
+        return self
+
+    def add_security(
+        self,
+        name: str,
+        scheme: dict[str, Any],
+        *,
+        requirements: list[str] | None = None,
+    ) -> "DocumentBuilder":
+        self._config["components"]["securitySchemes"][name] = scheme
+        self._config["security"].append({name: requirements or []})
+        return self
+
     def build(self) -> dict[str, Any]:
         return self._config
 
@@ -105,6 +155,7 @@ class SwaggerModule:
         if config.get("security"):
             schema["security"] = config["security"]
         SwaggerModule._add_extra_model_schemas(schema)
+        SwaggerModule._dedupe_operation_parameters(schema)
         return schema
 
     @staticmethod
@@ -175,7 +226,125 @@ class SwaggerModule:
         schemas = schema.setdefault("components", {}).setdefault("schemas", {})
         for model in _FANEST_EXTRA_MODELS:
             if hasattr(model, "model_json_schema"):
-                schemas[model.__name__] = model.model_json_schema()
+                schema_name = getattr(model, "__fanest_schema_name__", model.__name__)
+                try:
+                    model_schema = model.model_json_schema(
+                        ref_template="#/components/schemas/{model}"
+                    )
+                except Exception:
+                    model_schema = SwaggerModule._fallback_model_schema(model)
+                description = getattr(model, "__fanest_schema_description__", None)
+                if description is not None:
+                    model_schema["description"] = description
+                SwaggerModule._expand_fanest_schema_extensions(model_schema)
+                SwaggerModule._strip_hidden_properties(model_schema)
+                schemas[schema_name] = model_schema
+
+    @staticmethod
+    def _fallback_model_schema(model: type) -> dict[str, Any]:
+        schema: dict[str, Any] = {"title": getattr(model, "__name__", "Model"), "type": "object"}
+        fields = getattr(model, "model_fields", None) or getattr(model, "__fields__", {})
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        for name, field in fields.items():
+            annotation = getattr(field, "annotation", Any)
+            properties[name] = SwaggerModule._schema_for_annotation(annotation)
+            is_required = getattr(field, "is_required", None)
+            if callable(is_required) and is_required():
+                required.append(name)
+        if properties:
+            schema["properties"] = properties
+        if required:
+            schema["required"] = required
+        return schema
+
+    @staticmethod
+    def _schema_for_annotation(annotation: Any) -> dict[str, Any]:
+        if annotation is str:
+            return {"type": "string"}
+        if annotation is int:
+            return {"type": "integer"}
+        if annotation is float:
+            return {"type": "number"}
+        if annotation is bool:
+            return {"type": "boolean"}
+        origin = getattr(annotation, "__origin__", None)
+        args = getattr(annotation, "__args__", ())
+        if origin is list and args:
+            return {"type": "array", "items": SwaggerModule._schema_for_annotation(args[0])}
+        return {"type": "object"}
+
+    @staticmethod
+    def _strip_hidden_properties(schema: dict[str, Any]) -> None:
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return
+        hidden = [
+            name
+            for name, value in properties.items()
+            if isinstance(value, dict) and value.get("hidden") is True
+        ]
+        for name in hidden:
+            properties.pop(name, None)
+        required = schema.get("required")
+        if isinstance(required, list):
+            schema["required"] = [name for name in required if name not in hidden]
+
+    @staticmethod
+    def _expand_fanest_schema_extensions(value: Any) -> Any:
+        if isinstance(value, list):
+            for item in value:
+                SwaggerModule._expand_fanest_schema_extensions(item)
+            return value
+        if not isinstance(value, dict):
+            return value
+        for openapi_key, fanest_key in (
+            ("oneOf", "x-fanest-oneOf"),
+            ("anyOf", "x-fanest-anyOf"),
+            ("allOf", "x-fanest-allOf"),
+        ):
+            marker = value.pop(fanest_key, None)
+            if isinstance(marker, list):
+                value[openapi_key] = [
+                    SwaggerModule._expand_fanest_schema_ref(item) for item in marker
+                ]
+        for item in value.values():
+            SwaggerModule._expand_fanest_schema_extensions(item)
+        return value
+
+    @staticmethod
+    def _expand_fanest_schema_ref(value: Any) -> Any:
+        if isinstance(value, dict) and "x-fanest-ref" in value:
+            return {"$ref": f"#/components/schemas/{value['x-fanest-ref']}"}
+        SwaggerModule._expand_fanest_schema_extensions(value)
+        return value
+
+    @staticmethod
+    def _dedupe_operation_parameters(schema: dict[str, Any]) -> None:
+        for path_item in schema.get("paths", {}).values():
+            if not isinstance(path_item, dict):
+                continue
+            for operation in path_item.values():
+                if not isinstance(operation, dict):
+                    continue
+                parameters = operation.get("parameters")
+                if not isinstance(parameters, list):
+                    continue
+                operation["parameters"] = SwaggerModule._dedupe_parameters(parameters)
+
+    @staticmethod
+    def _dedupe_parameters(parameters: list[Any]) -> list[Any]:
+        selected: dict[tuple[str | None, str | None], Any] = {}
+        order: list[tuple[str | None, str | None]] = []
+        for parameter in parameters:
+            if not isinstance(parameter, dict):
+                key = (None, None)
+            else:
+                key = (parameter.get("in"), parameter.get("name"))
+            if key not in selected:
+                order.append(key)
+            selected[key] = parameter
+        return [selected[key] for key in order]
 
     @staticmethod
     def _remove_route(app: FastAPI, path: str) -> None:

@@ -9,10 +9,14 @@ from fanest.cqrs import (
     CommandHandler,
     CqrsHandlerNotFoundError,
     CqrsModule,
+    CqrsUnhandledException,
     EventBus,
+    EventPublisher,
     EventsHandler,
     QueryBus,
     QueryHandler,
+    Saga,
+    UnhandledExceptionBus,
 )
 
 
@@ -236,3 +240,115 @@ def test_cqrs_for_root_reuses_single_bus_across_multiple_feature_imports():
 
     assert first == second
     assert SharedBusStore.command_bus_ids == [first, second]
+
+
+@dataclass(frozen=True)
+class BaseAuditCommand:
+    name: str
+
+
+@dataclass(frozen=True)
+class SpecialAuditCommand(BaseAuditCommand):
+    pass
+
+
+@dataclass(frozen=True)
+class SendWelcomeCommand:
+    name: str
+
+
+class CqrsAdvancedStore:
+    audit: list[str] = []
+    welcome: list[str] = []
+    exceptions: list[CqrsUnhandledException] = []
+
+
+@CommandHandler(BaseAuditCommand)
+class AuditCommandHandler:
+    def execute(self, command: BaseAuditCommand):
+        CqrsAdvancedStore.audit.append(command.name)
+        return {"audited": command.name}
+
+
+@CommandHandler(SendWelcomeCommand)
+class SendWelcomeCommandHandler:
+    def execute(self, command: SendWelcomeCommand):
+        CqrsAdvancedStore.welcome.append(command.name)
+
+
+@EventsHandler(UserCreatedEvent)
+class BrokenUserCreatedHandler:
+    def handle(self, event: UserCreatedEvent):
+        raise RuntimeError(f"broken:{event.name}")
+
+
+@Injectable()
+class WelcomeSaga:
+    @Saga(UserCreatedEvent)
+    def user_created(self, event: UserCreatedEvent):
+        return SendWelcomeCommand(event.name)
+
+
+@Controller("advanced-cqrs")
+class AdvancedCqrsController:
+    def __init__(
+        self,
+        commands: CommandBus,
+        events: EventBus,
+        publisher: EventPublisher,
+        exceptions: UnhandledExceptionBus,
+    ):
+        self.commands = commands
+        self.events = events
+        self.publisher = publisher
+        self.exceptions = exceptions
+
+    @Post("/subclass")
+    async def subclass(self):
+        return await self.commands.execute(SpecialAuditCommand("Ada"))
+
+    @Post("/saga")
+    async def saga(self):
+        self.exceptions.subscribe(CqrsAdvancedStore.exceptions.append)
+        await self.events.publish(UserCreatedEvent("Grace"))
+        return {
+            "welcome": CqrsAdvancedStore.welcome,
+            "exceptions": [item.source for item in self.exceptions.events()],
+        }
+
+    @Post("/publisher")
+    async def publisher_route(self):
+        class Aggregate:
+            def __init__(self):
+                self.events = [UserCreatedEvent("Lin")]
+
+        aggregate = self.publisher.merge_context(Aggregate())
+        await aggregate.commit()
+        return {"welcome": CqrsAdvancedStore.welcome}
+
+
+@Module(
+    imports=[CqrsModule.for_root()],
+    controllers=[AdvancedCqrsController],
+    providers=[AuditCommandHandler, SendWelcomeCommandHandler, BrokenUserCreatedHandler, WelcomeSaga],
+)
+class AdvancedCqrsModule:
+    pass
+
+
+def test_cqrs_supports_subclass_matching_sagas_publisher_and_error_bus():
+    CqrsAdvancedStore.audit = []
+    CqrsAdvancedStore.welcome = []
+    CqrsAdvancedStore.exceptions = []
+    client = TestClient(FaNestFactory.create(AdvancedCqrsModule))
+
+    assert client.post("/advanced-cqrs/subclass").json() == {"audited": "Ada"}
+    assert CqrsAdvancedStore.audit == ["Ada"]
+
+    assert client.post("/advanced-cqrs/saga").json() == {
+        "welcome": ["Grace"],
+        "exceptions": ["event"],
+    }
+    assert len(CqrsAdvancedStore.exceptions) == 1
+
+    assert client.post("/advanced-cqrs/publisher").json() == {"welcome": ["Grace", "Lin"]}

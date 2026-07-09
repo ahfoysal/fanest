@@ -7,6 +7,8 @@ from fanest.core.module_ref import ModuleRef
 from fanest.core.providers import (
     Inject,
     Optional,
+    Self,
+    SkipSelf,
     forward_ref,
     token,
     use_class,
@@ -27,6 +29,8 @@ __all__ = [
     "Module",
     "ModuleRef",
     "Optional",
+    "Self",
+    "SkipSelf",
     "dynamic_module",
     "forward_ref",
     "token",

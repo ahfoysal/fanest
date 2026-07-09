@@ -135,11 +135,12 @@ class FaNestFactory:
         container.register(
             ValueProvider(
                 provide=DiscoveryService,
-                use_value=DiscoveryService(container, scanner.providers, scanner.controllers),
+                use_value=DiscoveryService(container, scanner.providers, scanner.controllers, scanner.records),
             )
         )
         for token, value in (overrides or {}).items():
             container.override(token, value)
+        FaNestFactory._register_cqrs_handler_providers(scanner.records, container)
         for component in [
             *(global_guards or []),
             *(global_pipes or []),
@@ -179,10 +180,21 @@ class FaNestFactory:
         app = FastAPI(**app_options)
         app.state.fanest_container = container
         app.state.fanest_root_module = root_module
+        app.state.fanest_microservices = []
+        FaNestFactory._attach_microservice_lifecycle(app, root_module)
         for static_asset in scanner.static_assets:
             from fanest.platform_fastapi.modules import serve_static
 
-            serve_static(app, static_asset["path"], static_asset["directory"], name=static_asset["name"])
+            serve_static(
+                app,
+                static_asset["path"],
+                static_asset["directory"],
+                name=static_asset["name"],
+                html=cast(bool, static_asset.get("html", False)),
+                check_dir=cast(bool, static_asset.get("check_dir", True)),
+                follow_symlink=cast(bool, static_asset.get("follow_symlink", False)),
+                packages=static_asset.get("packages"),
+            )
         for middleware in scanner.app_middlewares:
             app.add_middleware(middleware["class"], **middleware["options"])
         if cors:
@@ -217,13 +229,58 @@ class FaNestFactory:
         return app
 
     @staticmethod
+    def _attach_microservice_lifecycle(app: FastAPI, root_module: Any) -> None:
+        from fanest.microservices import MicroserviceServer, Transport
+
+        def connect_microservice(options: dict[str, Any] | None = None, **kwargs: Any) -> MicroserviceServer:
+            merged = {**(options or {}), **kwargs}
+            transport = merged.pop("transport", Transport.MEMORY)
+            module = merged.pop("module", root_module)
+            server = MicroserviceServer.create(module, transport=transport, **merged).compile()
+            app.state.fanest_microservices.append(server)
+            return server
+
+        async def start_all_microservices() -> list[MicroserviceServer]:
+            services = list(app.state.fanest_microservices)
+            for server in services:
+                await server.listen()
+            return services
+
+        async def close_all_microservices() -> None:
+            services = list(app.state.fanest_microservices)
+            for server in reversed(services):
+                await server.close()
+
+        setattr(app, "connect_microservice", connect_microservice)
+        setattr(app, "start_all_microservices", start_all_microservices)
+        setattr(app, "close_all_microservices", close_all_microservices)
+
+    @staticmethod
     def _cors_options(cors: bool | dict[str, object]) -> dict[str, object]:
         options: dict[str, object] = dict(cors) if isinstance(cors, dict) else {"allow_origins": []}
+        for key in ("allow_origins", "allow_methods", "allow_headers", "expose_headers"):
+            if key in options:
+                options[key] = FaNestFactory._cors_string_list(key, options[key])
         allow_origins = cast(list[str], options.get("allow_origins", []))
         allow_credentials = cast(bool, options.get("allow_credentials", False))
+        if not isinstance(allow_credentials, bool):
+            raise ValueError("CORS allow_credentials must be a boolean")
         if allow_credentials and "*" in allow_origins:
             raise ValueError("CORS allow_credentials=True cannot be used with wildcard allow_origins")
         return options
+
+    @staticmethod
+    def _cors_string_list(key: str, value: object) -> list[str]:
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, list | tuple | set):
+            values = list(value)
+        else:
+            raise ValueError(f"CORS {key} must be a string or a list of strings")
+        normalized = [str(item).strip() for item in values]
+        if any(not item for item in normalized):
+            raise ValueError(f"CORS {key} cannot contain empty values")
+        return normalized
 
     @staticmethod
     def _register_validation_exception_handler(app: FastAPI, adapter: FastApiAdapter) -> None:
@@ -261,7 +318,8 @@ class FaNestFactory:
             global_filters[:] = [*await container.resolve_all_async(APP_FILTER), *explicit_global_filters]
             instances = []
             seen_instance_ids: set[int] = set()
-            for module_key, record in records.items():
+            ordered_records = FaNestFactory._lifecycle_records(records)
+            for module_key, record in ordered_records:
                 for provider in [*record.metadata.providers, *record.metadata.gateways]:
                     if container.provider_token(provider) in APP_ENHANCER_TOKENS:
                         continue
@@ -333,6 +391,36 @@ class FaNestFactory:
             await result
 
     @staticmethod
+    def _lifecycle_records(records: dict[Any, Any]) -> list[tuple[Any, Any]]:
+        ordered: list[tuple[Any, Any]] = []
+        seen: set[Any] = set()
+
+        def visit(module_key: Any) -> None:
+            if module_key in seen:
+                return
+            seen.add(module_key)
+            record = records[module_key]
+            for imported_module in record.metadata.imports:
+                imported_key = FaNestFactory._record_import_key(records, imported_module)
+                if imported_key in records:
+                    visit(imported_key)
+            ordered.append((module_key, record))
+
+        for module_key in records:
+            visit(module_key)
+        return ordered
+
+    @staticmethod
+    def _record_import_key(records: dict[Any, Any], imported_module: Any) -> Any:
+        for module_key, record in records.items():
+            if record.module is imported_module:
+                return module_key
+        for module_key, record in records.items():
+            if record.module_type is imported_module:
+                return module_key
+        return imported_module
+
+    @staticmethod
     def _provider_type(provider: Any) -> type | None:
         if isinstance(provider, ForwardRef):
             return FaNestFactory._provider_type(provider.factory())
@@ -379,6 +467,8 @@ class FaNestFactory:
                         handler.__name__,
                         module_key,
                     ),
+                    prepend=getattr(handler, "__fanest_event_prepend__", False),
+                    priority=getattr(handler, "__fanest_event_priority__", 0),
                 )
 
     @staticmethod
@@ -434,7 +524,8 @@ class FaNestFactory:
             getattr(handler, "__fanest_graphql__", None) is not None
             for _, handler in inspect.getmembers(provider, predicate=inspect.isfunction)
         )
-        if not has_graphql_handlers:
+        has_graphql_type_metadata = getattr(provider, "__fanest_graphql_type__", None) is not None
+        if not has_graphql_handlers and not has_graphql_type_metadata:
             return
         try:
             schema = container.resolve(GraphQLSchema, module_key=module_key)
@@ -447,6 +538,19 @@ class FaNestFactory:
     @staticmethod
     def _register_cqrs_handlers(container: FaNestContainer, instance: object, *, module_key: Any | None = None) -> None:
         FaNestFactory._register_cqrs_handler_provider(container, instance.__class__, module_key=module_key)
+
+    @staticmethod
+    def _register_cqrs_handler_providers(records: dict[Any, Any], container: FaNestContainer) -> None:
+        for module_key, record in records.items():
+            for provider in [*record.metadata.providers, *record.metadata.gateways]:
+                provider_type = FaNestFactory._provider_type(provider)
+                if provider_type is None:
+                    continue
+                FaNestFactory._register_cqrs_handler_provider(
+                    container,
+                    provider_type,
+                    module_key=module_key,
+                )
 
     @staticmethod
     def _register_cqrs_handler_provider(
@@ -480,6 +584,17 @@ class FaNestFactory:
                 container.resolve(EventBus, module_key=module_key).register(
                     event,
                     FaNestFactory._lazy_cqrs_handler(container, provider, module_key),
+                )
+            except Exception:
+                pass
+        for method_name, method in inspect.getmembers(provider, predicate=inspect.isfunction):
+            event = getattr(method, "__fanest_cqrs_saga__", None)
+            if event is None:
+                continue
+            try:
+                container.resolve(EventBus, module_key=module_key).register_saga(
+                    event,
+                    FaNestFactory._lazy_cqrs_saga(container, provider, method_name, module_key),
                 )
             except Exception:
                 pass
@@ -550,23 +665,51 @@ class FaNestFactory:
         return handler
 
     @staticmethod
+    def _lazy_cqrs_saga(
+        container: FaNestContainer,
+        provider: type,
+        method_name: str,
+        module_key: Any | None,
+    ):
+        async def saga(event: Any) -> Any:
+            return await FaNestFactory._call_lazy_provider_method(
+                container,
+                provider,
+                method_name,
+                module_key,
+                event,
+            )
+
+        setattr(saga, "__fanest_registration_key__", (module_key, provider, method_name, "cqrs_saga"))
+        return saga
+
+    @staticmethod
     def _lazy_graphql_resolver(container: FaNestContainer, provider: type, module_key: Any | None):
         class LazyGraphQLResolver:
             pass
 
         resolver = LazyGraphQLResolver()
+        type_metadata = getattr(provider, "__fanest_graphql_type__", None)
+        if type_metadata is not None:
+            setattr(resolver.__class__, "__fanest_graphql_type__", type_metadata)
         for _, method in inspect.getmembers(provider, predicate=inspect.isfunction):
             metadata = getattr(method, "__fanest_graphql__", None)
-            if metadata is None:
+            field_metadata = getattr(method, "__fanest_graphql_field__", None)
+            is_reference_resolver = (
+                method.__name__ in {"resolve_reference", "__resolve_reference__"}
+                or getattr(method, "__fanest_graphql_resolve_reference__", False)
+            )
+            if metadata is None and field_metadata is None and not is_reference_resolver:
                 continue
 
             def make_handler(method_name: str):
-                async def handler(**kwargs: Any) -> Any:
+                async def handler(*args: Any, **kwargs: Any) -> Any:
                     return await FaNestFactory._call_lazy_provider_method(
                         container,
                         provider,
                         method_name,
                         module_key,
+                        *args,
                         **kwargs,
                     )
 
@@ -578,7 +721,17 @@ class FaNestFactory:
                 "__fanest_registration_key__",
                 (module_key, provider, method.__name__, "graphql"),
             )
-            setattr(handler, "__fanest_graphql__", metadata)
+            if metadata is not None:
+                setattr(handler, "__fanest_graphql__", metadata)
+            if field_metadata is not None:
+                setattr(handler, "__fanest_graphql_field__", field_metadata)
+            if is_reference_resolver:
+                setattr(handler, "__fanest_graphql_resolve_reference__", True)
+            for key in ("__fanest_guards__", "__fanest_pipes__", "__fanest_interceptors__"):
+                values = getattr(method, key, None)
+                if values is not None:
+                    setattr(handler, key, list(values))
+            setattr(handler, "__fanest_target_signature__", inspect.signature(method))
             setattr(resolver, method.__name__, handler)
         return resolver
 

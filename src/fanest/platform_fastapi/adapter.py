@@ -1,13 +1,14 @@
 import inspect
 import json
 import re
+from copy import deepcopy
 from collections.abc import Callable
 from pathlib import Path as FilePath
 from typing import Any
 
 from fastapi import Body as FastBody
 from fastapi import BackgroundTasks as FastBackgroundTasks
-from fastapi import Cookie, FastAPI, File, Form as FastForm, Header, HTTPException, Path, Query, Request, Response, WebSocket
+from fastapi import Cookie, FastAPI, File, Form as FastForm, Header, HTTPException, Path, Query, Request, Response, UploadFile, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTasks as StarletteBackgroundTasks
@@ -67,6 +68,8 @@ class FastApiAdapter:
         )
         if controller_metadata is None:
             raise TypeError(f"{controller.__name__} is not a FaNest controller.")
+        if getattr(controller, "__fanest_swagger_exclude_controller__", False):
+            return
 
         routes: list[tuple[str, Callable[..., Any], RouteMetadata]] = []
         for _, handler in inspect.getmembers(controller, predicate=inspect.isfunction):
@@ -95,15 +98,29 @@ class FastApiAdapter:
             tags = getattr(controller, "__fanest_swagger_tags__", None)
             if tags and "tags" not in route_options:
                 route_options["tags"] = tags
+            controller_responses = getattr(controller, "__fanest_pending_responses__", None)
+            if controller_responses:
+                route_options["responses"] = {
+                    **controller_responses,
+                    **dict(route_options.get("responses", {})),
+                }
             pending_responses = getattr(handler, "__fanest_pending_responses__", None)
             if pending_responses:
-                route_options["responses"] = pending_responses
+                route_options["responses"] = {
+                    **dict(route_options.get("responses", {})),
+                    **pending_responses,
+                }
             pending_route_options = getattr(handler, "__fanest_pending_route_options__", None)
             if pending_route_options:
                 route_options.update(pending_route_options)
             pending_openapi_extra = getattr(handler, "__fanest_pending_openapi_extra__", None)
-            if pending_openapi_extra:
-                route_options["openapi_extra"] = pending_openapi_extra
+            controller_openapi_extra = getattr(controller, "__fanest_pending_openapi_extra__", None)
+            if controller_openapi_extra or pending_openapi_extra:
+                route_options["openapi_extra"] = self._merge_openapi_extras(
+                    deepcopy(controller_openapi_extra or {}),
+                    deepcopy(route_options.get("openapi_extra", {})),
+                    deepcopy(pending_openapi_extra or {}),
+                )
             if self._metadata(handler, "__fanest_bearer_auth__") or getattr(
                 controller, "__fanest_bearer_auth__", False
             ):
@@ -171,29 +188,58 @@ class FastApiAdapter:
                         await result
                 except WebSocketDisconnect:
                     self.container.resolve(WebSocketManager).disconnect(websocket)
+                    await self._run_websocket_disconnect_hook(instance, websocket)
                     return
-                except Exception:
-                    await self._close_websocket_safely(websocket, code=1011)
+                except Exception as exc:
+                    handled = await self._run_filters_safe(
+                        instance,
+                        connect_hook,
+                        connection_context,
+                        exc,
+                    )
+                    await self._send_websocket_event(
+                        websocket,
+                        "error",
+                        handled if handled is not None else str(exc),
+                    )
                     self.container.resolve(WebSocketManager).disconnect(websocket)
+                    await self._run_websocket_disconnect_hook(instance, websocket)
+                    await self._close_websocket_safely(websocket, code=1011)
                     return
             try:
                 while True:
                     try:
                         payload = await websocket.receive_json()
                     except ValueError as exc:
-                        await websocket.send_json({"event": "error", "data": f"Invalid JSON payload: {exc}"})
+                        if not await self._send_websocket_event(
+                            websocket,
+                            "error",
+                            f"Invalid JSON payload: {exc}",
+                        ):
+                            break
                         continue
                     if not isinstance(payload, dict):
-                        await websocket.send_json({"event": "error", "data": "Payload must be an object"})
+                        if not await self._send_websocket_event(
+                            websocket,
+                            "error",
+                            "Payload must be an object",
+                        ):
+                            break
                         continue
                     event = payload.get("event")
                     data = payload.get("data")
                     if not isinstance(event, str):
-                        await websocket.send_json({"event": "error", "data": "Event must be a string"})
+                        if not await self._send_websocket_event(
+                            websocket,
+                            "error",
+                            "Event must be a string",
+                        ):
+                            break
                         continue
                     handler = handlers.get(event)
                     if handler is None:
-                        await websocket.send_json({"event": "error", "data": "Unknown event"})
+                        if not await self._send_websocket_event(websocket, "error", "Unknown event"):
+                            break
                         continue
                     context = ExecutionContext(
                         handler=handler,
@@ -210,9 +256,12 @@ class FastApiAdapter:
                         )
                     except Exception as exc:
                         handled = await self._run_filters_safe(instance, handler, context, exc)
-                        await websocket.send_json(
-                            {"event": "error", "data": handled if handled is not None else str(exc)}
-                        )
+                        if not await self._send_websocket_event(
+                            websocket,
+                            "error",
+                            handled if handled is not None else str(exc),
+                        ):
+                            break
                         continue
                     try:
                         result = handler(**context.kwargs)
@@ -220,15 +269,24 @@ class FastApiAdapter:
                             result = await result
                     except Exception as exc:
                         handled = await self._run_filters_safe(instance, handler, context, exc)
-                        await websocket.send_json(
-                            {"event": "error", "data": handled if handled is not None else str(exc)}
-                        )
+                        if not await self._send_websocket_event(
+                            websocket,
+                            "error",
+                            handled if handled is not None else str(exc),
+                        ):
+                            break
                         continue
                     if result is not None:
                         if isinstance(result, dict) and set(result) >= {"event", "data"}:
-                            await websocket.send_json({"event": result["event"], "data": result["data"]})
+                            if not await self._send_websocket_event(
+                                websocket,
+                                result["event"],
+                                result["data"],
+                            ):
+                                break
                             continue
-                        await websocket.send_json({"event": event, "data": result})
+                        if not await self._send_websocket_event(websocket, event, result):
+                            break
             except WebSocketDisconnect:
                 pass
             finally:
@@ -400,6 +458,7 @@ class FastApiAdapter:
                 }:
                     continue
                 default = self._fastapi_default(source, name)
+                annotation = self._file_annotation(source, annotation)
             else:
                 default = parameter.default
             parameter_name = name
@@ -412,6 +471,15 @@ class FastApiAdapter:
                 )
             )
         return inspect.Signature(parameters=parameters, return_annotation=original.return_annotation)
+
+    def _file_annotation(self, source: ParameterSource, annotation: Any) -> Any:
+        if annotation is not inspect.Parameter.empty:
+            return annotation
+        if source.source == "file":
+            return UploadFile
+        if source.source == "files":
+            return list[UploadFile]
+        return annotation
 
     def _signature_parameter_name(self, name: str, parameter: inspect.Parameter) -> str:
         if name in {"request", "response", "background_tasks"} and not self._is_native_framework_parameter(name, parameter):
@@ -603,7 +671,10 @@ class FastApiAdapter:
 
             try:
                 registry = self.container.resolve(MetricsRegistry)
-                registry.inc(metric_counter)
+                registry.inc(
+                    metric_counter,
+                    labels=self._metadata(handler, "__fanest_metric_counter_labels__", {}),
+                )
             except Exception:
                 pass
 
@@ -872,7 +943,14 @@ class FastApiAdapter:
             return str(filter_exc)
 
     def _websocket_filter_payload(self, handled: Any) -> Any:
+        return self._websocket_payload(handled)
+
+    def _websocket_payload(self, handled: Any) -> Any:
         if not isinstance(handled, StarletteResponse):
+            if isinstance(handled, memoryview):
+                handled = handled.tobytes()
+            if isinstance(handled, bytes):
+                return handled.decode("utf-8")
             return handled
         body = getattr(handled, "body", b"")
         if isinstance(body, memoryview):
@@ -888,6 +966,21 @@ class FastApiAdapter:
             except json.JSONDecodeError:
                 return text
         return text
+
+    async def _send_websocket_event(self, websocket: WebSocket, event: str, data: Any) -> bool:
+        try:
+            await websocket.send_json({"event": event, "data": self._websocket_payload(data)})
+            return True
+        except TypeError:
+            try:
+                await websocket.send_json({"event": event, "data": str(data)})
+                return True
+            except (RuntimeError, TypeError, WebSocketDisconnect):
+                self.container.resolve(WebSocketManager).disconnect(websocket)
+                return False
+        except (RuntimeError, WebSocketDisconnect):
+            self.container.resolve(WebSocketManager).disconnect(websocket)
+            return False
 
     async def _close_websocket_safely(self, websocket: WebSocket, *, code: int) -> None:
         try:
@@ -924,6 +1017,25 @@ class FastApiAdapter:
         if key == "__fanest_filters__":
             return [*handler_values, *controller_values, *global_values]
         return [*global_values, *controller_values, *handler_values]
+
+    def _merge_openapi_extras(self, *extras: dict[str, Any]) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        for extra in extras:
+            self._deep_merge_openapi_extra(merged, extra)
+        return merged
+
+    def _deep_merge_openapi_extra(self, target: dict[str, Any], source: dict[str, Any]) -> None:
+        for key, value in source.items():
+            if key == "schema":
+                target[key] = value
+                continue
+            if key == "parameters":
+                target[key] = [*target.get(key, []), *value]
+                continue
+            if isinstance(value, dict) and isinstance(target.get(key), dict):
+                self._deep_merge_openapi_extra(target[key], value)
+                continue
+            target[key] = value
 
     def _response_headers(self, controller: Any, handler: Callable[..., Any]) -> list[tuple[str, str]]:
         controller_values = getattr(controller.__class__, "__fanest_response_headers__", [])

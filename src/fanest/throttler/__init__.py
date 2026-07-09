@@ -1,6 +1,7 @@
 from fanest.throttler.module import (
     MemoryThrottlerStore,
     RedisThrottlerStore,
+    SkipThrottle,
     Throttle,
     ThrottlerGuard,
     ThrottlerModule,
@@ -10,6 +11,7 @@ from fanest.throttler.module import (
 __all__ = [
     "MemoryThrottlerStore",
     "RedisThrottlerStore",
+    "SkipThrottle",
     "Throttle",
     "ThrottlerGuard",
     "ThrottlerModule",

@@ -9,7 +9,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 try:
-    import tomllib
+    import tomllib  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
     import tomli as tomllib
 
@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main() -> None:
     version = _project_version()
+    _assert_project_metadata(version)
     tag = os.environ.get("GITHUB_REF_NAME")
     if tag and tag.startswith("v") and tag[1:] != version:
         raise SystemExit(f"Release tag {tag!r} does not match pyproject version {version!r}.")
@@ -41,6 +42,41 @@ def main() -> None:
 def _project_version() -> str:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     return pyproject["project"]["version"]
+
+
+def _project_metadata() -> dict:
+    return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+
+
+def _source_version() -> str:
+    init_file = ROOT / "src" / "fanest" / "__init__.py"
+    for line in init_file.read_text(encoding="utf-8").splitlines():
+        if line.startswith("__version__"):
+            return line.split("=", 1)[1].strip().strip('"')
+    raise SystemExit("src/fanest/__init__.py is missing __version__.")
+
+
+def _assert_project_metadata(version: str | None = None) -> None:
+    project = _project_metadata()
+    expected_version = version or project["version"]
+    source_version = _source_version()
+    if source_version != expected_version:
+        raise SystemExit(
+            f"Package version mismatch: pyproject has {expected_version!r}, "
+            f"fanest.__version__ has {source_version!r}."
+        )
+    scripts = project.get("scripts", {})
+    if scripts.get("fanest") != "fanest.cli.main:app":
+        raise SystemExit("pyproject.toml must expose the fanest CLI script.")
+    dependencies = set(project.get("dependencies", []))
+    for dependency in {"fastapi>=0.115.0", "typer>=0.12.0", "uvicorn>=0.30.0"}:
+        if dependency not in dependencies:
+            raise SystemExit(f"Missing required runtime dependency: {dependency}")
+    optional = project.get("optional-dependencies", {})
+    if "uvicorn[standard]>=0.30.0" not in optional.get("standard", []):
+        raise SystemExit("The standard extra must install uvicorn[standard].")
+    if not (ROOT / "src" / "fanest" / "py.typed").exists():
+        raise SystemExit("src/fanest/py.typed is missing.")
 
 
 def _assert_distributions(dist_dir: Path, distributions: list[Path], version: str) -> None:

@@ -11,6 +11,10 @@ class ScheduledJob:
     kind: str
     task: asyncio.Task[Any]
     metadata: dict[str, Any]
+    run_count: int = 0
+    error_count: int = 0
+    last_run_at: float | None = None
+    last_error: str | None = None
 
     @property
     def done(self) -> bool:
@@ -22,6 +26,16 @@ class ScheduledJob:
 
     def cancel(self) -> None:
         self.task.cancel()
+
+    def record_success(self, *, at: float) -> None:
+        object.__setattr__(self, "run_count", self.run_count + 1)
+        object.__setattr__(self, "last_run_at", at)
+
+    def record_error(self, error: BaseException, *, at: float) -> None:
+        object.__setattr__(self, "run_count", self.run_count + 1)
+        object.__setattr__(self, "error_count", self.error_count + 1)
+        object.__setattr__(self, "last_run_at", at)
+        object.__setattr__(self, "last_error", str(error))
 
 
 class SchedulerRegistry:
@@ -47,6 +61,12 @@ class SchedulerRegistry:
             return self._jobs[name]
         except KeyError as exc:
             raise KeyError(f"No scheduled job registered for {name!r}.") from exc
+
+    def has(self, name: str) -> bool:
+        return name in self._jobs
+
+    def names(self, kind: str | None = None) -> list[str]:
+        return [job.name for job in self.list(kind)]
 
     def get_cron_job(self, name: str) -> ScheduledJob:
         return self._get_kind(name, "cron")
@@ -77,6 +97,9 @@ class SchedulerRegistry:
         if cancel:
             job.cancel()
         del self._jobs[name]
+
+    def cancel(self, name: str) -> None:
+        self.get(name).cancel()
 
     def delete_cron_job(self, name: str) -> None:
         self.delete(name)

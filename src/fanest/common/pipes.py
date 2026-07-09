@@ -1,28 +1,100 @@
 from enum import Enum
 import math
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
-
 from fanest.common.exceptions import BadRequestException
+from fanest.common.pydantic_compat import (
+    BaseModel,
+    ValidationError,
+    pydantic_model_fields,
+    pydantic_validate_model,
+    pydantic_validate_type,
+)
 
 
 class ValidationPipe:
+    def __init__(
+        self,
+        *,
+        transform: bool = True,
+        whitelist: bool = False,
+        forbid_non_whitelisted: bool = False,
+        exception_factory: Callable[[list[dict[str, Any]]], Exception] | None = None,
+    ) -> None:
+        self.transform_enabled = transform
+        self.whitelist = whitelist
+        self.forbid_non_whitelisted = forbid_non_whitelisted
+        self.exception_factory = exception_factory
+
     def transform(self, value: Any, metadata: dict[str, Any]) -> Any:
         annotation = metadata.get("annotation")
         if annotation is None or annotation is Any:
             return value
         try:
             if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                self._check_forbidden_extra_fields(annotation, value)
                 if isinstance(value, annotation):
                     return value
-                return annotation.model_validate(value)
-            return TypeAdapter(annotation).validate_python(value)
+                validated = pydantic_validate_model(annotation, value)
+                return validated if self.transform_enabled else self._strip_extra_fields(annotation, value)
+            validated = pydantic_validate_type(annotation, value)
+            return validated if self.transform_enabled else value
         except ValidationError as exc:
-            raise BadRequestException(exc.errors()) from exc
+            errors = _json_safe_errors(exc.errors())
+            if self.exception_factory is not None:
+                raise self.exception_factory(errors) from exc
+            raise BadRequestException(errors) from exc
+
+    def _check_forbidden_extra_fields(self, annotation: type[BaseModel], value: Any) -> None:
+        if not self.forbid_non_whitelisted or not isinstance(value, dict):
+            return
+        extra_fields = sorted(set(value) - set(pydantic_model_fields(annotation)))
+        if extra_fields:
+            errors = [
+                {
+                    "type": "extra_forbidden",
+                    "loc": (field,),
+                    "msg": "Extra inputs are not permitted",
+                    "input": value[field],
+                }
+                for field in extra_fields
+            ]
+            if self.exception_factory is not None:
+                raise self.exception_factory(errors)
+            raise BadRequestException(errors)
+
+    def _strip_extra_fields(self, annotation: type[BaseModel], value: Any) -> Any:
+        if not self.whitelist or not isinstance(value, dict):
+            return value
+        return {key: value[key] for key in pydantic_model_fields(annotation) if key in value}
+
+
+def _json_safe_errors(errors: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    safe_errors: list[dict[str, Any]] = []
+    for error in errors:
+        safe_error = dict(error)
+        if "ctx" in safe_error and isinstance(safe_error["ctx"], dict):
+            safe_error["ctx"] = {
+                str(key): _json_safe_error_value(value)
+                for key, value in safe_error["ctx"].items()
+            }
+        safe_errors.append(safe_error)
+    return safe_errors
+
+
+def _json_safe_error_value(value: Any) -> Any:
+    if isinstance(value, str | int | float | bool) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_json_safe_error_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_json_safe_error_value(item) for item in value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe_error_value(item) for key, item in value.items()}
+    return str(value)
 
 
 class ParseIntPipe:
@@ -115,6 +187,16 @@ class MaxFileSizeValidator(FileValidator):
 
     def is_valid(self, file: Any) -> bool:
         size = getattr(file, "size", None)
+        if size is None:
+            raw_file = getattr(file, "file", None)
+            if raw_file is not None:
+                try:
+                    position = raw_file.tell()
+                    raw_file.seek(0, 2)
+                    size = raw_file.tell()
+                    raw_file.seek(position)
+                except (AttributeError, OSError, TypeError, ValueError):
+                    size = None
         return size is None or int(size) <= self.max_size
 
     def build_error_message(self, file: Any) -> str:
@@ -160,3 +242,29 @@ class ParseFilePipe:
                 if not validator.is_valid(file):
                     raise BadRequestException(validator.build_error_message(file))
         return value
+
+
+class ParseFilePipeBuilder:
+    def __init__(self) -> None:
+        self.validators: list[FileValidator] = []
+
+    def add_max_size_validator(self, max_size: int | dict[str, int]) -> "ParseFilePipeBuilder":
+        if isinstance(max_size, dict):
+            max_size = max_size["max_size"] if "max_size" in max_size else max_size["maxSize"]
+        self.validators.append(MaxFileSizeValidator(max_size))
+        return self
+
+    def add_file_type_validator(
+        self,
+        file_type: str | re.Pattern[str] | Callable[[Any], bool] | dict[str, Any],
+    ) -> "ParseFilePipeBuilder":
+        resolved: str | re.Pattern[str] | Callable[[Any], bool]
+        if isinstance(file_type, dict):
+            resolved = file_type["file_type"] if "file_type" in file_type else file_type["fileType"]
+        else:
+            resolved = file_type
+        self.validators.append(FileTypeValidator(resolved))
+        return self
+
+    def build(self, *, file_is_required: bool = True) -> ParseFilePipe:
+        return ParseFilePipe(self.validators, file_is_required=file_is_required)

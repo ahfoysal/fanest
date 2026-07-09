@@ -1,3 +1,17 @@
-from fanest.mailer.module import MailMessage, MailerModule, MailerService
+from fanest.mailer.module import (
+    MailAttachment,
+    MailMessage,
+    MailerModule,
+    MailerService,
+    MailerTransport,
+    SmtpMailerTransport,
+)
 
-__all__ = ["MailMessage", "MailerModule", "MailerService"]
+__all__ = [
+    "MailAttachment",
+    "MailMessage",
+    "MailerModule",
+    "MailerService",
+    "MailerTransport",
+    "SmtpMailerTransport",
+]

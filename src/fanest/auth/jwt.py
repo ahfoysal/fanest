@@ -2,7 +2,7 @@ import inspect
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, cast
 
-import jwt
+import jwt as _pyjwt
 
 from fanest import ForbiddenException, Inject, Injectable, Module, UnauthorizedException, use_class, use_value
 from fanest.core.enhancers import APP_GUARD
@@ -12,16 +12,57 @@ from fanest.core.providers import use_factory as provider_factory
 
 JWT_OPTIONS = token("JWT_OPTIONS")
 UNSAFE_JWT_ALGORITHMS = {"none"}
+jwt: Any = _pyjwt
 
 
 def _validate_jwt_options(options: dict[str, Any]) -> dict[str, Any]:
     secret = options.get("secret")
     algorithm = str(options.get("algorithm", "HS256"))
+    required_claims = options.get("required_claims", [])
+    expires_in_seconds = options.get("expires_in_seconds", 3600)
+    leeway = options.get("leeway", 0)
+    issuer = options.get("issuer")
+    audience = options.get("audience")
     if not isinstance(secret, str) or not secret.strip():
         raise ValueError("AuthModule requires a non-empty JWT secret")
     if algorithm.lower() in UNSAFE_JWT_ALGORITHMS:
         raise ValueError("AuthModule does not allow unsigned JWT algorithms")
+    if expires_in_seconds is not None and expires_in_seconds < 0:
+        raise ValueError("AuthModule expires_in_seconds cannot be negative")
+    if leeway < 0:
+        raise ValueError("AuthModule leeway cannot be negative")
+    if issuer is not None and not str(issuer).strip():
+        raise ValueError("AuthModule issuer cannot be empty")
+    if isinstance(audience, str) and not audience.strip():
+        raise ValueError("AuthModule audience cannot be empty")
+    if isinstance(audience, list) and any(not str(item).strip() for item in audience):
+        raise ValueError("AuthModule audience entries cannot be empty")
+    if not isinstance(required_claims, list | tuple | set):
+        raise ValueError("AuthModule required_claims must be a list, tuple, or set")
+    normalized_claims = [str(claim).strip() for claim in required_claims]
+    if any(not claim for claim in normalized_claims):
+        raise ValueError("AuthModule required_claims cannot contain empty names")
+    options["required_claims"] = normalized_claims
     return options
+
+
+def _ensure_safe_algorithm(algorithm: str) -> str:
+    normalized = str(algorithm).strip()
+    if not normalized:
+        raise ValueError("JWT algorithm cannot be empty")
+    if normalized.lower() in UNSAFE_JWT_ALGORITHMS:
+        raise ValueError("JWT unsigned algorithms are not allowed")
+    return normalized
+
+
+def _ensure_safe_algorithms(algorithms: Any) -> list[str]:
+    if isinstance(algorithms, str):
+        candidates = [algorithms]
+    else:
+        candidates = list(algorithms)
+    if not candidates:
+        raise ValueError("JWT algorithms cannot be empty")
+    return [_ensure_safe_algorithm(algorithm) for algorithm in candidates]
 
 
 @Injectable()
@@ -30,6 +71,10 @@ class JwtService:
         self.secret = options["secret"]
         self.algorithm = options.get("algorithm", "HS256")
         self.expires_in_seconds = options.get("expires_in_seconds", 3600)
+        self.issuer = options.get("issuer")
+        self.audience = options.get("audience")
+        self.leeway = options.get("leeway", 0)
+        self.required_claims = list(options.get("required_claims", []))
 
     def sign(self, payload: dict[str, Any], **options: Any) -> str:
         token_payload = dict(payload)
@@ -44,13 +89,41 @@ class JwtService:
             token_payload["exp"] = datetime.now(timezone.utc) + timedelta(
                 seconds=expires_in_seconds
             )
+        not_before_seconds = options.pop("not_before_seconds", None)
+        if not_before_seconds is not None:
+            token_payload["nbf"] = datetime.now(timezone.utc) + timedelta(
+                seconds=not_before_seconds
+            )
+        issuer = options.pop("issuer", self.issuer)
+        if issuer is not None and "iss" not in token_payload:
+            token_payload["iss"] = issuer
+        audience = options.pop("audience", self.audience)
+        if audience is not None and "aud" not in token_payload:
+            token_payload["aud"] = audience
         secret = options.pop("secret", self.secret)
-        algorithm = options.pop("algorithm", self.algorithm)
+        algorithm = _ensure_safe_algorithm(options.pop("algorithm", self.algorithm))
         return jwt.encode(token_payload, secret, algorithm=algorithm, **options)
 
     def verify(self, token: str, **options: Any) -> dict[str, Any]:
         secret = options.pop("secret", self.secret)
-        algorithms = options.pop("algorithms", [options.pop("algorithm", self.algorithm)])
+        algorithms = _ensure_safe_algorithms(
+            options.pop("algorithms", [options.pop("algorithm", self.algorithm)])
+        )
+        issuer = options.pop("issuer", self.issuer)
+        audience = options.pop("audience", self.audience)
+        leeway = options.pop("leeway", self.leeway)
+        required_claims = options.pop("required_claims", self.required_claims)
+        verify_options = dict(options.pop("options", {}) or {})
+        if required_claims:
+            verify_options["require"] = list(required_claims)
+        if issuer is not None:
+            options["issuer"] = issuer
+        if audience is not None:
+            options["audience"] = audience
+        if leeway:
+            options["leeway"] = leeway
+        if verify_options:
+            options["options"] = verify_options
         return jwt.decode(token, secret, algorithms=algorithms, **options)
 
     def decode(self, token: str, **options: Any) -> dict[str, Any]:
@@ -154,7 +227,7 @@ def _metadata_value(target: Any, attr: str, key: str, default: Any) -> Any:
     return default
 
 
-def CurrentUser(default: Any = None) -> ParameterSource:
+def CurrentUser(default: Any = None) -> Any:
     return ParameterSource(source="state", name="user", default=default)
 
 
@@ -165,6 +238,10 @@ class AuthModule:
         secret: str,
         algorithm: str = "HS256",
         expires_in_seconds: int | None = 3600,
+        issuer: str | None = None,
+        audience: str | list[str] | None = None,
+        leeway: int | float = 0,
+        required_claims: list[str] | None = None,
         is_global: bool = False,
         global_guard: bool = False,
     ) -> type:
@@ -172,6 +249,10 @@ class AuthModule:
             "secret": secret,
             "algorithm": algorithm,
             "expires_in_seconds": expires_in_seconds,
+            "issuer": issuer,
+            "audience": audience,
+            "leeway": leeway,
+            "required_claims": required_claims or [],
         })
 
         providers = [use_value(JWT_OPTIONS, options), JwtService]

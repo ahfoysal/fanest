@@ -92,3 +92,49 @@ async def test_schedule_runner_stop_cancels_running_jobs_for_graceful_shutdown()
 
     assert LongRunningIntervalService.started > 0
     assert runner.running_jobs == set()
+
+
+class NonOverlappingIntervalService:
+    starts: list[float] = []
+
+    @Interval(0.02, name="non-overlap", wait_for_completion=True)
+    async def interval(self):
+        type(self).starts.append(time.monotonic())
+        await asyncio.sleep(0.06)
+
+
+@pytest.mark.anyio
+async def test_interval_wait_for_completion_skips_overlapping_ticks():
+    NonOverlappingIntervalService.starts = []
+    runner = ScheduleRunner([NonOverlappingIntervalService()])
+    runner.start()
+
+    await asyncio.sleep(0.075)
+    await runner.stop()
+
+    assert len(NonOverlappingIntervalService.starts) == 1
+
+
+class ObservableScheduleService:
+    runs = 0
+
+    @Interval(0.01, name="observable")
+    async def interval(self):
+        type(self).runs += 1
+        if type(self).runs == 1:
+            raise RuntimeError("first tick failed")
+
+
+@pytest.mark.anyio
+async def test_scheduler_registry_records_run_and_error_counts():
+    ObservableScheduleService.runs = 0
+    runner = ScheduleRunner([ObservableScheduleService()])
+    runner.start()
+
+    await asyncio.sleep(0.035)
+    job = runner.registry.get_interval("observable")
+    await runner.stop()
+
+    assert job.run_count >= 2
+    assert job.error_count == 1
+    assert job.last_error == "first tick failed"

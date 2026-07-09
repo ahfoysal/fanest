@@ -62,6 +62,11 @@ class ComposedService:
         self.request = request
 
 
+class ContextCreatedService:
+    def __init__(self, dependency: "PrivateModuleRefDependency"):
+        self.dependency = dependency
+
+
 async def async_value_factory(value: ValueService):
     return {"value": value.value}
 
@@ -142,6 +147,37 @@ def test_module_ref_keeps_injected_module_context_for_private_providers():
     service = app.state.fanest_container.resolve(UsesContextualModuleRef)
 
     assert service.read_private() == "private"
+    assert service.module_ref.has(PrivateModuleRefDependency) is True
+    assert service.module_ref.has(PrivateModuleRefDependency, strict=True) is True
+    assert PrivateModuleRefDependency in service.module_ref.provider_tokens(strict=True)
+    assert service.module_ref.introspect(PrivateModuleRefDependency)["token"] is PrivateModuleRefDependency
+
+
+def test_module_ref_create_uses_injected_module_context():
+    app = FaNestFactory.create(ContextualModuleRefModule)
+    service = app.state.fanest_container.resolve(UsesContextualModuleRef)
+
+    created = service.module_ref.create_sync(ContextCreatedService)
+
+    assert created.dependency.value == "private"
+
+
+@Module(imports=[ContextualModuleRefModule])
+class ContextualModuleRefRootModule:
+    pass
+
+
+def test_module_ref_introspect_uses_injected_imported_module_context():
+    app = FaNestFactory.create(ContextualModuleRefRootModule)
+    service = app.state.fanest_container.resolve(
+        UsesContextualModuleRef,
+        module_key=ContextualModuleRefModule,
+    )
+
+    info = service.module_ref.introspect(PrivateModuleRefDependency)
+
+    assert info["token"] is PrivateModuleRefDependency
+    assert info["scope"] == "singleton"
 
 
 @pytest.mark.anyio

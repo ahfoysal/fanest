@@ -173,80 +173,80 @@ def Render(template: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     return decorator
 
 
-def Body(name: str | None = None, *pipes: Any, default: Any = ...) -> ParameterSource:
+def Body(name: str | None = None, *pipes: Any, default: Any = ...) -> Any:
     return ParameterSource(source="body", name=name, default=default, pipes=pipes)
 
 
-def Param(name: str | None = None, *pipes: Any, default: Any = ...) -> ParameterSource:
+def Param(name: str | None = None, *pipes: Any, default: Any = ...) -> Any:
     return ParameterSource(source="path", name=name, default=default, pipes=pipes)
 
 
-def Query(name: str | None = None, *pipes: Any, default: Any = ...) -> ParameterSource:
+def Query(name: str | None = None, *pipes: Any, default: Any = ...) -> Any:
     return ParameterSource(source="query", name=name, default=default, pipes=pipes)
 
 
-def Header(name: str | None = None, *pipes: Any, default: Any = None) -> ParameterSource:
+def Header(name: str | None = None, *pipes: Any, default: Any = None) -> Any:
     return ParameterSource(source="header", name=name, default=default, pipes=pipes)
 
 
-def Headers(name: str | None = None, *pipes: Any, default: Any = None) -> ParameterSource:
+def Headers(name: str | None = None, *pipes: Any, default: Any = None) -> Any:
     return Header(name, *pipes, default=default)
 
 
-def Cookie(name: str | None = None, *pipes: Any, default: Any = None) -> ParameterSource:
+def Cookie(name: str | None = None, *pipes: Any, default: Any = None) -> Any:
     return ParameterSource(source="cookie", name=name, default=default, pipes=pipes)
 
 
-def Form(name: str | None = None, *pipes: Any, default: Any = ...) -> ParameterSource:
+def Form(name: str | None = None, *pipes: Any, default: Any = ...) -> Any:
     return ParameterSource(source="form", name=name, default=default, pipes=pipes)
 
 
-def UploadedFile(name: str = "file", *, default: Any = ...) -> ParameterSource:
+def UploadedFile(name: str = "file", *, default: Any = ...) -> Any:
     return ParameterSource(source="file", name=name, default=default)
 
 
-def UploadedFiles(name: str = "files") -> ParameterSource:
-    return ParameterSource(source="files", name=name, default=[])
+def UploadedFiles(name: str = "files", *, default: Any = ...) -> Any:
+    return ParameterSource(source="files", name=name, default=default)
 
 
-def Req() -> ParameterSource:
+def Req() -> Any:
     return ParameterSource(source="request")
 
 
-def Res(*, passthrough: bool = False) -> ParameterSource:
+def Res(*, passthrough: bool = False) -> Any:
     return ParameterSource(source="response", default={"passthrough": passthrough})
 
 
-def Ip() -> ParameterSource:
+def Ip() -> Any:
     return ParameterSource(source="ip")
 
 
-def HostParam(name: str | None = None, default: Any = None) -> ParameterSource:
+def HostParam(name: str | None = None, default: Any = None) -> Any:
     return ParameterSource(source="host", name=name, default=default)
 
 
-def Session(default: Any = None) -> ParameterSource:
+def Session(default: Any = None) -> Any:
     return ParameterSource(source="session", default=default)
 
 
-def State(name: str | None = None, default: Any = None) -> ParameterSource:
+def State(name: str | None = None, default: Any = None) -> Any:
     return ParameterSource(source="state", name=name, default=default)
 
 
-def BackgroundTasks() -> ParameterSource:
+def BackgroundTasks() -> Any:
     return ParameterSource(source="background_tasks")
 
 
-def MessageBody(name: str | None = None, *pipes: Any, default: Any = None) -> ParameterSource:
+def MessageBody(name: str | None = None, *pipes: Any, default: Any = None) -> Any:
     return ParameterSource(source="message_body", name=name, default=default, pipes=pipes)
 
 
-def ConnectedSocket() -> ParameterSource:
+def ConnectedSocket() -> Any:
     return ParameterSource(source="connected_socket")
 
 
 def create_param_decorator(factory: Callable[[Any, Any], Any]):
-    def decorator(data: Any = None) -> ParameterSource:
+    def decorator(data: Any = None) -> Any:
         return ParameterSource(source="custom", name=None, default={"factory": factory, "data": data})
 
     return decorator

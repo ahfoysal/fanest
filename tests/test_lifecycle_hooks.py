@@ -93,3 +93,46 @@ def test_use_existing_alias_does_not_duplicate_lifecycle_hooks():
         "first:destroy",
         "first:shutdown",
     ]
+
+
+@Injectable()
+class ImportedLifecycleService:
+    async def on_module_init(self):
+        events.append("imported:init")
+
+    async def on_application_bootstrap(self):
+        events.append("imported:bootstrap")
+
+
+@Injectable()
+class RootLifecycleService:
+    def __init__(self, imported: ImportedLifecycleService):
+        self.imported = imported
+
+    async def on_module_init(self):
+        events.append("root:init")
+
+    async def on_application_bootstrap(self):
+        events.append("root:bootstrap")
+
+
+@Module(providers=[ImportedLifecycleService], exports=[ImportedLifecycleService])
+class ImportedLifecycleModule:
+    pass
+
+
+@Module(imports=[ImportedLifecycleModule], providers=[RootLifecycleService])
+class RootLifecycleModule:
+    pass
+
+
+def test_lifecycle_hooks_bootstrap_imported_modules_before_dependents():
+    events.clear()
+
+    with TestClient(FaNestFactory.create(RootLifecycleModule)):
+        assert events == [
+            "imported:init",
+            "root:init",
+            "imported:bootstrap",
+            "root:bootstrap",
+        ]

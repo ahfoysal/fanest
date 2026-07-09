@@ -579,22 +579,24 @@ Current:
 
 Still to deepen:
 
-- Redis-backed queue transport
-- advanced SMTP provider adapters
-- full migration runner
-- deeper GraphQL schema generation
-- networked microservice drivers beyond the in-process transport contract
+- live certification against real Redis, MongoDB, Postgres, RabbitMQ, NATS, Kafka, gRPC, and SMTP services
+- a full migration runner
+- production GraphQL validation depth comparable to dedicated GraphQL engines
+- true Socket.IO protocol parity
+- exact package-by-package NestJS polish for the long tail of decorator variants
 
 The plan is to keep closing that gap package by package, without losing the Python feel.
 
 ## Repository Status
 
-This is an early framework build, but it is runnable and tested.
+This is an early beta framework build, but it is runnable and tested.
 
 ```bash
 uv run pytest
-# 90 passed
+# 407 passed, 22 skipped
 ```
+
+Current package candidate: `0.3.0b1`.
 
 ## License
 

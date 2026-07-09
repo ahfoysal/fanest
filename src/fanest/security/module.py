@@ -7,13 +7,30 @@ from fanest import Module
 
 
 class SecurityHeadersMiddleware:
-    def __init__(self, app: Any, *, headers: dict[str, str] | None = None) -> None:
+    DEFAULT_HEADERS = {
+        "cross-origin-opener-policy": "same-origin",
+        "cross-origin-resource-policy": "same-origin",
+        "origin-agent-cluster": "?1",
+        "x-content-type-options": "nosniff",
+        "x-dns-prefetch-control": "off",
+        "x-frame-options": "DENY",
+        "referrer-policy": "no-referrer",
+        "strict-transport-security": "max-age=15552000; includeSubDomains",
+        "x-download-options": "noopen",
+        "x-permitted-cross-domain-policies": "none",
+        "x-xss-protection": "0",
+    }
+
+    def __init__(
+        self,
+        app: Any,
+        *,
+        headers: dict[str, str | None] | None = None,
+        include_defaults: bool = True,
+    ) -> None:
         self.app = app
-        self.headers = headers or {
-            "x-content-type-options": "nosniff",
-            "x-frame-options": "DENY",
-            "referrer-policy": "no-referrer",
-        }
+        merged_headers = {**self.DEFAULT_HEADERS, **(headers or {})} if include_defaults else headers or {}
+        self.headers = _validate_headers(merged_headers)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -42,7 +59,9 @@ class SecurityHeadersMiddleware:
 
 class HelmetModule:
     @staticmethod
-    def for_root(*, headers: dict[str, str] | None = None) -> type:
+    def for_root(*, headers: dict[str, str | None] | None = None) -> type:
+        options_headers = _validate_headers({**SecurityHeadersMiddleware.DEFAULT_HEADERS, **(headers or {})})
+
         @Module()
         class DynamicHelmetModule:
             pass
@@ -50,6 +69,29 @@ class HelmetModule:
         setattr(
             DynamicHelmetModule,
             "__fanest_app_middlewares__",
-            [{"class": SecurityHeadersMiddleware, "options": {"headers": headers}}],
+            [
+                {
+                    "class": SecurityHeadersMiddleware,
+                    "options": {"headers": options_headers, "include_defaults": False},
+                }
+            ],
         )
         return DynamicHelmetModule
+
+
+def _validate_headers(headers: dict[str, str | None]) -> dict[str, str]:
+    validated: dict[str, str] = {}
+    for key, value in headers.items():
+        normalized = key.strip().lower()
+        if "\r" in key or "\n" in key:
+            raise ValueError("Security headers cannot contain newline characters")
+        if not normalized:
+            raise ValueError("Security header names cannot be empty")
+        if value is None:
+            validated.pop(normalized, None)
+            continue
+        string_value = str(value)
+        if "\r" in string_value or "\n" in string_value:
+            raise ValueError("Security headers cannot contain newline characters")
+        validated[normalized] = string_value
+    return validated

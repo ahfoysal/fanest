@@ -40,6 +40,8 @@ class InjectMarker:
     token: Any
     optional: bool = False
     default: Any = None
+    self_only: bool = False
+    skip_self: bool = False
 
 
 @dataclass(frozen=True)

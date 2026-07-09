@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from fanest import Controller, DiscoveryService, FaNestFactory, Get, Injectable, Module
+from fanest import Controller, DiscoveryService, FaNestFactory, Get, Inject, Injectable, Module, token, use_value
 
 
 @Injectable()
@@ -31,4 +31,65 @@ def test_discovery_service_lists_registered_providers_and_controllers():
     assert response.json() == {
         "providers": ["DiscoverableService"],
         "controllers": ["DiscoveryController"],
+    }
+
+
+DISCOVERY_VALUE = token("DISCOVERY_VALUE")
+
+
+class ModuleScopedDiscoverableService:
+    def __init__(self, value: str = Inject(DISCOVERY_VALUE)):
+        self.value = value
+
+
+@Module(
+    providers=[
+        use_value(DISCOVERY_VALUE, "first"),
+        ModuleScopedDiscoverableService,
+    ]
+)
+class FirstDiscoveryFeatureModule:
+    pass
+
+
+@Module(
+    providers=[
+        use_value(DISCOVERY_VALUE, "second"),
+        ModuleScopedDiscoverableService,
+    ]
+)
+class SecondDiscoveryFeatureModule:
+    pass
+
+
+@Controller("discovery-context")
+class DiscoveryContextController:
+    def __init__(self, discovery: DiscoveryService):
+        self.discovery = discovery
+
+    @Get("/")
+    async def index(self):
+        providers = {}
+        for item in self.discovery.get_providers():
+            if item.token is not ModuleScopedDiscoverableService:
+                continue
+            assert item.module_type is not None
+            providers[item.module_type.__name__] = item.instance.value
+        return providers
+
+
+@Module(
+    imports=[FirstDiscoveryFeatureModule, SecondDiscoveryFeatureModule],
+    controllers=[DiscoveryContextController],
+)
+class DiscoveryContextRootModule:
+    pass
+
+
+def test_discovery_service_resolves_providers_in_their_module_context():
+    response = TestClient(FaNestFactory.create(DiscoveryContextRootModule)).get("/discovery-context")
+
+    assert response.json() == {
+        "FirstDiscoveryFeatureModule": "first",
+        "SecondDiscoveryFeatureModule": "second",
     }

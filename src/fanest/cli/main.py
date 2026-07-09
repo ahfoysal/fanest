@@ -1,14 +1,17 @@
 from pathlib import Path
 import compileall
+from contextlib import contextmanager
 import errno
 import importlib
-import importlib.util
+import importlib.metadata as importlib_metadata
 import keyword
 import platform
+import py_compile
 import re
 import socket
 import sys
-from typing import Any
+import types
+from typing import Any, Iterator
 
 import typer
 import fanest
@@ -20,29 +23,44 @@ app.add_typer(generate_app, name="g", help="Alias for generate.")
 
 
 @app.command()
-def new(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+def new(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    _validate_project_name(name)
     target = Path(name)
+    if target.exists() and not dry_run and not force:
+        raise typer.BadParameter(f"Target directory already exists: {target}")
     if dry_run:
         typer.echo(f"Would create FaNest application in {target}")
         return
-    target.mkdir(parents=True, exist_ok=False)
-    (target / "tests").mkdir()
-    (target / "main.py").write_text(_main_template(), encoding="utf-8")
-    (target / "pyproject.toml").write_text(_project_pyproject_template(name), encoding="utf-8")
-    (target / "README.md").write_text(_project_readme_template(name), encoding="utf-8")
-    (target / ".gitignore").write_text(_gitignore_template(), encoding="utf-8")
-    (target / "tests" / "test_app.py").write_text(_project_test_template(), encoding="utf-8")
+    target.mkdir(parents=True, exist_ok=force)
+    (target / "tests").mkdir(exist_ok=force)
+    _write_file(target / "main.py", _main_template(), dry_run, force=force)
+    _write_file(target / "pyproject.toml", _project_pyproject_template(name), dry_run, force=force)
+    _write_file(target / "README.md", _project_readme_template(name), dry_run, force=force)
+    _write_file(target / ".gitignore", _gitignore_template(), dry_run, force=force)
+    _write_file(target / "tests" / "test_app.py", _project_test_template(), dry_run, force=force)
     typer.echo(f"Created FaNest application in {target}")
 
 
 @app.command()
-def workspace(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+def workspace(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    _validate_project_name(name)
     root = Path(name)
+    if root.exists() and not dry_run and not force:
+        raise typer.BadParameter(f"Target directory already exists: {root}")
     paths = [
         root / "apps",
         root / "libs",
         root / "apps" / "api",
         root / "apps" / "api" / "src",
+        root / "apps" / "api" / "tests",
         root / "libs" / "common",
     ]
     if dry_run:
@@ -51,7 +69,22 @@ def workspace(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> No
         return
     for path in paths:
         path.mkdir(parents=True, exist_ok=True)
-    (root / "apps" / "api" / "main.py").write_text(_main_template(), encoding="utf-8")
+    _write_file(root / "apps" / "api" / "src" / "__init__.py", "", dry_run, force=force)
+    _write_file(root / "apps" / "api" / "src" / "main.py", _main_template(), dry_run, force=force)
+    _write_file(
+        root / "apps" / "api" / "main.py",
+        _workspace_entrypoint_template(),
+        dry_run,
+        force=force,
+    )
+    _write_file(
+        root / "apps" / "api" / "tests" / "test_app.py",
+        _project_test_template(),
+        dry_run,
+        force=force,
+    )
+    _write_file(root / "pyproject.toml", _workspace_pyproject_template(name), dry_run, force=force)
+    _write_file(root / ".gitignore", _gitignore_template(), dry_run, force=force)
     typer.echo(f"Created FaNest workspace in {root}")
 
 
@@ -60,6 +93,16 @@ def info() -> None:
     typer.echo(f"FaNest {fanest.__version__}")
     typer.echo(f"Python {platform.python_version()}")
     typer.echo(f"Platform {platform.platform()}")
+    typer.echo(f"Executable {sys.executable}")
+    for package in ("fastapi", "uvicorn", "pydantic", "typer"):
+        typer.echo(f"{package} {_package_version(package)}")
+
+
+def _package_version(package: str) -> str:
+    try:
+        return importlib_metadata.version(package)
+    except importlib_metadata.PackageNotFoundError:
+        return "not installed"
 
 
 @app.command()
@@ -67,7 +110,7 @@ def build(path: str = typer.Argument(".")) -> None:
     target = Path(path)
     if not target.exists():
         raise typer.BadParameter(f"Build path not found: {path}")
-    if not compileall.compile_dir(str(target), quiet=1):
+    if not _compile_target(target):
         raise typer.Exit(1)
     typer.echo(f"Build OK: {target}")
 
@@ -89,7 +132,8 @@ def dev(
     port: int = 8000,
     app_name: str = typer.Option("app", "--app"),
 ) -> None:
-    _run_uvicorn(_resolve_app_path(path, app_name), host=host, port=port, reload=True)
+    app_path, app_dir = _resolve_app_target(path, app_name)
+    _run_uvicorn(app_path, app_dir=str(app_dir), host=host, port=port, reload=True)
 
 
 @app.command()
@@ -103,7 +147,8 @@ def run(
     options: dict[str, Any] = {}
     if workers is not None:
         options["workers"] = workers
-    _run_uvicorn(_resolve_app_path(path, app_name), host=host, port=port, reload=False, **options)
+    app_path, app_dir = _resolve_app_target(path, app_name)
+    _run_uvicorn(app_path, app_dir=str(app_dir), host=host, port=port, reload=False, **options)
 
 
 @app.command()
@@ -111,11 +156,11 @@ def check(
     path: str = typer.Argument("main.py"),
     app_name: str = typer.Option("app", "--app"),
 ) -> None:
-    app_path = _resolve_app_path(path, app_name)
+    app_path, app_dir = _resolve_app_target(path, app_name)
     module_name, _, attribute = app_path.partition(":")
     if not attribute:
         raise typer.BadParameter("Application target must use module:attribute format.")
-    module = _load_check_module(path, module_name)
+    module = _load_check_module(path, module_name, app_dir)
     if not hasattr(module, attribute):
         raise typer.BadParameter(f"Application attribute not found: {attribute}")
     application = getattr(module, attribute)
@@ -126,206 +171,436 @@ def check(
     typer.echo(f"Application target OK: {app_path}")
 
 
-def _load_check_module(path: str, module_name: str):
+def _load_check_module(path: str, module_name: str, app_dir: Path | None = None):
     source = Path(path)
     if source.exists() and source.is_file() and source.suffix == ".py":
-        spec = importlib.util.spec_from_file_location(f"_fanest_check_{abs(hash(source.resolve()))}", source)
-        if spec is None or spec.loader is None:
-            raise typer.BadParameter(f"Could not import application file: {path}")
-        module = importlib.util.module_from_spec(spec)
-        # Put the project root on sys.path so the target file can import sibling
-        # packages (e.g. ``from app.something import ...``) just like ``dev``/``run`` do.
-        cwd = str(Path.cwd())
-        added_cwd = cwd not in sys.path
-        if added_cwd:
-            sys.path.insert(0, cwd)
-        try:
-            spec.loader.exec_module(module)
-        finally:
-            if added_cwd:
-                try:
-                    sys.path.remove(cwd)
-                except ValueError:
-                    pass
+        import_root = app_dir or _app_dir_for_source(source)
+        package_name = _package_name_for_source(source, import_root)
+        check_name = module_name if package_name else f"_fanest_check_{abs(hash(source.resolve()))}"
+        module = types.ModuleType(check_name)
+        module.__file__ = str(source.resolve())
+        module.__package__ = package_name
+        with _prepended_sys_path(import_root):
+            _clear_local_package_cache()
+            importlib.invalidate_caches()
+            with _temporary_module(check_name, module):
+                exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), module.__dict__)
+            _clear_local_package_cache(module_name)
         return module
     try:
-        sys.path.insert(0, str(Path.cwd()))
-        return importlib.import_module(module_name)
+        with _prepended_sys_path(app_dir or Path.cwd()):
+            _clear_local_package_cache(module_name)
+            importlib.invalidate_caches()
+            return importlib.import_module(module_name)
     except Exception as exc:
         raise typer.BadParameter(f"Could not import module {module_name!r}: {exc}") from exc
+
+
+@contextmanager
+def _prepended_sys_path(path: Path) -> Iterator[None]:
+    resolved = str(path.resolve())
+    added = resolved not in sys.path
+    if added:
+        sys.path.insert(0, resolved)
+    try:
+        yield
     finally:
-        try:
-            sys.path.remove(str(Path.cwd()))
-        except ValueError:
-            pass
+        if added:
+            try:
+                sys.path.remove(resolved)
+            except ValueError:
+                pass
+
+
+@contextmanager
+def _temporary_module(name: str, module: types.ModuleType) -> Iterator[None]:
+    previous = sys.modules.get(name)
+    sys.modules[name] = module
+    try:
+        yield
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+
+
+def _clear_local_package_cache(target_module: str | None = None) -> None:
+    packages = {"src", "app"}
+    if target_module:
+        sys.modules.pop(target_module, None)
+        packages.add(target_module.split(".", 1)[0])
+    for package in packages:
+        if not (Path.cwd() / package).is_dir():
+            continue
+        for module_name in list(sys.modules):
+            if module_name == package or module_name.startswith(f"{package}."):
+                sys.modules.pop(module_name, None)
 
 
 @generate_app.command("resource")
+@generate_app.command("res")
 def generate_resource(
     name: str,
     dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
     module: str | None = typer.Option(None, "--module"),
 ) -> None:
-    resource = _resource_dir(name, dry_run, exist_ok=False)
+    name = _artifact_name(name)
+    resource = _resource_dir(name, dry_run, exist_ok=force)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_service.py", _service_template(class_name), dry_run)
-    _write_file(resource / f"{name}_controller.py", _controller_template(name, class_name), dry_run)
-    _write_file(resource / f"{name}_module.py", _resource_module_template(name, class_name), dry_run)
+    _write_file(resource / f"{name}_service.py", _service_template(class_name), dry_run, force=force)
+    _write_file(
+        resource / f"{name}_controller.py",
+        _controller_template(name, class_name),
+        dry_run,
+        force=force,
+    )
+    _write_file(
+        resource / f"{name}_module.py",
+        _resource_module_template(name, class_name),
+        dry_run,
+        force=force,
+    )
     if module:
         _register_module_import(module, name, class_name, dry_run)
     typer.echo(f"Generated resource {name}")
 
 
 @generate_app.command("module")
+@generate_app.command("mo")
 def generate_module(
     name: str,
     dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
     flat: bool = typer.Option(False, "--flat"),
     module: str | None = typer.Option(None, "--module"),
 ) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
     target = Path("src") / f"{name}_module.py" if flat else resource / f"{name}_module.py"
-    _write_file(target, _module_template(name, class_name), dry_run)
+    _write_file(target, _module_template(name, class_name), dry_run, force=force)
     if module:
         _register_module_import(module, name, class_name, dry_run)
     typer.echo(f"Generated module {name}")
 
 
 @generate_app.command("controller")
-def generate_controller(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("co")
+def generate_controller(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_controller.py", _controller_template(name, class_name), dry_run)
+    _write_file(
+        resource / f"{name}_controller.py",
+        _controller_template(name, class_name),
+        dry_run,
+        force=force,
+    )
     typer.echo(f"Generated controller {name}")
 
 
 @generate_app.command("service")
-def generate_service(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("s")
+def generate_service(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_service.py", _service_template(class_name), dry_run)
+    _write_file(resource / f"{name}_service.py", _service_template(class_name), dry_run, force=force)
     typer.echo(f"Generated service {name}")
 
 
 @generate_app.command("guard")
-def generate_guard(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("gu")
+def generate_guard(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_guard.py", _guard_template(class_name), dry_run)
+    _write_file(resource / f"{name}_guard.py", _guard_template(class_name), dry_run, force=force)
     typer.echo(f"Generated guard {name}")
 
 
 @generate_app.command("pipe")
-def generate_pipe(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("pi")
+def generate_pipe(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_pipe.py", _pipe_template(class_name), dry_run)
+    _write_file(resource / f"{name}_pipe.py", _pipe_template(class_name), dry_run, force=force)
     typer.echo(f"Generated pipe {name}")
 
 
 @generate_app.command("interceptor")
-def generate_interceptor(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("itc")
+def generate_interceptor(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_interceptor.py", _interceptor_template(class_name), dry_run)
+    _write_file(
+        resource / f"{name}_interceptor.py",
+        _interceptor_template(class_name),
+        dry_run,
+        force=force,
+    )
     typer.echo(f"Generated interceptor {name}")
 
 
 @generate_app.command("filter")
-def generate_filter(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("f")
+def generate_filter(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_filter.py", _filter_template(class_name), dry_run)
+    _write_file(resource / f"{name}_filter.py", _filter_template(class_name), dry_run, force=force)
     typer.echo(f"Generated filter {name}")
 
 
 @generate_app.command("gateway")
-def generate_gateway(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("ga")
+def generate_gateway(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_gateway.py", _gateway_template(name, class_name), dry_run)
+    _write_file(
+        resource / f"{name}_gateway.py",
+        _gateway_template(name, class_name),
+        dry_run,
+        force=force,
+    )
     typer.echo(f"Generated gateway {name}")
 
 
 @generate_app.command("dto")
-def generate_dto(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+def generate_dto(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_dto.py", _dto_template(class_name), dry_run)
+    _write_file(resource / f"{name}_dto.py", _dto_template(class_name), dry_run, force=force)
     typer.echo(f"Generated dto {name}")
 
 
 @generate_app.command("middleware")
-def generate_middleware(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("mi")
+def generate_middleware(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_middleware.py", _middleware_template(class_name), dry_run)
+    _write_file(
+        resource / f"{name}_middleware.py",
+        _middleware_template(class_name),
+        dry_run,
+        force=force,
+    )
     typer.echo(f"Generated middleware {name}")
 
 
 @generate_app.command("decorator")
-def generate_decorator(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("d")
+def generate_decorator(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
-    _write_file(resource / f"{name}_decorator.py", _decorator_template(name), dry_run)
+    _write_file(resource / f"{name}_decorator.py", _decorator_template(name), dry_run, force=force)
     typer.echo(f"Generated decorator {name}")
 
 
+@generate_app.command("application")
+@generate_app.command("app")
+def generate_application(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
+    target = Path("apps") / name
+    _write_file(target / "src" / "__init__.py", "", dry_run, force=force)
+    _write_file(target / "src" / "main.py", _main_template(), dry_run, force=force)
+    _write_file(target / "main.py", _workspace_entrypoint_template(), dry_run, force=force)
+    _write_file(target / "tests" / "test_app.py", _project_test_template(), dry_run, force=force)
+    typer.echo(f"Generated application {name}")
+
+
 @generate_app.command("library")
-def generate_library(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("lib")
+def generate_library(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     target = Path("libs") / name
     class_name = _class_name(name)
-    _write_file(target / "__init__.py", f"from .{name}_module import {class_name}Module\n", dry_run)
-    _write_file(target / f"{name}_module.py", _library_template(class_name), dry_run)
+    _write_file(Path("libs") / "__init__.py", "", dry_run, force=force)
+    _write_file(
+        target / "__init__.py",
+        f"from .{name}_module import {class_name}Module\n",
+        dry_run,
+        force=force,
+    )
+    _write_file(target / f"{name}_module.py", _library_template(class_name), dry_run, force=force)
     typer.echo(f"Generated library {name}")
 
 
-@generate_app.command("class")
-def generate_class(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("plugin")
+def generate_plugin(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}.py", _class_template(class_name), dry_run)
+    _write_file(resource / f"{name}_plugin.py", _plugin_template(name, class_name), dry_run, force=force)
+    typer.echo(f"Generated plugin {name}")
+
+
+@generate_app.command("class")
+@generate_app.command("cl")
+def generate_class(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
+    resource = _resource_dir(name, dry_run)
+    class_name = _class_name(name)
+    _write_file(resource / f"{name}.py", _class_template(class_name), dry_run, force=force)
     typer.echo(f"Generated class {name}")
 
 
 @generate_app.command("provider")
-def generate_provider(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("pr")
+def generate_provider(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_provider.py", _provider_template(class_name), dry_run)
+    _write_file(resource / f"{name}_provider.py", _provider_template(class_name), dry_run, force=force)
     typer.echo(f"Generated provider {name}")
 
 
 @generate_app.command("exception")
-def generate_exception(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("ex")
+def generate_exception(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_exception.py", _exception_template(class_name), dry_run)
+    _write_file(
+        resource / f"{name}_exception.py",
+        _exception_template(class_name),
+        dry_run,
+        force=force,
+    )
     typer.echo(f"Generated exception {name}")
 
 
 @generate_app.command("resolver")
-def generate_resolver(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("r")
+def generate_resolver(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_resolver.py", _resolver_template(class_name), dry_run)
+    _write_file(resource / f"{name}_resolver.py", _resolver_template(class_name), dry_run, force=force)
     typer.echo(f"Generated resolver {name}")
 
 
 @generate_app.command("repository")
-def generate_repository(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("repo")
+def generate_repository(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     resource = _resource_dir(name, dry_run)
     class_name = _class_name(name)
-    _write_file(resource / f"{name}_repository.py", _repository_template(class_name), dry_run)
+    _write_file(
+        resource / f"{name}_repository.py",
+        _repository_template(class_name),
+        dry_run,
+        force=force,
+    )
     typer.echo(f"Generated repository {name}")
 
 
 @generate_app.command("test")
-def generate_test(name: str, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+@generate_app.command("spec")
+def generate_test(
+    name: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    name = _artifact_name(name)
     target = Path("tests") / f"test_{name}.py"
     class_name = _class_name(name)
-    _write_file(target, _test_template(class_name), dry_run)
+    _write_file(target, _test_template(class_name), dry_run, force=force)
     typer.echo(f"Generated test {name}")
+
+
+def _artifact_name(name: str) -> str:
+    normalized = name.strip().replace("-", "_")
+    _validate_artifact_name(normalized)
+    return normalized
+
+
+def _validate_project_name(name: str) -> None:
+    if not name or Path(name).name != name or name in {".", ".."}:
+        raise typer.BadParameter("Project name must be a single directory name.")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+        raise typer.BadParameter(
+            "Project name may contain only letters, numbers, dots, dashes and underscores."
+        )
 
 
 def _validate_artifact_name(name: str) -> None:
@@ -337,8 +612,8 @@ def _validate_artifact_name(name: str) -> None:
     """
     if not name or not name.isidentifier() or keyword.iskeyword(name):
         raise typer.BadParameter(
-            f"Invalid name {name!r}: use a valid Python identifier "
-            "(letters, digits and underscores; not starting with a digit; "
+            f"Invalid name {name!r}: use a valid Python identifier or kebab-case name "
+            "(letters, digits, dashes and underscores; not starting with a digit; "
             "not a reserved keyword), e.g. 'user_profile'."
         )
 
@@ -363,17 +638,65 @@ def _resource_dir(name: str, dry_run: bool, *, exist_ok: bool = True) -> Path:
     return _ensure_resource_dir(name, exist_ok=exist_ok)
 
 
-def _write_file(path: Path, content: str, dry_run: bool) -> None:
+def _write_file(path: Path, content: str, dry_run: bool, *, force: bool = False) -> None:
     if dry_run:
         typer.echo(f"Would write {path}")
         return
+    if path.exists() and not force:
+        try:
+            if path.read_text(encoding="utf-8") == content:
+                return
+        except UnicodeDecodeError:
+            pass
+        raise typer.BadParameter(f"Refusing to overwrite existing file: {path}. Use --force.")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
 
-def _resolve_app_path(path: str, app_name: str = "app") -> str:
+def _compile_target(target: Path) -> bool:
+    if target.is_file():
+        try:
+            py_compile.compile(str(target), doraise=True, quiet=1)
+        except py_compile.PyCompileError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            return False
+        return True
+    ignored = re.compile(r"(^|/)(\.venv|venv|__pycache__|\.git|\.mypy_cache|\.pytest_cache|\.ruff_cache|build|dist)(/|$)")
+    return compileall.compile_dir(str(target), quiet=1, rx=ignored)
+
+
+def _package_name_for_source(source: Path, app_dir: Path) -> str:
+    try:
+        relative = source.resolve().with_suffix("").relative_to(app_dir.resolve())
+    except ValueError:
+        return ""
+    package_parts = relative.parts[:-1]
+    if not package_parts:
+        return ""
+    current = app_dir
+    for part in package_parts:
+        current = current / part
+        if not (current / "__init__.py").exists():
+            return ""
+    return ".".join(package_parts)
+
+
+def _resolve_app_target(path: str, app_name: str = "app") -> tuple[str, Path]:
     if ":" in path:
-        return path
+        return path, Path.cwd()
+    source = _resolve_app_source(path)
+    app_dir = _app_dir_for_source(source)
+    module_path = _module_path_for_source(source, app_dir)
+    return f"{module_path}:{app_name}", app_dir
+
+
+def _resolve_app_path(path: str, app_name: str = "app") -> str:
+    return _resolve_app_target(path, app_name)[0]
+
+
+def _resolve_app_source(path: str) -> Path:
+    if ":" in path:
+        raise typer.BadParameter("Application file path must not include ':'.")
     source = Path(path)
     if not source.exists():
         raise typer.BadParameter(f"Application file not found: {path}")
@@ -384,20 +707,55 @@ def _resolve_app_path(path: str, app_name: str = "app") -> str:
                 break
         else:
             raise typer.BadParameter(f"No main.py found in application directory: {path}")
-    if source.suffix == ".py":
-        source = source.with_suffix("")
-    parts = [part for part in source.parts if part not in {".", ""}]
-    module_path = ".".join(parts)
-    return f"{module_path}:{app_name}"
+    if not source.is_file() or source.suffix != ".py":
+        raise typer.BadParameter(f"Application path must be a Python file or directory: {path}")
+    return source
+
+
+def _app_dir_for_source(source: Path) -> Path:
+    source = source.resolve()
+    cwd = Path.cwd().resolve()
+    try:
+        relative = source.relative_to(cwd)
+    except ValueError:
+        return source.parent
+    parts = relative.parts
+    if len(parts) == 1:
+        return cwd
+    if _is_importable_from_cwd(relative):
+        return cwd
+    return source.parent
+
+
+def _module_path_for_source(source: Path, app_dir: Path) -> str:
+    source = source.resolve()
+    app_dir = app_dir.resolve()
+    try:
+        relative = source.with_suffix("").relative_to(app_dir)
+    except ValueError:
+        return source.stem
+    return ".".join(part for part in relative.parts if part not in {".", ""})
+
+
+def _is_importable_from_cwd(relative_source: Path) -> bool:
+    current = Path.cwd()
+    for parent in relative_source.with_suffix("").parents:
+        if str(parent) == ".":
+            break
+        if not (current / parent / "__init__.py").exists():
+            return False
+    return True
 
 
 def _run_uvicorn(app_path: str, **options: Any) -> None:
     import uvicorn
 
     options.setdefault("app_dir", str(Path.cwd()))
+    options["app_dir"] = str(Path(str(options["app_dir"])).resolve())
     _ensure_port_available(str(options.get("host", "127.0.0.1")), int(options.get("port", 8000)))
     try:
-        uvicorn.run(app_path, **options)
+        with _prepended_sys_path(Path(str(options["app_dir"]))):
+            uvicorn.run(app_path, **options)
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE:
             _port_in_use_error(int(options.get("port", 8000)))
@@ -496,7 +854,7 @@ app = FaNestFactory.create(AppModule)
 
 
 def _project_pyproject_template(name: str) -> str:
-    package_name = name.replace("_", "-")
+    package_name = _distribution_name(name)
     return f'''[project]
 name = "{package_name}"
 version = "0.1.0"
@@ -535,6 +893,39 @@ Open `http://127.0.0.1:8000/docs`.
 '''
 
 
+def _workspace_entrypoint_template() -> str:
+    return '''from src.main import app
+
+__all__ = ["app"]
+'''
+
+
+def _workspace_pyproject_template(name: str) -> str:
+    package_name = _distribution_name(name)
+    return f'''[project]
+name = "{package_name}"
+version = "0.1.0"
+description = "A FaNest workspace"
+requires-python = ">=3.10"
+dependencies = [
+    "fanest[standard]",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "httpx",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["apps/api/tests"]
+
+[tool.ruff]
+line-length = 100
+'''
+
+
 def _gitignore_template() -> str:
     return '''.venv/
 __pycache__/
@@ -546,6 +937,10 @@ dist/
 build/
 *.egg-info/
 '''
+
+
+def _distribution_name(name: str) -> str:
+    return name.replace("_", "-").lower()
 
 
 def _project_test_template() -> str:
@@ -693,6 +1088,28 @@ def _library_template(class_name: str) -> str:
 @Module()
 class {class_name}Module:
     pass
+'''
+
+
+def _plugin_template(name: str, class_name: str) -> str:
+    options_token = f"{name.upper()}_OPTIONS"
+    return f'''from typing import Any
+
+from fanest import Module, dynamic_module, token, use_value
+
+
+{options_token} = token("{options_token}")
+
+
+@Module()
+class {class_name}Plugin:
+    @staticmethod
+    def register(**options: Any):
+        return dynamic_module(
+            {class_name}Plugin,
+            providers=[use_value({options_token}, dict(options))],
+            exports=[{options_token}],
+        )
 '''
 
 

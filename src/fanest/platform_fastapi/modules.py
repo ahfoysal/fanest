@@ -7,5 +7,25 @@ def enable_compression(app: FastAPI, *, minimum_size: int = 500) -> None:
     app.add_middleware(GZipMiddleware, minimum_size=minimum_size)
 
 
-def serve_static(app: FastAPI, path: str, directory: str, *, name: str = "static") -> None:
-    app.mount(path, StaticFiles(directory=directory), name=name)
+def serve_static(
+    app: FastAPI,
+    path: str,
+    directory: str,
+    *,
+    name: str = "static",
+    html: bool = False,
+    check_dir: bool = True,
+    follow_symlink: bool = False,
+    packages=None,
+) -> None:
+    app.mount(
+        path,
+        StaticFiles(
+            directory=directory,
+            packages=packages,
+            html=html,
+            check_dir=check_dir,
+            follow_symlink=follow_symlink,
+        ),
+        name=name,
+    )

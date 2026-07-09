@@ -8,6 +8,10 @@ from fanest import (
     Injectable,
     Module,
     ModuleRef,
+    Query,
+    Self,
+    SkipSelf,
+    UseGuards,
     forward_ref,
     token,
     use_existing,
@@ -374,3 +378,133 @@ def test_module_ref_get_reports_unregistered_class_as_unknown_provider():
 
     with pytest.raises(UnknownProviderError):
         module_ref.get(RootMissingService)
+
+
+def test_local_string_annotations_resolve_against_module_providers_without_type_hint_crash():
+    @Injectable()
+    class LocalStringServiceB:
+        def name(self):
+            return "b"
+
+    @Injectable()
+    class LocalStringServiceA:
+        def __init__(self, service_b: "LocalStringServiceB"):
+            self.service_b = service_b
+
+    @Module(providers=[LocalStringServiceA, LocalStringServiceB])
+    class LocalStringModule:
+        pass
+
+    app = FaNestFactory.create(LocalStringModule)
+
+    service = app.state.fanest_container.resolve(LocalStringServiceA, module_key=LocalStringModule)
+
+    assert service.service_b.name() == "b"
+
+
+def test_ambiguous_string_provider_names_fail_instead_of_resolving_random_class():
+    duplicate_one = type(
+        "DuplicateStringTokenService",
+        (),
+        {"__module__": __name__},
+    )
+    duplicate_two = type(
+        "DuplicateStringTokenService",
+        (),
+        {"__module__": __name__},
+    )
+
+    class AmbiguousStringConsumer:
+        def __init__(self, service=Inject("DuplicateStringTokenService")):
+            self.service = service
+
+    @Module(providers=[duplicate_one, duplicate_two, AmbiguousStringConsumer])
+    class AmbiguousStringModule:
+        pass
+
+    with pytest.raises(TypeError, match="not local or exported"):
+        FaNestFactory.create(AmbiguousStringModule)
+
+
+PARENT_CHILD_TOKEN = token("PARENT_CHILD_TOKEN")
+
+
+class SelfConsumer:
+    def __init__(self, value: str = Self(PARENT_CHILD_TOKEN)):
+        self.value = value
+
+
+class SkipSelfConsumer:
+    def __init__(self, value: str = SkipSelf(PARENT_CHILD_TOKEN)):
+        self.value = value
+
+
+@Module(providers=[use_value(PARENT_CHILD_TOKEN, "parent")], exports=[PARENT_CHILD_TOKEN])
+class ParentTokenModule:
+    pass
+
+
+@Module(
+    imports=[ParentTokenModule],
+    providers=[
+        use_value(PARENT_CHILD_TOKEN, "child"),
+        SelfConsumer,
+        SkipSelfConsumer,
+    ],
+)
+class ChildTokenModule:
+    pass
+
+
+def test_self_and_skip_self_injection_respect_module_boundaries():
+    app = FaNestFactory.create(ChildTokenModule)
+    container = app.state.fanest_container
+
+    assert container.resolve(SelfConsumer, module_key=ChildTokenModule).value == "child"
+    assert container.resolve(SkipSelfConsumer, module_key=ChildTokenModule).value == "parent"
+
+
+class SkipSelfMissingConsumer:
+    def __init__(self, value: str = SkipSelf(PARENT_CHILD_TOKEN)):
+        self.value = value
+
+
+@Module(providers=[use_value(PARENT_CHILD_TOKEN, "child"), SkipSelfMissingConsumer])
+class SkipSelfMissingModule:
+    pass
+
+
+def test_skip_self_injection_fails_when_token_is_only_local():
+    with pytest.raises(TypeError, match="not local or exported"):
+        FaNestFactory.create(SkipSelfMissingModule)
+
+
+class InheritedGuard:
+    def can_activate(self, context):
+        return context.request.query_params.get("allow") == "yes"
+
+
+class BaseInheritedController:
+    @UseGuards(InheritedGuard)
+    @Get("/")
+    async def index(self, name: str = Query()):
+        return {"name": name}
+
+
+@Controller("inherited")
+class InheritedController(BaseInheritedController):
+    pass
+
+
+@Module(controllers=[InheritedController])
+class InheritedControllerModule:
+    pass
+
+
+def test_inherited_route_metadata_registers_implicit_enhancer_providers():
+    from fastapi.testclient import TestClient
+
+    client = TestClient(FaNestFactory.create(InheritedControllerModule))
+
+    assert client.get("/inherited", params={"name": "ada"}).status_code == 403
+    assert client.get("/inherited", params={"name": "ada", "allow": "yes"}).json() == {"name": "ada"}

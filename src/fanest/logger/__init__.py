@@ -1,3 +1,17 @@
-from fanest.logger.module import Logger, LoggerModule
+from fanest.logger.module import (
+    LOGGER_OPTIONS,
+    LogLevel,
+    Logger,
+    LoggerModule,
+    LoggerOptions,
+    StructuredLogFormatter,
+)
 
-__all__ = ["Logger", "LoggerModule"]
+__all__ = [
+    "LOGGER_OPTIONS",
+    "LogLevel",
+    "Logger",
+    "LoggerModule",
+    "LoggerOptions",
+    "StructuredLogFormatter",
+]
