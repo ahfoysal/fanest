@@ -142,6 +142,64 @@ class FaNestFactory:
         )
 
     @staticmethod
+    async def create_application_context(
+        root_module: Any,
+        *,
+        overrides: dict[type, object] | None = None,
+    ) -> "FaNestApplicationContext":
+        """Create a non-HTTP FaNest application: a DI container plus the full
+        provider lifecycle (``on_module_init`` / ``on_application_bootstrap``),
+        with no web server. Ideal for CLI tools, cron workers, scripts and tests
+        — the equivalent of NestJS ``NestFactory.createApplicationContext``.
+
+            context = await FaNestFactory.create_application_context(AppModule)
+            service = context.get(MyService)
+            ...
+            await context.close()
+
+        The returned object is also an async context manager that closes itself.
+        """
+        scanner = ModuleScanner()
+        await scanner.scan_async(root_module)
+        container = FaNestFactory._build_context_container(scanner, root_module, overrides)
+        context = FaNestApplicationContext(container, scanner.records, root_module)
+        await context.init()
+        return context
+
+    @staticmethod
+    def _build_context_container(
+        scanner: ModuleScanner,
+        root_module: Any,
+        overrides: dict[type, object] | None,
+    ) -> FaNestContainer:
+        container = FaNestContainer()
+        if scanner.records:
+            container.set_root_module(next(iter(scanner.records)))
+        for module_key, record in scanner.records.items():
+            imports = [scanner._module_key(imported_module) for imported_module in record.metadata.imports]
+            container.register_module(
+                module_key,
+                providers=[
+                    *record.metadata.providers,
+                    *record.metadata.gateways,
+                    *record.metadata.controllers,
+                ],
+                imports=imports,
+                exports=scanner.export_tokens(module_key),
+                global_module=record.metadata.global_module,
+            )
+        container.register(
+            ValueProvider(
+                provide=DiscoveryService,
+                use_value=DiscoveryService(container, scanner.providers, scanner.controllers, scanner.records),
+            )
+        )
+        for token, value in (overrides or {}).items():
+            container.override(token, value)
+        FaNestFactory._register_cqrs_handler_providers(scanner.records, container)
+        return container
+
+    @staticmethod
     def _create_from_scanner(
         scanner: ModuleScanner,
         root_module: Any,
@@ -389,76 +447,94 @@ class FaNestFactory:
                 *explicit_global_interceptors,
             ]
             global_filters[:] = [*await container.resolve_all_async(APP_FILTER), *explicit_global_filters]
-            instances = []
-            seen_instance_ids: set[int] = set()
-            ordered_records = FaNestFactory._lifecycle_records(records)
-            for module_key, record in ordered_records:
-                for provider in [*record.metadata.providers, *record.metadata.gateways]:
-                    if container.provider_token(provider) in APP_ENHANCER_TOKENS:
-                        continue
-                    provider_type = FaNestFactory._provider_type(provider)
-                    if provider_type is not None:
-                        FaNestFactory._register_event_provider(container, provider_type, module_key=module_key)
-                        FaNestFactory._register_graphql_resolver_provider(
-                            container,
-                            provider_type,
-                            module_key=module_key,
-                        )
-                        FaNestFactory._register_cqrs_handler_provider(
-                            container,
-                            provider_type,
-                            module_key=module_key,
-                        )
-                        FaNestFactory._register_queue_processor_provider(
-                            container,
-                            provider_type,
-                            module_key=module_key,
-                        )
-                        FaNestFactory._register_worker_task_provider(
-                            container,
-                            provider_type,
-                            module_key=module_key,
-                        )
-                    if FaNestFactory._is_request_scoped_provider(container, provider, module_key=module_key):
-                        continue
-                    instance = await container.resolve_async(
-                        container.provider_token(provider),
-                        module_key=module_key,
-                    )
-                    instance_id = id(instance)
-                    if instance_id in seen_instance_ids:
-                        continue
-                    seen_instance_ids.add(instance_id)
-                    instances.append(instance)
-                    FaNestFactory._register_passport_strategy(container, instance, module_key=module_key)
-                    hook = getattr(instance, "on_module_init", None)
-                    if hook is not None:
-                        await FaNestFactory._call_lifecycle_hook(hook)
-            for instance in instances:
-                hook = getattr(instance, "on_application_bootstrap", None)
-                if hook is not None:
-                    await FaNestFactory._call_lifecycle_hook(hook)
-            schedule_runner = ScheduleRunner(instances, registry=container.resolve(SchedulerRegistry))
-            schedule_runner.start()
+            instances, schedule_runner = await FaNestFactory._bootstrap_instances(records, container)
             yield
             close_all_microservices = getattr(app, "close_all_microservices", None)
             if close_all_microservices is not None:
                 await close_all_microservices()
-            await schedule_runner.stop()
-            for instance in reversed(instances):
-                hook = getattr(instance, "before_application_shutdown", None)
-                if hook is not None:
-                    await FaNestFactory._call_lifecycle_hook(hook)
-            for instance in reversed(instances):
-                hook = getattr(instance, "on_module_destroy", None)
-                if hook is not None:
-                    await FaNestFactory._call_lifecycle_hook(hook)
-            for instance in reversed(instances):
-                hook = getattr(instance, "on_application_shutdown", None)
-                if hook is not None:
-                    await FaNestFactory._call_lifecycle_hook(hook)
+            await FaNestFactory._shutdown_instances(instances, schedule_runner)
 
         return lifespan
+
+    @staticmethod
+    async def _bootstrap_instances(records: dict[Any, Any], container: FaNestContainer):
+        """Instantiate every non-request-scoped provider, register discovered
+        event/graphql/cqrs/queue/worker providers, run ``on_module_init`` then
+        ``on_application_bootstrap`` hooks, and start the schedule runner.
+
+        Shared by the HTTP lifespan and the standalone application context.
+        """
+        instances: list[Any] = []
+        seen_instance_ids: set[int] = set()
+        ordered_records = FaNestFactory._lifecycle_records(records)
+        for module_key, record in ordered_records:
+            for provider in [*record.metadata.providers, *record.metadata.gateways]:
+                if container.provider_token(provider) in APP_ENHANCER_TOKENS:
+                    continue
+                provider_type = FaNestFactory._provider_type(provider)
+                if provider_type is not None:
+                    FaNestFactory._register_event_provider(container, provider_type, module_key=module_key)
+                    FaNestFactory._register_graphql_resolver_provider(
+                        container,
+                        provider_type,
+                        module_key=module_key,
+                    )
+                    FaNestFactory._register_cqrs_handler_provider(
+                        container,
+                        provider_type,
+                        module_key=module_key,
+                    )
+                    FaNestFactory._register_queue_processor_provider(
+                        container,
+                        provider_type,
+                        module_key=module_key,
+                    )
+                    FaNestFactory._register_worker_task_provider(
+                        container,
+                        provider_type,
+                        module_key=module_key,
+                    )
+                if FaNestFactory._is_request_scoped_provider(container, provider, module_key=module_key):
+                    continue
+                instance = await container.resolve_async(
+                    container.provider_token(provider),
+                    module_key=module_key,
+                )
+                instance_id = id(instance)
+                if instance_id in seen_instance_ids:
+                    continue
+                seen_instance_ids.add(instance_id)
+                instances.append(instance)
+                FaNestFactory._register_passport_strategy(container, instance, module_key=module_key)
+                hook = getattr(instance, "on_module_init", None)
+                if hook is not None:
+                    await FaNestFactory._call_lifecycle_hook(hook)
+        for instance in instances:
+            hook = getattr(instance, "on_application_bootstrap", None)
+            if hook is not None:
+                await FaNestFactory._call_lifecycle_hook(hook)
+        schedule_runner = ScheduleRunner(instances, registry=container.resolve(SchedulerRegistry))
+        schedule_runner.start()
+        return instances, schedule_runner
+
+    @staticmethod
+    async def _shutdown_instances(instances: list[Any], schedule_runner: Any) -> None:
+        """Stop the schedule runner and run ``before_application_shutdown``,
+        ``on_module_destroy`` and ``on_application_shutdown`` hooks in reverse
+        registration order. Shared by the HTTP lifespan and the context."""
+        await schedule_runner.stop()
+        for instance in reversed(instances):
+            hook = getattr(instance, "before_application_shutdown", None)
+            if hook is not None:
+                await FaNestFactory._call_lifecycle_hook(hook)
+        for instance in reversed(instances):
+            hook = getattr(instance, "on_module_destroy", None)
+            if hook is not None:
+                await FaNestFactory._call_lifecycle_hook(hook)
+        for instance in reversed(instances):
+            hook = getattr(instance, "on_application_shutdown", None)
+            if hook is not None:
+                await FaNestFactory._call_lifecycle_hook(hook)
 
     @staticmethod
     async def _call_lifecycle_hook(hook):
@@ -889,3 +965,62 @@ class FaNestFactory:
                         module_key,
                     ),
                 )
+
+
+class FaNestApplicationContext:
+    """A non-HTTP FaNest application: a DI container plus the provider lifecycle,
+    without a web server. The Python equivalent of NestJS
+    ``NestFactory.createApplicationContext``. Create it via
+    ``await FaNestFactory.create_application_context(AppModule)``.
+
+    Resolve providers with :meth:`get` (sync) or :meth:`resolve` (async), and
+    release resources with :meth:`close`. It is also an async context manager::
+
+        async with await FaNestFactory.create_application_context(AppModule) as ctx:
+            await ctx.get(ReportService).run()
+    """
+
+    def __init__(self, container: "FaNestContainer", records: dict[Any, Any], root_module: Any) -> None:
+        self._container = container
+        self._records = records
+        self._root_module = root_module
+        self._instances: list[Any] = []
+        self._schedule_runner: Any = None
+        self._started = False
+        self._closed = False
+
+    @property
+    def container(self) -> "FaNestContainer":
+        return self._container
+
+    def get(self, token: Any, *, module_key: Any | None = None) -> Any:
+        """Resolve a provider synchronously (like NestJS ``app.get(Token)``)."""
+        return self._container.resolve(token, module_key=module_key)
+
+    async def resolve(self, token: Any, *, module_key: Any | None = None) -> Any:
+        """Resolve a provider, awaiting async factories/dependencies."""
+        return await self._container.resolve_async(token, module_key=module_key)
+
+    async def init(self) -> "FaNestApplicationContext":
+        """Instantiate providers and run bootstrap lifecycle hooks (idempotent)."""
+        if self._started:
+            return self
+        self._started = True
+        self._instances, self._schedule_runner = await FaNestFactory._bootstrap_instances(
+            self._records, self._container
+        )
+        return self
+
+    async def close(self) -> None:
+        """Run shutdown lifecycle hooks and stop scheduled jobs (idempotent)."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._started and self._schedule_runner is not None:
+            await FaNestFactory._shutdown_instances(self._instances, self._schedule_runner)
+
+    async def __aenter__(self) -> "FaNestApplicationContext":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        await self.close()

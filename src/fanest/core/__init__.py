@@ -1,5 +1,5 @@
 from fanest.core.application import FaNestApplication
-from fanest.core.factory import FaNestFactory
+from fanest.core.factory import FaNestApplicationContext, FaNestFactory
 from fanest.core.discovery import DiscoveryService, DiscoveredProvider
 from fanest.core.enhancers import APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE
 from fanest.core.metadata import DynamicModule
@@ -23,6 +23,7 @@ from fanest.core.providers import (
 __all__ = [
     "FaNestFactory",
     "FaNestApplication",
+    "FaNestApplicationContext",
     "APP_FILTER",
     "APP_GUARD",
     "APP_INTERCEPTOR",
