@@ -34,7 +34,37 @@ from fanest.core.metadata import (
     ParameterSource,
     RouteMetadata,
 )
-from fanest.websockets import UnsupportedSocketIoProtocolError, WebSocketManager
+from fanest.websockets import UnsupportedSocketIoProtocolError, WebSocketManager, WsException, WsResponse
+
+
+class _WebSocketAckCallback:
+    def __init__(
+        self,
+        adapter: "FastApiAdapter",
+        websocket: WebSocket,
+        ack_id: Any,
+        event: str,
+        namespace: str,
+    ) -> None:
+        self.adapter = adapter
+        self.websocket = websocket
+        self.ack_id = ack_id
+        self.event = event
+        self.namespace = namespace
+        self.sent = False
+
+    async def __call__(self, data: Any = None) -> bool:
+        if self.ack_id is None:
+            self.sent = True
+            return False
+        self.sent = await self.adapter._send_websocket_ack(
+            self.websocket,
+            self.ack_id,
+            self.event,
+            data,
+            namespace=self.namespace,
+        )
+        return self.sent
 
 
 class FastApiAdapter:
@@ -354,6 +384,7 @@ class FastApiAdapter:
                             break
                         continue
                     handler_callable = handler
+                    ack_callback = None
                     context = ExecutionContext(
                         handler=handler_callable,
                         controller=instance,
@@ -370,9 +401,12 @@ class FastApiAdapter:
                                 data,
                                 websocket,
                                 context,
+                                event=event,
                                 namespace=namespace,
+                                ack_id=self._websocket_ack_id(payload),
                             )
                         )
+                        ack_callback = context.kwargs.pop("__fanest_ack_callback__", None)
                     except Exception as exc:
                         handled = await self._run_filters_safe(instance, handler_callable, context, exc)
                         if not await self._send_websocket_event(
@@ -404,7 +438,28 @@ class FastApiAdapter:
                         ):
                             break
                         continue
+                    if ack_callback is not None and getattr(ack_callback, "sent", False):
+                        continue
+                    if ack_callback is not None and result is None:
+                        continue
                     if result is not None:
+                        if self._is_websocket_response_sequence(result):
+                            for item in result:
+                                if not await self._send_websocket_response_item(
+                                    websocket,
+                                    item,
+                                    namespace=namespace,
+                                ):
+                                    break
+                            continue
+                        if isinstance(result, WsResponse):
+                            if not await self._send_websocket_response_item(
+                                websocket,
+                                result,
+                                namespace=namespace,
+                            ):
+                                break
+                            continue
                         if isinstance(result, dict) and set(result) >= {"event", "data"}:
                             if not await self._send_websocket_event(
                                 websocket,
@@ -1056,7 +1111,9 @@ class FastApiAdapter:
         websocket: WebSocket,
         context: ExecutionContext,
         *,
+        event: str,
         namespace: str = "/",
+        ack_id: Any = None,
     ) -> dict[str, Any]:
         bound: dict[str, Any] = {}
         for name, parameter in self._parameters(handler).items():
@@ -1066,6 +1123,16 @@ class FastApiAdapter:
                     bound[name] = self._select_message_body(data, source)
                 elif source.source == "connected_socket":
                     bound[name] = websocket
+                elif source.source == "ack":
+                    ack_callback = _WebSocketAckCallback(
+                        self,
+                        websocket,
+                        ack_id,
+                        event,
+                        namespace,
+                    )
+                    bound[name] = ack_callback
+                    bound["__fanest_ack_callback__"] = ack_callback
                 elif source.source == "custom":
                     factory = source.default["factory"]
                     custom_data = source.default.get("data")
@@ -1144,12 +1211,45 @@ class FastApiAdapter:
     ) -> Any:
         try:
             handled = await self._run_filters(controller, handler, context, exc)
+            if handled is None and isinstance(exc, WsException):
+                return self._websocket_payload(exc.get_error())
             return self._websocket_filter_payload(handled)
         except Exception as filter_exc:
             return str(filter_exc)
 
     def _websocket_filter_payload(self, handled: Any) -> Any:
         return self._websocket_payload(handled)
+
+    def _is_websocket_response_sequence(self, result: Any) -> bool:
+        return isinstance(result, list | tuple) and all(self._is_websocket_response_item(item) for item in result)
+
+    def _is_websocket_response_item(self, result: Any) -> bool:
+        return isinstance(result, WsResponse) or (
+            isinstance(result, dict)
+            and isinstance(result.get("event"), str)
+            and "data" in result
+        )
+
+    async def _send_websocket_response_item(
+        self,
+        websocket: WebSocket,
+        result: Any,
+        *,
+        namespace: str = "/",
+    ) -> bool:
+        if isinstance(result, WsResponse):
+            return await self._send_websocket_event(
+                websocket,
+                result.event,
+                result.data,
+                namespace=namespace,
+            )
+        return await self._send_websocket_event(
+            websocket,
+            result["event"],
+            result["data"],
+            namespace=namespace,
+        )
 
     def _websocket_payload(self, handled: Any) -> Any:
         if not isinstance(handled, StarletteResponse):

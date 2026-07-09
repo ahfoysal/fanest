@@ -1,6 +1,7 @@
 from fanest.common.decorators import (
     Body,
     All,
+    Ack,
     BackgroundTasks,
     ConnectedSocket,
     Controller,
@@ -116,13 +117,14 @@ from fanest.core.providers import (
     use_value,
 )
 from fanest.mapped_types import IntersectionType, OmitType, PartialType, PickType
-from fanest.websockets import SocketIoServer, WebSocketManager
+from fanest.websockets import SocketIoServer, WebSocketManager, WsException, WsResponse
 
-__version__ = "0.3.0b3"
+__version__ = "0.3.0b4"
 
 __all__ = [
     "__version__",
     "BadRequestException",
+    "Ack",
     "APP_FILTER",
     "APP_GUARD",
     "APP_INTERCEPTOR",
@@ -236,6 +238,8 @@ __all__ = [
     "Catch",
     "WebSocketGateway",
     "WebSocketManager",
+    "WsException",
+    "WsResponse",
     "create_param_decorator",
     "disk_storage",
     "dynamic_module",

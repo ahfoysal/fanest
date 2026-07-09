@@ -6,6 +6,7 @@ from starlette.websockets import WebSocketDisconnect
 from typing import Any, cast
 
 from fanest import (
+    Ack,
     ConnectedSocket,
     FaNestFactory,
     MessageBody,
@@ -19,6 +20,8 @@ from fanest import (
     WebSocketGateway,
     WebSocketManager,
     SocketIoServer,
+    WsException,
+    WsResponse,
     ValidationPipe,
     create_param_decorator,
     forward_ref,
@@ -995,3 +998,84 @@ def test_socket_io_server_lifecycle_events_are_emitted():
         assert websocket.receive_json() == {"event": "echo", "data": "ok"}
 
     assert events == [("connect", "/"), ("disconnect", "/")]
+
+
+@WebSocketGateway("/nest-style-socket")
+class NestStyleSocketGateway:
+    @SubscribeMessage("manual")
+    async def manual_ack(self, data=MessageBody(), ack=Ack()):
+        await ack({"manual": data})
+        return None
+
+    @SubscribeMessage("custom-response")
+    async def custom_response(self, data=MessageBody()):
+        return WsResponse("custom-event", {"payload": data})
+
+    @SubscribeMessage("multi-response")
+    async def multi_response(self, data=MessageBody()):
+        return [
+            WsResponse("first-event", {"payload": data}),
+            {"event": "second-event", "data": {"payload": data}},
+        ]
+
+    @SubscribeMessage("fail")
+    async def fail(self):
+        raise WsException({"code": "WS_BAD", "message": "bad socket request"})
+
+
+@Module(gateways=[NestStyleSocketGateway])
+class NestStyleSocketModule:
+    pass
+
+
+def test_websocket_gateway_supports_ack_wsresponse_multiple_responses_and_wsexception():
+    client = TestClient(FaNestFactory.create(NestStyleSocketModule))
+
+    with client.websocket_connect("/nest-style-socket") as websocket:
+        websocket.send_json({"event": "manual", "data": {"ok": True}, "id": "ack-1"})
+        assert websocket.receive_json() == {
+            "event": "ack",
+            "data": {"id": "ack-1", "event": "manual", "data": {"manual": {"ok": True}}},
+        }
+
+        websocket.send_json({"event": "custom-response", "data": "value"})
+        assert websocket.receive_json() == {
+            "event": "custom-event",
+            "data": {"payload": "value"},
+        }
+
+        websocket.send_json({"event": "multi-response", "data": "batch"})
+        assert websocket.receive_json() == {
+            "event": "first-event",
+            "data": {"payload": "batch"},
+        }
+        assert websocket.receive_json() == {
+            "event": "second-event",
+            "data": {"payload": "batch"},
+        }
+
+        websocket.send_json({"event": "fail", "data": None})
+        assert websocket.receive_json() == {
+            "event": "error",
+            "data": {"code": "WS_BAD", "message": "bad socket request"},
+        }
+
+
+@WebSocketGateway(namespace="/namespace-option")
+class NamespaceOptionGateway:
+    @SubscribeMessage("echo")
+    async def echo(self, data):
+        return data
+
+
+@Module(gateways=[NamespaceOptionGateway])
+class NamespaceOptionModule:
+    pass
+
+
+def test_websocket_gateway_namespace_option_mounts_gateway_path():
+    client = TestClient(FaNestFactory.create(NamespaceOptionModule))
+
+    with client.websocket_connect("/namespace-option") as websocket:
+        websocket.send_json({"event": "echo", "data": "ok"})
+        assert websocket.receive_json() == {"event": "echo", "data": "ok"}

@@ -2,6 +2,7 @@ import base64
 import inspect
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import WebSocket
@@ -10,6 +11,21 @@ from starlette.websockets import WebSocketDisconnect
 
 class UnsupportedSocketIoProtocolError(RuntimeError):
     pass
+
+
+class WsException(Exception):
+    def __init__(self, error: Any = "WebSocket error"):
+        self.error = error
+        super().__init__(str(error))
+
+    def get_error(self) -> Any:
+        return self.error
+
+
+@dataclass(frozen=True)
+class WsResponse:
+    event: str
+    data: Any
 
 
 SocketListener = Callable[..., Any]

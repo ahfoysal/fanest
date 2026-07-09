@@ -18,6 +18,9 @@ class ControllerMetadata:
 @dataclass(frozen=True)
 class GatewayMetadata:
     path: str = "/ws"
+    namespace: str | None = None
+    transport: str = "websocket"
+    options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

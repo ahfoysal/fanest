@@ -30,9 +30,29 @@ def Controller(prefix: str = "", *, host: str | None = None) -> Callable[[type[T
     return decorator
 
 
-def WebSocketGateway(path: str = "/ws") -> Callable[[type[T]], type[T]]:
+def WebSocketGateway(
+    path: str = "/ws",
+    *,
+    namespace: str | None = None,
+    transport: str = "websocket",
+    transports: list[str] | tuple[str, ...] | None = None,
+    **options: Any,
+) -> Callable[[type[T]], type[T]]:
     def decorator(cls: type[T]) -> type[T]:
-        setattr(cls, "__fanest_gateway__", GatewayMetadata(path=path))
+        gateway_path = namespace or path
+        gateway_options = dict(options)
+        if transports is not None:
+            gateway_options["transports"] = tuple(transports)
+        setattr(
+            cls,
+            "__fanest_gateway__",
+            GatewayMetadata(
+                path=gateway_path,
+                namespace=namespace,
+                transport=transport,
+                options=gateway_options,
+            ),
+        )
         setattr(cls, "__fanest_provider__", ProviderMetadata())
         return cls
 
@@ -246,6 +266,10 @@ def MessageBody(name: str | None = None, *pipes: Any, default: Any = None) -> An
 
 def ConnectedSocket() -> Any:
     return ParameterSource(source="connected_socket")
+
+
+def Ack() -> Any:
+    return ParameterSource(source="ack")
 
 
 def create_param_decorator(factory: Callable[[Any, Any], Any]):

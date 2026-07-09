@@ -1,6 +1,7 @@
 from fanest.common.decorators import (
     Body,
     All,
+    Ack,
     BackgroundTasks,
     ConnectedSocket,
     Controller,
@@ -99,6 +100,7 @@ __all__ = [
     "BadRequestException",
     "BaseExceptionFilter",
     "All",
+    "Ack",
     "AnyFilesInterceptor",
     "BackgroundTasks",
     "Body",

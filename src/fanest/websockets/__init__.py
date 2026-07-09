@@ -4,6 +4,8 @@ from fanest.websockets.manager import (
     SocketIoServer,
     UnsupportedSocketIoProtocolError,
     WebSocketManager,
+    WsException,
+    WsResponse,
 )
 
 __all__ = [
@@ -12,4 +14,6 @@ __all__ = [
     "SocketIoServer",
     "UnsupportedSocketIoProtocolError",
     "WebSocketManager",
+    "WsException",
+    "WsResponse",
 ]
