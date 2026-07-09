@@ -121,6 +121,8 @@ class QueueBackend(Protocol):
 
     def jobs(self, queue: str | None = None) -> list[Job]: ...
 
+    def remove(self, job_ids: set[str]) -> None: ...
+
     def clear(self) -> None: ...
 
 
@@ -144,6 +146,9 @@ class MemoryQueueBackend:
         if queue is None:
             return list(self._jobs)
         return [job for job in self._jobs if job.queue == queue]
+
+    def remove(self, job_ids: set[str]) -> None:
+        self._jobs = [job for job in self._jobs if job.id not in job_ids]
 
     def clear(self) -> None:
         self._jobs.clear()
@@ -192,6 +197,17 @@ class RedisStreamQueueBackend:
                 job = self._decode_job(queue_name, decoded_fields)
                 jobs_by_id[job.id] = job
         return list(jobs_by_id.values())
+
+    def remove(self, job_ids: set[str]) -> None:
+        for queue in self._queues():
+            stream = self._stream(queue)
+            entries = self._client.xrange(stream) or []
+            for entry_id, fields in entries:
+                if fields is None:
+                    continue
+                decoded = {self._decode(key): self._decode(value) for key, value in cast(dict[Any, Any], fields).items()}
+                if decoded.get("id") in job_ids:
+                    self._client.xdel(stream, entry_id)
 
     def clear(self) -> None:
         for queue in self._queues():
@@ -336,7 +352,7 @@ class QueueService:
             await self._update_backend(delayed_job)
             self._schedule_background(self._dispatch_after_delay(job))
             return job
-        await self._dispatch_job(job, raise_on_failure=True)
+        await self._dispatch_job(job, raise_on_failure=False)
         return job
 
     async def _dispatch_after_delay(self, job: Job) -> None:
@@ -461,27 +477,42 @@ class QueueService:
         for index, job in enumerate(self._failed):
             if job.id == job_id:
                 del self._failed[index]
+                self._dead_letter = [entry for entry in self._dead_letter if entry.id != job_id]
                 retry = self._copy_job(job, attempts=0, status="waiting", failed_reason=None, finished_at=None)
                 await self._dispatch_job(retry, raise_on_failure=True)
                 return retry
         raise KeyError(f"No failed queue job registered for {job_id!r}.")
 
     def clean(self, *, status: str | None = None, queue: str | None = None) -> int:
-        removed = 0
-        if status in (None, "completed"):
-            before = len(self._completed)
-            self._completed = [job for job in self._completed if queue is not None and job.queue != queue]
-            removed += before - len(self._completed)
-        if status in (None, "failed"):
-            before = len(self._failed)
-            self._failed = [job for job in self._failed if queue is not None and job.queue != queue]
-            removed += before - len(self._failed)
-        if status in (None, "dead_letter"):
-            before = len(self._dead_letter)
-            self._dead_letter = [job for job in self._dead_letter if queue is not None and job.queue != queue]
-            removed += before - len(self._dead_letter)
         if status not in (None, "completed", "failed", "dead_letter"):
             raise ValueError("Queue clean status must be completed, failed, dead_letter, or None.")
+        removed = 0
+        removed_ids: set[str] = set()
+
+        def _split(jobs: list[Job]) -> tuple[list[Job], list[Job]]:
+            kept: list[Job] = []
+            dropped: list[Job] = []
+            for job in jobs:
+                if queue is not None and job.queue != queue:
+                    kept.append(job)
+                else:
+                    dropped.append(job)
+            return kept, dropped
+
+        if status in (None, "completed"):
+            self._completed, dropped = _split(self._completed)
+            removed += len(dropped)
+            removed_ids.update(job.id for job in dropped)
+        if status in (None, "failed"):
+            self._failed, dropped = _split(self._failed)
+            removed += len(dropped)
+            removed_ids.update(job.id for job in dropped)
+        if status in (None, "dead_letter"):
+            self._dead_letter, dropped = _split(self._dead_letter)
+            removed += len(dropped)
+            removed_ids.update(job.id for job in dropped)
+        if removed_ids:
+            self._remove_from_backend(removed_ids)
         return removed
 
     async def close(self) -> None:
@@ -553,6 +584,12 @@ class QueueService:
         result = update(job)
         if inspect.isawaitable(result):
             await result
+
+    def _remove_from_backend(self, job_ids: set[str]) -> None:
+        remove = getattr(self.backend, "remove", None)
+        if remove is None:
+            return
+        remove(job_ids)
 
     def _backoff_delay(self, job: Job, attempt: int) -> float:
         backoff = job.metadata.get("backoff")

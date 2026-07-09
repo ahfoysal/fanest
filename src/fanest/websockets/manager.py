@@ -102,6 +102,8 @@ class WebSocketManager:
                         sockets.update(room_sockets)
                 return list(sockets)
             return list(self._rooms.get((self._normalize_namespace(namespace), room), set()))
+        if namespace is not None:
+            return list(self._namespaces.get(self._normalize_namespace(namespace), set()))
         return list(self._connections)
 
     def namespace_connections(self, namespace: str) -> list[WebSocket]:

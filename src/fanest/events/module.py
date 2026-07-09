@@ -40,7 +40,15 @@ class EventEmitterOptions:
 
 
 async def _await_all(awaitables: list[Any]) -> list[Any]:
-    return await asyncio.gather(*awaitables, return_exceptions=True)
+    results = await asyncio.gather(*awaitables, return_exceptions=True)
+    # With capture_errors=False the per-handler guard re-raises; gather turns
+    # that into a result value, so surface the first exception here to match the
+    # propagation behaviour of synchronous handlers. When capture_errors=True the
+    # guard swallows errors and records them, so no exception reaches this point.
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    return results
 
 
 class _EmitResult:
@@ -77,32 +85,34 @@ class EventEmitter:
         handlers = self._handlers.setdefault(event, [])
         if self._handler_key(handler) not in {self._handler_key(item) for item in handlers}:
             self._enforce_max_listeners(event, len(handlers) + len(self._once_handlers.get(event, [])) + 1)
-            self._priorities[self._handler_key(handler)] = priority
+            self._priorities[(event, self._handler_key(handler))] = priority
             if prepend:
                 handlers.insert(0, handler)
             else:
                 handlers.append(handler)
-            handlers.sort(key=lambda item: self._priorities.get(self._handler_key(item), 0), reverse=True)
+            handlers.sort(key=lambda item: self._priorities.get((event, self._handler_key(item)), 0), reverse=True)
 
     def once(self, event: str, handler: Callable[..., Any], *, prepend: bool = False, priority: int = 0) -> None:
         handlers = self._once_handlers.setdefault(event, [])
         if self._handler_key(handler) not in {self._handler_key(item) for item in handlers}:
             self._enforce_max_listeners(event, len(handlers) + len(self._handlers.get(event, [])) + 1)
-            self._priorities[self._handler_key(handler)] = priority
+            self._priorities[(event, self._handler_key(handler))] = priority
             if prepend:
                 handlers.insert(0, handler)
             else:
                 handlers.append(handler)
-            handlers.sort(key=lambda item: self._priorities.get(self._handler_key(item), 0), reverse=True)
+            handlers.sort(key=lambda item: self._priorities.get((event, self._handler_key(item)), 0), reverse=True)
 
     def off(self, event: str, handler: Callable[..., Any]) -> None:
         key = self._handler_key(handler)
-        self._handlers[event] = [
-            item for item in self._handlers.get(event, []) if self._handler_key(item) != key
-        ]
-        self._once_handlers[event] = [
-            item for item in self._once_handlers.get(event, []) if self._handler_key(item) != key
-        ]
+        if event in self._handlers:
+            self._handlers[event] = [
+                item for item in self._handlers[event] if self._handler_key(item) != key
+            ]
+        if event in self._once_handlers:
+            self._once_handlers[event] = [
+                item for item in self._once_handlers[event] if self._handler_key(item) != key
+            ]
 
     def emit(self, event: str, payload: Any = None) -> _EmitResult:
         """Emit an event to all registered handlers.
@@ -172,14 +182,16 @@ class EventEmitter:
         self._errors.clear()
 
     def _collect_handlers(self, event: str) -> list[Callable[..., Any]]:
-        handlers: list[Callable[..., Any]] = []
+        collected: list[tuple[int, Callable[..., Any]]] = []
         event_names = self._matching_event_names(event)
         for name in event_names:
-            handlers.extend(self._handlers.get(name, []))
+            for handler in self._handlers.get(name, []):
+                collected.append((self._priorities.get((name, self._handler_key(handler)), 0), handler))
         for name in event_names:
-            handlers.extend(self._once_handlers.pop(name, []))
-        handlers.sort(key=lambda item: self._priorities.get(self._handler_key(item), 0), reverse=True)
-        return handlers
+            for handler in self._once_handlers.pop(name, []):
+                collected.append((self._priorities.get((name, self._handler_key(handler)), 0), handler))
+        collected.sort(key=lambda item: item[0], reverse=True)
+        return [handler for _, handler in collected]
 
     def _matching_event_names(self, event: str) -> list[str]:
         names = [event]

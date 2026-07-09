@@ -1,4 +1,5 @@
 import inspect
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
@@ -128,7 +129,8 @@ class I18nService:
         for name in _placeholders(value):
             replacement = _lookup_arg(args, name)
             if replacement is not None:
-                rendered = rendered.replace("{" + name + "}", str(replacement))
+                pattern = r"\{\s*" + re.escape(name) + r"\s*\}"
+                rendered = re.sub(pattern, str(replacement), rendered)
         return rendered
 
 

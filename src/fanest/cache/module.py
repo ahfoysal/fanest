@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import inspect
 import json
@@ -33,17 +34,21 @@ class MemoryCacheStore:
         if expires_at is not None and expires_at < time.monotonic():
             self._store.pop(key, None)
             return None
-        return value
+        return copy.deepcopy(value)
 
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         expires_at = time.monotonic() + ttl if ttl is not None else None
-        self._store[key] = (expires_at, value)
+        self._store[key] = (expires_at, copy.deepcopy(value))
 
     def clear(self) -> None:
         self._store.clear()
 
     def delete(self, key: str) -> None:
         self._store.pop(key, None)
+
+    def delete_prefix(self, prefix: str) -> None:
+        for key in [k for k in self._store if k == prefix or k.startswith(f"{prefix}|")]:
+            self._store.pop(key, None)
 
 
 class RedisCacheStore:
@@ -94,6 +99,16 @@ class RedisCacheStore:
 
     def delete(self, key: str) -> None:
         self._client.delete(self._key(key))
+
+    def delete_prefix(self, prefix: str) -> None:
+        full = self._key(prefix)
+        matched = []
+        for raw in self._client.scan_iter(match=f"{full}*"):
+            candidate = raw.decode() if isinstance(raw, bytes) else raw
+            if candidate == full or candidate.startswith(f"{full}|"):
+                matched.append(raw)
+        if matched:
+            self._client.delete(*matched)
 
     def clear(self) -> None:
         keys = list(self._client.scan_iter(match=f"{self.prefix}*"))
@@ -211,6 +226,24 @@ class CacheService:
     async def del_async(self, key: str) -> None:
         await self.delete_async(key)
 
+    def delete_prefix(self, prefix: str) -> None:
+        delete_prefix = getattr(self.store, "delete_prefix", None)
+        if delete_prefix is not None:
+            result = delete_prefix(prefix)
+            if inspect.isawaitable(result):
+                raise RuntimeError("Async cache stores require delete_prefix_async().")
+            return
+        self.delete(prefix)
+
+    async def delete_prefix_async(self, prefix: str) -> None:
+        delete_prefix = getattr(self.store, "delete_prefix", None)
+        if delete_prefix is not None:
+            result = delete_prefix(prefix)
+            if inspect.isawaitable(result):
+                await result
+            return
+        await self.delete_async(prefix)
+
     def mdelete(self, *keys: str) -> None:
         for key in keys:
             self.delete(key)
@@ -245,7 +278,10 @@ class CacheInterceptor:
         request = context.request
         evict_key = getattr(context.handler, "__fanest_cache_evict__", None)
         if evict_key is not None:
-            await self.cache_service.delete_async(evict_key)
+            # Stored GET responses use composite keys (``evict_key|query:...``,
+            # ``evict_key|identity:...``); evict by prefix so authenticated and
+            # query-param variants are invalidated too, not only the bare key.
+            await self.cache_service.delete_prefix_async(evict_key)
             return await call_next()
         if request.method != "GET":
             return await call_next()

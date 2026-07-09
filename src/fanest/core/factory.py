@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Any, cast
 
 from fastapi import FastAPI
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -422,7 +423,7 @@ class FaNestFactory:
                 return handled
             if handled is not None:
                 return JSONResponse(status_code=400, content=handled)
-            return JSONResponse(status_code=422, content={"detail": exc.errors()})
+            return JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
 
     @staticmethod
     def _lifespan(
@@ -440,14 +441,24 @@ class FaNestFactory:
     ):
         @asynccontextmanager
         async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-            global_guards[:] = [*await container.resolve_all_async(APP_GUARD), *explicit_global_guards]
-            global_pipes[:] = [*await container.resolve_all_async(APP_PIPE), *explicit_global_pipes]
-            global_interceptors[:] = [
-                *await container.resolve_all_async(APP_INTERCEPTOR),
-                *explicit_global_interceptors,
-            ]
-            global_filters[:] = [*await container.resolve_all_async(APP_FILTER), *explicit_global_filters]
-            instances, schedule_runner = await FaNestFactory._bootstrap_instances(records, container)
+            resolved_guards = await container.resolve_all_async(APP_GUARD)
+            resolved_pipes = await container.resolve_all_async(APP_PIPE)
+            resolved_interceptors = await container.resolve_all_async(APP_INTERCEPTOR)
+            resolved_filters = await container.resolve_all_async(APP_FILTER)
+            global_guards[:] = [*resolved_guards, *explicit_global_guards]
+            global_pipes[:] = [*resolved_pipes, *explicit_global_pipes]
+            global_interceptors[:] = [*resolved_interceptors, *explicit_global_interceptors]
+            global_filters[:] = [*resolved_filters, *explicit_global_filters]
+            instances, schedule_runner = await FaNestFactory._bootstrap_instances(
+                records,
+                container,
+                extra_instances=[
+                    *resolved_guards,
+                    *resolved_pipes,
+                    *resolved_interceptors,
+                    *resolved_filters,
+                ],
+            )
             yield
             close_all_microservices = getattr(app, "close_all_microservices", None)
             if close_all_microservices is not None:
@@ -457,10 +468,20 @@ class FaNestFactory:
         return lifespan
 
     @staticmethod
-    async def _bootstrap_instances(records: dict[Any, Any], container: FaNestContainer):
+    async def _bootstrap_instances(
+        records: dict[Any, Any],
+        container: FaNestContainer,
+        *,
+        extra_instances: list[Any] | None = None,
+    ):
         """Instantiate every non-request-scoped provider, register discovered
         event/graphql/cqrs/queue/worker providers, run ``on_module_init`` then
         ``on_application_bootstrap`` hooks, and start the schedule runner.
+
+        ``extra_instances`` are already-resolved instances (e.g. global
+        APP_* enhancer instances) that participate in the lifecycle so their
+        ``on_module_init`` / ``on_application_bootstrap`` / shutdown hooks fire
+        exactly once, like any other DI provider.
 
         Shared by the HTTP lifespan and the standalone application context.
         """
@@ -494,7 +515,7 @@ class FaNestFactory:
                         provider_type,
                         module_key=module_key,
                     )
-                if FaNestFactory._is_request_scoped_provider(container, provider, module_key=module_key):
+                if FaNestFactory._is_non_singleton_provider(container, provider, module_key=module_key):
                     continue
                 instance = await container.resolve_async(
                     container.provider_token(provider),
@@ -509,6 +530,15 @@ class FaNestFactory:
                 hook = getattr(instance, "on_module_init", None)
                 if hook is not None:
                     await FaNestFactory._call_lifecycle_hook(hook)
+        for instance in extra_instances or []:
+            instance_id = id(instance)
+            if instance_id in seen_instance_ids:
+                continue
+            seen_instance_ids.add(instance_id)
+            instances.append(instance)
+            hook = getattr(instance, "on_module_init", None)
+            if hook is not None:
+                await FaNestFactory._call_lifecycle_hook(hook)
         for instance in instances:
             hook = getattr(instance, "on_application_bootstrap", None)
             if hook is not None:
@@ -594,6 +624,19 @@ class FaNestFactory:
         if located_provider is None:
             return False
         return container._effective_scope(token, located_provider, module_key=module_key) == "request"
+
+    @staticmethod
+    def _is_non_singleton_provider(
+        container: FaNestContainer,
+        provider: Any,
+        *,
+        module_key: Any | None = None,
+    ) -> bool:
+        token = container.provider_token(provider)
+        _, located_provider = container._locate_provider(token, module_key)
+        if located_provider is None:
+            return False
+        return container._effective_scope(token, located_provider, module_key=module_key) != "singleton"
 
     @staticmethod
     def _register_event_provider(

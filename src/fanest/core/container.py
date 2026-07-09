@@ -425,7 +425,10 @@ class FaNestContainer:
         if isinstance(provider, ExistingProvider):
             dependencies = [provider.use_existing]
         elif isinstance(provider, FactoryProvider):
-            dependencies = list(provider.inject)
+            dependencies = [
+                token.token if isinstance(token, InjectMarker) else token
+                for token in provider.inject
+            ]
         elif isinstance(provider, ClassProvider):
             dependencies = self._class_dependencies(provider.use_class)
         elif inspect.isclass(provider):
@@ -463,59 +466,61 @@ class FaNestContainer:
 
     def _resolve_injected_token(self, marker: Any, module_key: Any | None = None) -> Any:
         if isinstance(marker, InjectMarker):
-            try:
-                if isinstance(marker.token, ForwardRef):
-                    return self._resolve_forward_ref(
-                        marker.token,
-                        module_key,
-                        self_only=marker.self_only,
-                        skip_self=marker.skip_self,
-                    )
-                token = self._unwrap_token(marker.token)
-                token = self._resolve_named_token(token, module_key)
-                if marker.self_only:
-                    return self.resolve_local(token, module_key)
-                owner_key, provider = self._locate_provider(token, module_key, skip_local=marker.skip_self)
-                if provider is None:
-                    raise KeyError(token)
-                if self._cache_key(owner_key, token) in self._current_resolving():
-                    return ForwardRefProxy(self, token, module_key=owner_key)
-                if marker.skip_self:
-                    return self.resolve(token, module_key=owner_key)
-                return self.resolve(token, module_key=module_key)
-            except Exception:
-                if marker.optional:
-                    return marker.default
-                raise
+            if marker.optional and not self._injected_provider_exists(marker, module_key):
+                return marker.default
+            if isinstance(marker.token, ForwardRef):
+                return self._resolve_forward_ref(
+                    marker.token,
+                    module_key,
+                    self_only=marker.self_only,
+                    skip_self=marker.skip_self,
+                )
+            token = self._unwrap_token(marker.token)
+            token = self._resolve_named_token(token, module_key)
+            if marker.self_only:
+                return self.resolve_local(token, module_key)
+            owner_key, provider = self._locate_provider(token, module_key, skip_local=marker.skip_self)
+            if provider is None:
+                raise KeyError(token)
+            if self._cache_key(owner_key, token) in self._current_resolving():
+                return ForwardRefProxy(self, token, module_key=owner_key)
+            if marker.skip_self:
+                return self.resolve(token, module_key=owner_key)
+            return self.resolve(token, module_key=module_key)
         return self.resolve(self._unwrap_token(marker), module_key=module_key)
 
     async def _resolve_injected_token_async(self, marker: Any, module_key: Any | None = None) -> Any:
         if isinstance(marker, InjectMarker):
-            try:
-                if isinstance(marker.token, ForwardRef):
-                    return await self._resolve_forward_ref_async(
-                        marker.token,
-                        module_key,
-                        self_only=marker.self_only,
-                        skip_self=marker.skip_self,
-                    )
-                token = self._unwrap_token(marker.token)
-                token = self._resolve_named_token(token, module_key)
-                if marker.self_only:
-                    return await self.resolve_local_async(token, module_key)
-                owner_key, provider = self._locate_provider(token, module_key, skip_local=marker.skip_self)
-                if provider is None:
-                    raise KeyError(token)
-                if self._cache_key(owner_key, token) in self._current_resolving():
-                    return ForwardRefProxy(self, token, module_key=owner_key)
-                if marker.skip_self:
-                    return await self.resolve_async(token, module_key=owner_key)
-                return await self.resolve_async(token, module_key=module_key)
-            except Exception:
-                if marker.optional:
-                    return marker.default
-                raise
+            if marker.optional and not self._injected_provider_exists(marker, module_key):
+                return marker.default
+            if isinstance(marker.token, ForwardRef):
+                return await self._resolve_forward_ref_async(
+                    marker.token,
+                    module_key,
+                    self_only=marker.self_only,
+                    skip_self=marker.skip_self,
+                )
+            token = self._unwrap_token(marker.token)
+            token = self._resolve_named_token(token, module_key)
+            if marker.self_only:
+                return await self.resolve_local_async(token, module_key)
+            owner_key, provider = self._locate_provider(token, module_key, skip_local=marker.skip_self)
+            if provider is None:
+                raise KeyError(token)
+            if self._cache_key(owner_key, token) in self._current_resolving():
+                return ForwardRefProxy(self, token, module_key=owner_key)
+            if marker.skip_self:
+                return await self.resolve_async(token, module_key=owner_key)
+            return await self.resolve_async(token, module_key=module_key)
         return await self.resolve_async(self._unwrap_token(marker), module_key=module_key)
+
+    def _injected_provider_exists(self, marker: InjectMarker, module_key: Any | None = None) -> bool:
+        token = self._unwrap_token(marker.token)
+        token = self._resolve_named_token(token, module_key)
+        if marker.self_only:
+            return token in self._module_providers.get(module_key, {})
+        _, provider = self._locate_provider(token, module_key, skip_local=marker.skip_self)
+        return provider is not None
 
     def _unwrap_token(self, token: Any) -> Any:
         if isinstance(token, ForwardRef):

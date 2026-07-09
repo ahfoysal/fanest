@@ -18,6 +18,9 @@ from fanest.core.scanner import ModuleScanner
 from fanest import Inject, Module, use_value
 
 
+_UNHANDLED = object()
+
+
 @dataclass(frozen=True)
 class MicroserviceContext:
     pattern: Any
@@ -117,7 +120,7 @@ class JsonMicroserviceSerializer:
         return json.dumps(value, default=str).encode()
 
     def deserialize(self, value: bytes | str | None) -> Any:
-        if value is None or value == "":
+        if value is None or value in (b"", ""):
             return None
         if isinstance(value, bytes):
             value = value.decode()
@@ -297,7 +300,7 @@ class InMemoryTransport:
                 result = handler(data, context)
                 if inspect.isawaitable(result):
                     await result
-            except BaseException as exc:
+            except Exception as exc:
                 errors.append(exc)
         if errors:
             raise MicroserviceEventError(pattern, errors)
@@ -674,6 +677,8 @@ class TcpTransport(InMemoryTransport):
     def create_context(self, **kwargs: Any) -> MicroserviceContext:
         metadata = kwargs.get("metadata") or {}
         kwargs.setdefault("transport", self.name)
+        kwargs["headers"] = kwargs.get("headers") or {}
+        kwargs["metadata"] = metadata
         return TcpContext(
             **kwargs,
             remote_address=metadata.get("remote_address"),
@@ -840,6 +845,8 @@ class NatsTransport(_BrokerTransport):
     def create_context(self, **kwargs: Any) -> MicroserviceContext:
         metadata = kwargs.get("metadata") or {}
         kwargs.setdefault("transport", self.name)
+        kwargs["headers"] = kwargs.get("headers") or {}
+        kwargs["metadata"] = metadata
         return NatsContext(**kwargs, subject=metadata.get("subject"))
 
 
@@ -997,6 +1004,8 @@ class RabbitMqTransport(_BrokerTransport):
     def create_context(self, **kwargs: Any) -> MicroserviceContext:
         metadata = kwargs.get("metadata") or {}
         kwargs.setdefault("transport", self.name)
+        kwargs["headers"] = kwargs.get("headers") or {}
+        kwargs["metadata"] = metadata
         return RmqContext(
             **kwargs,
             routing_key=metadata.get("routing_key"),
@@ -1253,6 +1262,8 @@ class KafkaTransport(_BrokerTransport):
     def create_context(self, **kwargs: Any) -> MicroserviceContext:
         metadata = kwargs.get("metadata") or {}
         kwargs.setdefault("transport", self.name)
+        kwargs["headers"] = kwargs.get("headers") or {}
+        kwargs["metadata"] = metadata
         return KafkaContext(
             **kwargs,
             topic=metadata.get("topic"),
@@ -1314,10 +1325,15 @@ class GrpcTransport(_BrokerTransport):
         return result
 
     async def emit(self, pattern: Any, data: Any) -> None:
+        if self.event_handlers.get(serialize_pattern(pattern)) or self.stub is None:
+            await super().emit(pattern, data)
+            return
         await self.send(pattern, data)
 
     def create_context(self, **kwargs: Any) -> MicroserviceContext:
         kwargs.setdefault("transport", self.name)
+        kwargs["headers"] = kwargs.get("headers") or {}
+        kwargs["metadata"] = kwargs.get("metadata") or {}
         return GrpcContext(**kwargs, method=str(kwargs.get("pattern")))
 
 
@@ -1371,6 +1387,8 @@ class MqttTransport(_BrokerTransport):
     def create_context(self, **kwargs: Any) -> MicroserviceContext:
         metadata = kwargs.get("metadata") or {}
         kwargs.setdefault("transport", self.name)
+        kwargs["headers"] = kwargs.get("headers") or {}
+        kwargs["metadata"] = metadata
         return MqttContext(**kwargs, topic=metadata.get("topic") or str(kwargs.get("pattern")))
 
 
@@ -1633,7 +1651,7 @@ class MicroserviceServer:
                     )
                 except Exception as exc:
                     handled = await self._run_filters(instance, method, execution_context, exc, module_key)
-                    if handled is not None:
+                    if handled is not _UNHANDLED:
                         return handled
                     raise
             finally:
@@ -1717,7 +1735,7 @@ class MicroserviceServer:
             if inspect.isawaitable(result):
                 result = await result
             return result
-        return None
+        return _UNHANDLED
 
     def _collect(self, provider: Any, handler: Callable[..., Any], key: str) -> list[Any]:
         provider_values = getattr(provider.__class__, key, [])
@@ -1781,10 +1799,13 @@ class ClientProxy:
                     return await call
                 return await asyncio.wait_for(call, timeout=self.options.timeout)
             except asyncio.TimeoutError as exc:
-                error: BaseException = MicroserviceTimeoutError(
-                    f"Microservice request timed out for pattern: {pattern!r}"
-                )
-                error.__cause__ = exc
+                if self.options.timeout is None:
+                    error: BaseException = exc
+                else:
+                    error = MicroserviceTimeoutError(
+                        f"Microservice request timed out for pattern: {pattern!r}"
+                    )
+                    error.__cause__ = exc
             except Exception as exc:
                 error = exc
             if attempt >= self.options.retries:

@@ -177,7 +177,7 @@ class MongoCollection:
             documents = _sort_documents(documents, sort)
         if skip:
             documents = documents[skip:]
-        if limit is not None:
+        if limit:
             documents = documents[:limit]
         if projection is not None:
             documents = [_project_document(document, projection) for document in documents]
@@ -294,7 +294,13 @@ def _apply_update(stored: dict[str, Any], update: dict[str, Any]) -> None:
             current = _get_path(stored, key, [])
             if not isinstance(current, list):
                 raise TypeError(f"Cannot apply $push to non-array field: {key}")
-            current.append(value)
+            if isinstance(value, dict) and "$each" in value:
+                items = value["$each"]
+                if not isinstance(items, list):
+                    raise TypeError("$push $each requires an array value.")
+                current.extend(items)
+            else:
+                current.append(value)
             _set_path(stored, key, current)
         for key, value in update.get("$pull", {}).items():
             current = _get_path(stored, key, [])
@@ -327,8 +333,18 @@ def _sort_documents(
     ordered = documents
     for field, direction in reversed(sort_fields):
         reverse = direction in {-1, "desc", "DESC", "descending"}
-        ordered = sorted(ordered, key=lambda item, field=field: _get_path(item, field), reverse=reverse)
+        ordered = sorted(
+            ordered,
+            key=lambda item, field=field: _sort_key(_get_path(item, field)),
+            reverse=reverse,
+        )
     return ordered
+
+
+def _sort_key(value: Any) -> tuple[bool, Any]:
+    # Order missing/None values first (as MongoDB treats null as lowest) so
+    # sorting a heterogeneous collection never compares None against a value.
+    return (value is not None, value)
 
 
 def _project_document(document: dict[str, Any], projection: list[str] | dict[str, int | bool]) -> dict[str, Any]:
@@ -392,13 +408,13 @@ def _matches_operators(actual: Any, exists: bool, operators: dict[str, Any]) -> 
             return False
         if operator == "$ne" and actual == expected:
             return False
-        if operator == "$gt" and (not exists or actual <= expected):
+        if operator == "$gt" and (not exists or not _range_matches(actual, expected, "$gt")):
             return False
-        if operator == "$gte" and (not exists or actual < expected):
+        if operator == "$gte" and (not exists or not _range_matches(actual, expected, "$gte")):
             return False
-        if operator == "$lt" and (not exists or actual >= expected):
+        if operator == "$lt" and (not exists or not _range_matches(actual, expected, "$lt")):
             return False
-        if operator == "$lte" and (not exists or actual > expected):
+        if operator == "$lte" and (not exists or not _range_matches(actual, expected, "$lte")):
             return False
         if operator == "$in" and not _value_in(actual, expected):
             return False
@@ -406,11 +422,28 @@ def _matches_operators(actual: Any, exists: bool, operators: dict[str, Any]) -> 
             return False
         if operator == "$exists" and exists is not bool(expected):
             return False
-        if operator == "$regex" and not re.search(str(expected), str(actual or "")):
+        if operator == "$regex" and (not isinstance(actual, str) or not re.search(str(expected), actual)):
             return False
         if operator not in {"$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$exists", "$regex"}:
             raise ValueError(f"Unsupported Mongo query operator: {operator}")
     return True
+
+
+def _range_matches(actual: Any, expected: Any, operator: str) -> bool:
+    # Compare with a guard so that null/incomparable field values are treated
+    # as non-matching (per MongoDB BSON total-ordering) rather than raising.
+    try:
+        if operator == "$gt":
+            return actual > expected
+        if operator == "$gte":
+            return actual >= expected
+        if operator == "$lt":
+            return actual < expected
+        if operator == "$lte":
+            return actual <= expected
+    except TypeError:
+        return False
+    return False
 
 
 def _value_in(actual: Any, expected_values: Any) -> bool:

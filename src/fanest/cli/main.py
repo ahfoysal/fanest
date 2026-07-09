@@ -281,6 +281,10 @@ def generate_resource(
 ) -> None:
     name = _artifact_name(name)
     source_root = _source_root(project)
+    if module and not dry_run:
+        # Validate the parent module up front so a missing --module target fails
+        # cleanly before any resource files are written.
+        _resolve_parent_module(module, source_root)
     resource = _resource_dir(name, dry_run, exist_ok=force, source_root=source_root)
     class_name = _class_name(name)
     _write_file(resource / f"{name}_service.py", _service_template(class_name), dry_run, force=force)
@@ -319,12 +323,21 @@ def generate_module(
 ) -> None:
     name = _artifact_name(name)
     source_root = _source_root(project)
-    resource = _resource_dir(name, dry_run, source_root=source_root)
+    if module and not dry_run:
+        _resolve_parent_module(module, source_root)
     class_name = _class_name(name)
-    target = source_root / f"{name}_module.py" if flat else resource / f"{name}_module.py"
+    if flat:
+        _validate_artifact_name(name)
+        if not dry_run:
+            source_root.mkdir(parents=True, exist_ok=True)
+            (source_root / "__init__.py").touch()
+        target = source_root / f"{name}_module.py"
+    else:
+        resource = _resource_dir(name, dry_run, source_root=source_root)
+        target = resource / f"{name}_module.py"
     _write_file(target, _module_template(name, class_name), dry_run, force=force)
     if module:
-        _register_module_import(module, name, class_name, dry_run, source_root=source_root)
+        _register_module_import(module, name, class_name, dry_run, source_root=source_root, flat=flat)
     typer.echo(f"Generated module {name}")
 
 
@@ -698,7 +711,7 @@ def _validate_artifact_name(name: str) -> None:
 
 
 def _class_name(name: str) -> str:
-    return "".join(part.capitalize() for part in name.split("_"))
+    return "".join(part[:1].upper() + part[1:] for part in name.split("_"))
 
 
 def _source_root(project: str | None = None) -> Path:
@@ -824,7 +837,12 @@ def _resource_dir(
     _validate_artifact_name(name)
     if dry_run:
         return source_root / name
-    return _ensure_resource_dir(name, exist_ok=exist_ok, source_root=source_root)
+    try:
+        return _ensure_resource_dir(name, exist_ok=exist_ok, source_root=source_root)
+    except FileExistsError as exc:
+        raise typer.BadParameter(
+            f"Resource directory already exists: {source_root / name}. Use --force to overwrite."
+        ) from exc
 
 
 def _write_file(path: Path, content: str, dry_run: bool, *, force: bool = False) -> None:
@@ -1016,6 +1034,25 @@ def _display_name(value: Any) -> str:
     return value.__class__.__name__
 
 
+def _resolve_parent_module(parent_module: str, source_root: Path) -> Path:
+    """Return the existing parent module file for ``--module`` registration.
+
+    Tries the path as given, then relative to ``source_root``. Raises a clean
+    ``typer.BadParameter`` if neither exists so callers can fail fast before
+    generating any files.
+    """
+    target = Path(parent_module)
+    if target.exists():
+        return target
+    candidate = source_root / parent_module
+    if candidate.exists():
+        return candidate
+    raise typer.BadParameter(
+        f"Parent module not found: {parent_module}. "
+        "Expected an existing module file to register the import into."
+    )
+
+
 def _register_module_import(
     parent_module: str,
     child_name: str,
@@ -1023,14 +1060,18 @@ def _register_module_import(
     dry_run: bool,
     *,
     source_root: Path = Path("src"),
+    flat: bool = False,
 ) -> None:
-    target = Path(parent_module)
-    if not target.exists():
-        target = source_root / parent_module
-    import_line = _module_import_line(target, child_name, child_class, source_root=source_root)
     if dry_run:
+        target = Path(parent_module)
+        if not target.exists():
+            target = source_root / parent_module
         typer.echo(f"Would update {target} with {child_class}Module")
         return
+    target = _resolve_parent_module(parent_module, source_root)
+    import_line = _module_import_line(
+        target, child_name, child_class, source_root=source_root, flat=flat
+    )
     content = target.read_text(encoding="utf-8")
     if import_line not in content:
         content = import_line + content
@@ -1049,20 +1090,26 @@ def _module_import_line(
     child_class: str,
     *,
     source_root: Path = Path("src"),
+    flat: bool = False,
 ) -> str:
-    child_module = f"{child_name}.{child_name}_module"
-    try:
-        target.resolve().relative_to(source_root.resolve())
-    except ValueError:
-        pass
-    else:
-        return f"from .{child_module} import {child_class}Module\n"
-    try:
-        target.relative_to(Path("src"))
-    except ValueError:
-        package = source_root.name
-        return f"from {package}.{child_module} import {child_class}Module\n"
-    return f"from .{child_module} import {child_class}Module\n"
+    # The child module lives at ``<source_root>/<child>/<child>_module.py`` by
+    # default, or flat at ``<source_root>/<child>_module.py`` with ``--flat``.
+    child_module = f"{child_name}_module" if flat else f"{child_name}.{child_name}_module"
+    for base in (source_root, Path("src")):
+        try:
+            relative = target.resolve().relative_to(base.resolve())
+        except ValueError:
+            continue
+        # Emit a relative import with enough leading dots to climb from the
+        # parent module's package up to ``source_root`` regardless of how deeply
+        # the parent is nested (e.g. ``src/app/app_module.py``).
+        depth = len(relative.parts) - 1
+        dots = "." * (depth + 1)
+        return f"from {dots}{child_module} import {child_class}Module\n"
+    # Parent lives outside the source root (e.g. a top-level main.py): fall back
+    # to an absolute import rooted at the source-root package.
+    package = source_root.name
+    return f"from {package}.{child_module} import {child_class}Module\n"
 
 
 def _module_with_import(module_name: str):
@@ -1106,10 +1153,9 @@ app = FaNestFactory.create(AppModule)
 
 def _project_pyproject_template(name: str) -> str:
     package_name = _distribution_name(name)
-    framework_version = "0.3.0b1"
     return f'''[project]
 name = "{package_name}"
-version = "{framework_version}"
+version = "0.1.0"
 description = "A FaNest application"
 requires-python = ">=3.10"
 dependencies = [
@@ -1154,10 +1200,9 @@ __all__ = ["app"]
 
 def _workspace_pyproject_template(name: str) -> str:
     package_name = _distribution_name(name)
-    framework_version = "0.3.0b1"
     return f'''[project]
 name = "{package_name}"
-version = "{framework_version}"
+version = "0.1.0"
 description = "A FaNest workspace"
 requires-python = ">=3.10"
 dependencies = [

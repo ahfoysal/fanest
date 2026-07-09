@@ -270,6 +270,12 @@ class ModuleScanner:
         self_only: bool = False,
         skip_self: bool = False,
     ) -> None:
+        if isinstance(dependency, InjectMarker):
+            if dependency.optional:
+                return
+            self_only = self_only or dependency.self_only
+            skip_self = skip_self or dependency.skip_self
+            dependency = dependency.token
         dependency = self._unwrap_token(dependency)
         dependency = self._resolve_named_token(dependency, visible_tokens)
         if self_only:

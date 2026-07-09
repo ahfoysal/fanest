@@ -51,7 +51,8 @@ def test_metrics_registry_supports_labels_gauges_observations_and_escaping():
     assert 'workers_active{pool="default"} 2' in rendered
     assert 'job_duration_seconds_count{queue="email"} 2' in rendered
     assert 'job_duration_seconds_sum{queue="email"} 0.6000000000000001' in rendered
-    assert 'job_duration_seconds{quantile="0.5",queue="email"} 0.4' in rendered
+    # Histograms expose only _bucket/_sum/_count; quantile series belong to summaries.
+    assert "quantile=" not in rendered
 
 
 def test_metrics_registry_rejects_invalid_names_labels_and_values():

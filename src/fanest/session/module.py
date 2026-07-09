@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+import time
 from http.cookies import SimpleCookie
 from typing import Any, Protocol
 from uuid import uuid4
@@ -20,15 +21,28 @@ class SessionStore(Protocol):
 class MemorySessionStore:
     def __init__(self) -> None:
         self.sessions: dict[str, dict[str, Any]] = {}
+        self._expiry: dict[str, float] = {}
 
     def load(self, session_id: str) -> dict[str, Any]:
+        expiry = self._expiry.get(session_id)
+        if expiry is not None and expiry <= time.time():
+            self.delete(session_id)
+            return {}
         return dict(self.sessions.get(session_id, {}))
 
     def save(self, session_id: str, session: dict[str, Any], *, max_age: int | None = None) -> None:
+        if max_age is not None and max_age <= 0:
+            self.delete(session_id)
+            return
         self.sessions[session_id] = dict(session)
+        if max_age is not None:
+            self._expiry[session_id] = time.time() + max_age
+        else:
+            self._expiry.pop(session_id, None)
 
     def delete(self, session_id: str) -> None:
         self.sessions.pop(session_id, None)
+        self._expiry.pop(session_id, None)
 
 
 class RedisSessionStore:
@@ -156,7 +170,7 @@ class FaNestSessionMiddleware:
             return ((str(uuid4()), {}, True) if self.store is not None else (None, {}, True))
 
     def _cookie(self, session: dict[str, Any], *, session_id: str | None = None, had_cookie: bool = False) -> str | None:
-        if not session and not had_cookie and not self.rolling:
+        if not session and not had_cookie:
             return None
         if self.store is not None:
             session_id = session_id or str(uuid4())

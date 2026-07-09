@@ -323,8 +323,7 @@ async def test_queue_stats_track_failed_dead_letter_and_retry():
     queue = QueueService()
     queue.register_processor("reports", "generate", always_fails)
 
-    with pytest.raises(RuntimeError):
-        await queue.add("reports", {}, name="generate", attempts=2)
+    await queue.add("reports", {}, name="generate", attempts=2)
 
     stats = queue.stats("reports")
     assert attempts == [1, 2]

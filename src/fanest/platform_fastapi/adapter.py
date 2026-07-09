@@ -11,7 +11,8 @@ from fastapi import Body as FastBody
 from fastapi import BackgroundTasks as FastBackgroundTasks
 from fastapi import Cookie, FastAPI, File, Form as FastForm, Header, HTTPException, Path, Query, Request, Response, UploadFile, WebSocket
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTasks as StarletteBackgroundTasks
 from starlette.responses import Response as StarletteResponse
 from starlette.websockets import WebSocketDisconnect
@@ -496,9 +497,10 @@ class FastApiAdapter:
                 pass
             finally:
                 websocket_manager = self.container.resolve(WebSocketManager)
-                namespaces = list(websocket_manager._socket_namespaces.get(websocket, {"/"}))
-                for namespace in namespaces:
-                    await websocket_manager.emit_lifecycle("disconnect", websocket, namespace)
+                # Connect is emitted exactly once (for the default namespace) on
+                # connection, so disconnect must fire exactly once per socket to keep
+                # the lifecycle symmetric and presence counters balanced.
+                await websocket_manager.emit_lifecycle("disconnect", websocket)
                 websocket_manager.disconnect(websocket)
                 await self._run_websocket_disconnect_hook(instance, websocket)
 
@@ -606,6 +608,20 @@ class FastApiAdapter:
                             RedirectResponse(redirect["url"], status_code=redirect["status_code"]),
                             response_headers,
                         )
+                    content_type_override = next(
+                        (value for name, value in response_headers if name.lower() == "content-type"),
+                        None,
+                    )
+                    if content_type_override is not None and not isinstance(result, StarletteResponse):
+                        # FastAPI merges the injected sub-response headers into the
+                        # serialized JSONResponse by *appending*, which duplicates a
+                        # singular header like Content-Type. Build the response here so
+                        # the explicit @SetHeader value overrides FastAPI's default.
+                        built = JSONResponse(
+                            jsonable_encoder(result),
+                            status_code=response.status_code or self._route_status_code(handler_function),
+                        )
+                        return self._with_response_headers(built, response_headers)
                     return result
 
                 result = await self._run_interceptors(controller, handler, context, call_handler)
@@ -834,6 +850,8 @@ class FastApiAdapter:
             instance = await self._resolve_component_async(pipe, owner=controller)
             for name, value in list(kwargs.items()):
                 parameter = self._parameters(handler).get(name)
+                if parameter is not None and self._is_native_framework_parameter(name, parameter):
+                    continue
                 if parameter is not None and not self._should_pipe_parameter(parameter):
                     continue
                 annotation = parameter.annotation if parameter is not None else None
@@ -1502,14 +1520,45 @@ class FastApiAdapter:
                 return 1
         return None
 
+    def _route_status_code(self, handler: Callable[..., Any]) -> int:
+        route_metadata = getattr(handler, "__fanest_route__", None)
+        if route_metadata is not None:
+            code = route_metadata.options.get("status_code")
+            if code is not None:
+                return code
+        pending = getattr(handler, "__fanest_pending_route_options__", None)
+        if pending:
+            code = pending.get("status_code")
+            if code is not None:
+                return code
+        return 200
+
     def _response_headers(self, controller: Any, handler: Callable[..., Any]) -> list[tuple[str, str]]:
         controller_values = getattr(controller.__class__, "__fanest_response_headers__", [])
         handler_values = self._metadata(handler, "__fanest_response_headers__", [])
         return [*controller_values, *handler_values]
 
+    _SINGULAR_RESPONSE_HEADERS = frozenset(
+        {
+            "content-type",
+            "content-length",
+            "content-disposition",
+            "content-range",
+            "location",
+            "etag",
+            "last-modified",
+            "retry-after",
+        }
+    )
+
     def _append_response_headers(self, response: StarletteResponse, headers: list[tuple[str, str]]) -> None:
         for name, value in headers:
-            response.headers.append(name, value)
+            # Singular headers (e.g. Content-Type) must override any existing value
+            # rather than produce a duplicate header line, matching NestJS semantics.
+            if name.lower() in self._SINGULAR_RESPONSE_HEADERS:
+                response.headers[name] = value
+            else:
+                response.headers.append(name, value)
 
     def _with_response_headers(
         self,

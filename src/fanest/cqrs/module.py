@@ -236,12 +236,19 @@ class EventBus:
 
     def _handlers_for(self, message_type: type) -> list[Any]:
         handlers = [*self._handlers.get(message_type, [])]
-        if not self.options.allow_subclass_handlers:
-            return handlers
-        for registered_type, candidates in self._handlers.items():
-            if registered_type is not message_type and issubclass(message_type, registered_type):
-                handlers.extend(candidates)
-        return handlers
+        if self.options.allow_subclass_handlers:
+            for registered_type, candidates in self._handlers.items():
+                if registered_type is not message_type and issubclass(message_type, registered_type):
+                    handlers.extend(candidates)
+        deduped: list[Any] = []
+        seen: set[Any] = set()
+        for handler in handlers:
+            key = self._handler_key(handler)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(handler)
+        return deduped
 
     def _sagas_for(self, message_type: type) -> list[Callable[[Any], Any]]:
         sagas = [*self._sagas.get(message_type, []), *self._sagas.get(object, [])]

@@ -129,7 +129,11 @@ class MetricsRegistry:
         self.inc_gauge(name, -amount, labels=labels)
 
     def observe(self, name: str, value: float, labels: dict[str, Any] | None = None) -> None:
-        self.histogram(name)
+        existing = self._definitions.get(name)
+        if existing is None:
+            self.histogram(name)
+        elif existing.kind != "histogram":
+            raise ValueError(f"Metric {name!r} is already registered as {existing.kind}")
         self._validate_number(value)
         self._histograms[self._key(name, labels)].append(value)
 
@@ -182,10 +186,6 @@ class MetricsRegistry:
                 lines.append(f"{name}_bucket{self._labels_from_dict(infinite_labels)} {count}")
             lines.append(f"{name}_count{self._labels(labels)} {count}")
             lines.append(f"{name}_sum{self._labels(labels)} {self._format(total)}")
-            for quantile, value in self._quantiles(values).items():
-                quantile_labels = dict(labels)
-                quantile_labels["quantile"] = quantile
-                lines.append(f"{name}{self._labels_from_dict(quantile_labels)} {self._format(value)}")
         return "\n".join(lines) + ("\n" if lines else "")
 
     def _key(self, name: str, labels: dict[str, Any] | None = None) -> tuple[str, tuple[tuple[str, str], ...]]:

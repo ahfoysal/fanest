@@ -22,6 +22,8 @@ from fanest.core.metadata import ExecutionContext
 
 T = TypeVar("T")
 
+_SUBSCRIPTION_FILTERED = object()
+
 
 @dataclass(frozen=True)
 class GraphQLField:
@@ -105,7 +107,7 @@ class GraphQLDataLoader:
         return await future
 
     async def load_many(self, keys: list[Any]) -> list[Any]:
-        return [await self.load(key) for key in keys]
+        return list(await asyncio.gather(*(self.load(key) for key in keys)))
 
     async def dispatch(self) -> None:
         pending = self._pending
@@ -923,9 +925,11 @@ class GraphQLSchema:
         if complexity_issue is not None:
             return await self._finalize_response({"errors": [self._format_validation_issue(complexity_issue)]})
         if not fields:
-            return await self._finalize_response(
-                {"errors": [self._format_error("GraphQL document must contain at least one field")]}
-            )
+            if self._selection_is_empty(document, operation_start):
+                return await self._finalize_response(
+                    {"errors": [self._format_error("GraphQL document must contain at least one field")]}
+                )
+            return await self._finalize_response({"data": {}})
         handlers = {
             "query": self.queries,
             "mutation": self.mutations,
@@ -1061,6 +1065,8 @@ class GraphQLSchema:
                 if hasattr(result, "__aiter__"):
                     async for item in result:
                         item = await self._apply_subscription_hooks(handler, item, variables, graphql_field.args)
+                        if item is _SUBSCRIPTION_FILTERED:
+                            continue
                         for hook_result in await self._run_plugin_hook(
                             "after_resolve",
                             item,
@@ -1074,6 +1080,8 @@ class GraphQLSchema:
                 elif inspect.isgenerator(result):
                     for item in result:
                         item = await self._apply_subscription_hooks(handler, item, variables, graphql_field.args)
+                        if item is _SUBSCRIPTION_FILTERED:
+                            continue
                         for hook_result in await self._run_plugin_hook(
                             "after_resolve",
                             item,
@@ -1086,6 +1094,8 @@ class GraphQLSchema:
                         yield {"data": {graphql_field.response_key: shaped}}
                 else:
                     result = await self._apply_subscription_hooks(handler, result, variables, graphql_field.args)
+                    if result is _SUBSCRIPTION_FILTERED:
+                        continue
                     for hook_result in await self._run_plugin_hook(
                         "after_resolve",
                         result,
@@ -1340,6 +1350,8 @@ class GraphQLSchema:
                 result = await result
             if operation == "subscription":
                 result = await self._apply_subscription_hooks(handler, result, variables, args)
+                if result is _SUBSCRIPTION_FILTERED:
+                    result = None
             return await self._serialize_handler_result(handler, result)
 
         return await self._run_interceptors(handler, context, call_handler)
@@ -1383,7 +1395,7 @@ class GraphQLSchema:
             if inspect.isawaitable(allowed):
                 allowed = await allowed
             if not allowed:
-                return None
+                return _SUBSCRIPTION_FILTERED
         resolve_hook = metadata.get("resolve")
         if resolve_hook is not None:
             resolved = resolve_hook(result, variables, args)
@@ -1460,6 +1472,10 @@ class GraphQLSchema:
     async def _coerce_scalar(self, value: Any, annotation: Any, *, hook_name: str) -> Any:
         if value is None:
             return None
+        if hook_name == "serialize" and isinstance(value, enum.Enum):
+            metadata = getattr(type(value), "__fanest_graphql_type__", None)
+            if metadata is not None and metadata.kind == "enum":
+                return value.name
         scalar = self._scalar_for_annotation(annotation)
         if scalar is None:
             return value
@@ -1743,6 +1759,20 @@ class GraphQLSchema:
                 seen_fragments,
             )
             return self._with_type_condition(fields, type_condition), end
+        if index < len(document) and document[index] in {"{", "@"}:
+            include, index = self._read_directives(document, index, variables)
+            selection_start = self._next_selection_start(document, index)
+            end = self._skip_balanced(document, selection_start, "{", "}")
+            if not include:
+                return [], end
+            fields = self._fields_from_selection(
+                document,
+                variables,
+                selection_start,
+                fragments,
+                seen_fragments,
+            )
+            return fields, end
         if index >= len(document) or not (document[index].isalpha() or document[index] == "_"):
             raise GraphQLParseError("Expected fragment name")
         name, index = self._read_name(document, index)
@@ -1974,6 +2004,13 @@ class GraphQLSchema:
                 continue
             index += 1
         return -1
+
+    def _selection_is_empty(self, document: str, operation_start: int | None = None) -> bool:
+        start = self._selection_start(document, operation_start)
+        if start < 0:
+            return True
+        index = self._skip_ignored(document, start + 1)
+        return index >= len(document) or document[index] == "}"
 
     def _read_name(self, document: str, index: int) -> tuple[str, int]:
         start = index
@@ -2277,6 +2314,7 @@ class GraphQLSchema:
             if index >= len(document) or document[index] != ":":
                 raise GraphQLParseError(f"Expected type for variable ${name}")
             index += 1
+            type_start = index
             while index < len(document):
                 index = self._skip_ignored(document, index)
                 if index >= len(document) or document[index] in {"=", ")", "$"}:
@@ -2288,9 +2326,12 @@ class GraphQLSchema:
                     index += 1
                     continue
                 break
+            nullable = not document[type_start:index].strip().endswith("!")
             if index < len(document) and document[index] == "=":
                 default, index = self._read_value(document, index + 1, defaults)
                 defaults[name] = default
+            elif nullable:
+                defaults.setdefault(name, None)
         raise GraphQLParseError("Unclosed variable definition list")
 
     def _name_at(self, document: str, index: int, name: str) -> bool:

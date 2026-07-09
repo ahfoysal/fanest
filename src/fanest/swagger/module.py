@@ -52,7 +52,6 @@ class DocumentBuilder:
             "scheme": "bearer",
             "bearerFormat": "JWT",
         }
-        self._config["security"].append({name: []})
         return self
 
     def add_basic_auth(self, name: str = "basic") -> "DocumentBuilder":
@@ -60,7 +59,6 @@ class DocumentBuilder:
             "type": "http",
             "scheme": "basic",
         }
-        self._config["security"].append({name: []})
         return self
 
     def add_api_key(
@@ -75,7 +73,6 @@ class DocumentBuilder:
             "name": header_name,
             "in": location,
         }
-        self._config["security"].append({name: []})
         return self
 
     def add_cookie_auth(
@@ -89,7 +86,6 @@ class DocumentBuilder:
             "name": cookie_name,
             "in": "cookie",
         }
-        self._config["security"].append({name: []})
         return self
 
     def add_oauth2(
@@ -114,7 +110,6 @@ class DocumentBuilder:
             "type": "oauth2",
             "flows": resolved_flows,
         }
-        self._config["security"].append({name: list(scopes or {})})
         return self
 
     def add_security(
@@ -125,7 +120,20 @@ class DocumentBuilder:
         requirements: list[str] | None = None,
     ) -> "DocumentBuilder":
         self._config["components"]["securitySchemes"][name] = scheme
-        self._config["security"].append({name: requirements or []})
+        return self
+
+    def add_global_security(
+        self,
+        name: str,
+        scopes: list[str] | None = None,
+    ) -> "DocumentBuilder":
+        """Opt-in: apply a security requirement to every operation in the document.
+
+        Defining a scheme (via ``add_bearer_auth``/``add_security``/etc.) only
+        registers it under ``components.securitySchemes``; call this to make it a
+        top-level (global) requirement, mirroring NestJS ``addSecurityRequirements``.
+        """
+        self._config["security"].append({name: scopes or []})
         return self
 
     def build(self) -> dict[str, Any]:
@@ -133,6 +141,10 @@ class DocumentBuilder:
 
 
 class SwaggerModule:
+    _HTTP_METHODS = frozenset(
+        {"get", "post", "put", "patch", "delete", "head", "options", "trace"}
+    )
+
     @staticmethod
     def create_document(app: FastAPI, config: dict[str, Any] | None = None) -> dict[str, Any]:
         schema = app.openapi()
@@ -155,6 +167,7 @@ class SwaggerModule:
                     schema_components[key] = value
         if config.get("security"):
             schema["security"] = config["security"]
+        SwaggerModule._expand_fanest_schema_extensions(schema)
         SwaggerModule._add_extra_model_schemas(schema)
         SwaggerModule._merge_multipart_inline_schema_refs(schema)
         SwaggerModule._dedupe_operation_parameters(schema)
@@ -203,7 +216,11 @@ class SwaggerModule:
             "",
         ]
         for path, methods in document.get("paths", {}).items():
+            if not isinstance(methods, dict):
+                continue
             for method, operation in methods.items():
+                if method.lower() not in SwaggerModule._HTTP_METHODS or not isinstance(operation, dict):
+                    continue
                 operation_id = operation.get("operationId") or SwaggerModule._operation_name(method, path)
                 lines.extend(
                     [
@@ -226,9 +243,24 @@ class SwaggerModule:
         if not _FANEST_EXTRA_MODELS:
             return
         schemas = schema.setdefault("components", {}).setdefault("schemas", {})
+        # ``_FANEST_EXTRA_MODELS`` is a process-global registry shared by every app
+        # in the interpreter, so injecting all of it would leak unrelated models into
+        # this document. Only add models that this document actually references
+        # (transitively), computing references to a fixed point so a referenced model
+        # can in turn pull in the models it depends on.
+        pending: dict[str, type] = {}
         for model in _FANEST_EXTRA_MODELS:
-            if hasattr(model, "model_json_schema"):
-                schema_name = getattr(model, "__fanest_schema_name__", model.__name__)
+            if not hasattr(model, "model_json_schema"):
+                continue
+            schema_name = getattr(model, "__fanest_schema_name__", model.__name__)
+            pending.setdefault(schema_name, model)
+        while pending:
+            referenced = SwaggerModule._collect_schema_ref_names(schema)
+            resolvable = [name for name in pending if name in referenced]
+            if not resolvable:
+                break
+            for schema_name in resolvable:
+                model = pending.pop(schema_name)
                 try:
                     model_schema = model.model_json_schema(
                         ref_template="#/components/schemas/{model}"
@@ -241,6 +273,21 @@ class SwaggerModule:
                 SwaggerModule._expand_fanest_schema_extensions(model_schema)
                 SwaggerModule._strip_hidden_properties(model_schema)
                 schemas[schema_name] = model_schema
+
+    @staticmethod
+    def _collect_schema_ref_names(value: Any, found: set[str] | None = None) -> set[str]:
+        if found is None:
+            found = set()
+        if isinstance(value, dict):
+            ref = value.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+                found.add(ref.rsplit("/", 1)[-1])
+            for item in value.values():
+                SwaggerModule._collect_schema_ref_names(item, found)
+        elif isinstance(value, list):
+            for item in value:
+                SwaggerModule._collect_schema_ref_names(item, found)
+        return found
 
     @staticmethod
     def _fallback_model_schema(model: type) -> dict[str, Any]:

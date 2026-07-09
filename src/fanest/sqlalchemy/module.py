@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -467,11 +468,24 @@ def InjectConnection(name: str | None = None):
 
 def Transactional(service_attr: str = "db"):
     def decorator(handler):
+        try:
+            signature = inspect.signature(handler)
+        except (TypeError, ValueError):
+            signature = None
+        accepts_session = signature is not None and (
+            "session" in signature.parameters
+            or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+        )
+
         @wraps(handler)
         async def wrapper(self, *args, **kwargs):
             service = getattr(self, service_attr)
             async with service.transaction() as session:
-                kwargs.setdefault("session", session)
+                if accepts_session:
+                    kwargs.setdefault("session", session)
                 return await handler(self, *args, **kwargs)
 
         return wrapper

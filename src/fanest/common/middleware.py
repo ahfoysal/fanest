@@ -116,5 +116,12 @@ class FaNestMiddlewareAdapter:
             return True
         normalized = "/" + pattern.strip("/")
         if normalized.endswith("*"):
-            return path.startswith(normalized[:-1].rstrip("/"))
+            base = normalized[:-1]
+            if base.endswith("/"):
+                # '/x/*' segment wildcard: require the boundary slash so it
+                # does not leak onto the bare parent or unrelated siblings.
+                return path.startswith(base)
+            # '/x*' prefix wildcard: match the base exactly or a sub-path,
+            # but not siblings like '/x-admin'.
+            return path.rstrip("/") == base or path.startswith(base + "/")
         return path.rstrip("/") == normalized.rstrip("/")

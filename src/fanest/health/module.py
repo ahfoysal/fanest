@@ -142,7 +142,10 @@ class HttpHealthIndicator(HealthIndicator):
     def _check(self) -> dict[str, Any]:
         with request.urlopen(self.url, timeout=self.timeout_seconds) as response:
             status_code = response.status
-        ok = status_code in self.expected_status
+        expected = self.expected_status
+        if isinstance(expected, int):
+            expected = (expected,)
+        ok = status_code in expected
         return {"status": "ok" if ok else "error", "url": self.url, "status_code": status_code}
 
 
