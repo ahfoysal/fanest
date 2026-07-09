@@ -389,3 +389,54 @@ def test_javascript_orm_stub_packages_import_and_raise_clear_alternatives():
     for module in (StubSequelizeModule, StubMikroOrmModule, StubPrismaModule):
         with pytest.raises(UnsupportedDatabaseRecipeError, match="SqlAlchemyModule / TypeOrmModule"):
             module.for_feature([])
+
+
+def test_create_all_and_advisory_lock_are_multi_instance_safe():
+    """create_all() runs under an advisory lock so concurrent replicas don't race;
+    the in-process fallback (SQLite) serializes concurrent lock holders."""
+    import asyncio
+
+    from sqlalchemy import text
+    from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+    class Base(DeclarativeBase):
+        pass
+
+    class Widget(Base):
+        __tablename__ = "adv_widgets"
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str] = mapped_column(String(40))
+
+    service = SqlAlchemyService({"database_url": "sqlite+aiosqlite:///:memory:"})
+
+    async def scenario():
+        # create_all builds the schema and is idempotent when called again
+        await service.create_all(Base.metadata)
+        await service.create_all(Base.metadata)
+        async with service.session_scope() as session:
+            count = (await session.execute(text("select count(*) from adv_widgets"))).scalar()
+
+        # concurrent advisory_lock holders run one at a time (no interleaving)
+        order: list[tuple[str, int]] = []
+
+        async def worker(index: int) -> None:
+            async with service.advisory_lock("bootstrap"):
+                order.append(("enter", index))
+                await asyncio.sleep(0.01)
+                order.append(("exit", index))
+
+        await asyncio.gather(*(worker(i) for i in range(4)))
+        await service.close()
+        return count, order
+
+    count, order = asyncio.run(scenario())
+    assert count == 0
+    # every enter is immediately followed by the same worker's exit
+    assert all(
+        order[i][0] == "enter" and order[i + 1][0] == "exit" and order[i][1] == order[i + 1][1]
+        for i in range(0, len(order), 2)
+    )
+    # advisory-lock key is a stable signed 64-bit int (pg_advisory_lock compatible)
+    key = SqlAlchemyService._advisory_lock_key("bootstrap")
+    assert -(2**63) <= key < 2**63
+    assert key == SqlAlchemyService._advisory_lock_key("bootstrap")
