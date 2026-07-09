@@ -97,7 +97,7 @@ from fanest.common.upload import (
 from fanest.common.versioning import VERSION_NEUTRAL, VersioningOptions, VersioningType
 from fanest.core.application import FaNestApplication
 from fanest.core.enhancers import APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE
-from fanest.core.factory import FaNestFactory
+from fanest.core.factory import FaNestApplicationContext, FaNestFactory
 from fanest.core.discovery import DiscoveryService, DiscoveredProvider
 from fanest.core.lazy_loader import LazyModuleLoader
 from fanest.core.metadata import DynamicModule
@@ -148,6 +148,7 @@ __all__ = [
     "Expose",
     "FaNestFactory",
     "FaNestApplication",
+    "FaNestApplicationContext",
     "FaNestHttpException",
     "GatewayTimeoutException",
     "FileInterceptor",
