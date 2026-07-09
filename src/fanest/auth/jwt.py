@@ -257,7 +257,7 @@ class AuthModule:
 
         providers = [use_value(JWT_OPTIONS, options), JwtService]
         if global_guard:
-            providers.extend([use_class(APP_GUARD, JwtAuthGuard), RolesGuard])
+            providers.extend([use_class(APP_GUARD, JwtAuthGuard), use_class(APP_GUARD, RolesGuard)])
 
         @Module(
             providers=providers,
@@ -285,7 +285,7 @@ class AuthModule:
 
         providers = [provider_factory(JWT_OPTIONS, load_options, inject=inject or []), JwtService]
         if global_guard:
-            providers.extend([use_class(APP_GUARD, JwtAuthGuard), RolesGuard])
+            providers.extend([use_class(APP_GUARD, JwtAuthGuard), use_class(APP_GUARD, RolesGuard)])
 
         @Module(
             providers=providers,
