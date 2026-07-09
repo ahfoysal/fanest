@@ -74,3 +74,35 @@ def test_auth_decorators_are_reflector_visible_and_jwt_module_alias_works():
     assert reflector.get("roles", RolesController.method) == ["user"]
     assert reflector.get("is_public", GlobalJwtController.public) is True
     assert JwtModule is AuthModule
+
+
+def test_global_guard_enforces_roles_guard_regression():
+    """Regression: AuthModule(global_guard=True) must bind RolesGuard as a global
+    guard so @Roles is enforced (previously RolesGuard was a plain provider and
+    @Roles was silently bypassed)."""
+    from fastapi.testclient import TestClient
+
+    from fanest import Controller, FaNestFactory, Get, Module
+    from fanest.auth import JwtModule, JwtService, Roles
+
+    @Controller("admin-area")
+    class AdminController:
+        @Get("/")
+        @Roles("admin")
+        async def secret(self):
+            return {"data": "secret"}
+
+    @Module(
+        imports=[JwtModule.for_root(secret="x" * 32, is_global=True, global_guard=True)],
+        controllers=[AdminController],
+    )
+    class SecuredModule:
+        pass
+
+    app = FaNestFactory.create(SecuredModule)
+    jwt_service = app.state.fanest_container.resolve(JwtService)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        user_token = jwt_service.sign({"sub": "1", "roles": ["user"]})
+        admin_token = jwt_service.sign({"sub": "2", "roles": ["admin"]})
+        assert client.get("/admin-area/", headers={"Authorization": f"Bearer {user_token}"}).status_code == 403
+        assert client.get("/admin-area/", headers={"Authorization": f"Bearer {admin_token}"}).status_code == 200
