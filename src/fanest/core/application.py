@@ -1,5 +1,6 @@
 from typing import Any
 
+from fanest._version import __version__ as _DEFAULT_FANEST_VERSION
 from fastapi import FastAPI
 
 
@@ -9,10 +10,12 @@ class FaNestApplication:
         root_module: type,
         *,
         title: str = "FaNest Application",
-        version: str = "0.1.0",
+        version: str | None = None,
         description: str | None = None,
         debug: bool = False,
     ) -> None:
+        if version is None:
+            version = _DEFAULT_FANEST_VERSION
         self.root_module = root_module
         self.options: dict[str, Any] = {
             "title": title,

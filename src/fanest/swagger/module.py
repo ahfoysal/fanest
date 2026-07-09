@@ -3,6 +3,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.docs import get_swagger_ui_html
 from starlette.routing import BaseRoute
+from fanest._version import __version__
 
 from fanest.swagger.decorators import _FANEST_EXTRA_MODELS
 
@@ -11,7 +12,7 @@ class DocumentBuilder:
     def __init__(self) -> None:
         self._config: dict[str, Any] = {
             "title": "FaNest Application",
-            "version": "0.1.0",
+            "version": __version__,
             "description": None,
             "servers": [],
             "tags": [],

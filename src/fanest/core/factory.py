@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, Response
 
 from fanest.core.container import FaNestContainer
 from fanest.core.discovery import DiscoveryService
+from fanest._version import __version__ as _DEFAULT_FANEST_VERSION
 from fanest.core.enhancers import APP_ENHANCER_TOKENS, APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE
 from fanest.core.metadata import ClassProvider, ForwardRef, ValueProvider
 from fanest.core.scanner import ModuleScanner
@@ -33,7 +34,7 @@ class FaNestFactory:
         root_module: type,
         *,
         title: str = "FaNest Application",
-        version: str = "0.1.0",
+        version: str | None = None,
         description: str | None = None,
         debug: bool = False,
         overrides: dict[type, object] | None = None,
@@ -44,6 +45,8 @@ class FaNestFactory:
         global_interceptors: list[object] | None = None,
         global_filters: list[object] | None = None,
     ) -> FastAPI:
+        if version is None:
+            version = _DEFAULT_FANEST_VERSION
         scanner = ModuleScanner()
         scanner.scan(root_module)
         return FaNestFactory._create_from_scanner(
@@ -67,7 +70,7 @@ class FaNestFactory:
         root_module: Any,
         *,
         title: str = "FaNest Application",
-        version: str = "0.1.0",
+        version: str | None = None,
         description: str | None = None,
         debug: bool = False,
         overrides: dict[type, object] | None = None,
@@ -78,6 +81,8 @@ class FaNestFactory:
         global_interceptors: list[object] | None = None,
         global_filters: list[object] | None = None,
     ) -> FastAPI:
+        if version is None:
+            version = _DEFAULT_FANEST_VERSION
         scanner = ModuleScanner()
         await scanner.scan_async(root_module)
         return FaNestFactory._create_from_scanner(

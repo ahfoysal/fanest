@@ -855,9 +855,10 @@ app = FaNestFactory.create(AppModule)
 
 def _project_pyproject_template(name: str) -> str:
     package_name = _distribution_name(name)
+    framework_version = "0.3.0b1"
     return f'''[project]
 name = "{package_name}"
-version = "0.1.0"
+version = "{framework_version}"
 description = "A FaNest application"
 requires-python = ">=3.10"
 dependencies = [
@@ -902,9 +903,10 @@ __all__ = ["app"]
 
 def _workspace_pyproject_template(name: str) -> str:
     package_name = _distribution_name(name)
+    framework_version = "0.3.0b1"
     return f'''[project]
 name = "{package_name}"
-version = "0.1.0"
+version = "{framework_version}"
 description = "A FaNest workspace"
 requires-python = ">=3.10"
 dependencies = [

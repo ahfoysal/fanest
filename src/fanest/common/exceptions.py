@@ -33,6 +33,16 @@ class ConflictException(FaNestHttpException):
         super().__init__(409, detail)
 
 
+class NotImplementedException(FaNestHttpException):
+    def __init__(self, detail: Any = "Not Implemented"):
+        super().__init__(501, detail)
+
+
+class MethodNotAllowedException(FaNestHttpException):
+    def __init__(self, detail: Any = "Method Not Allowed"):
+        super().__init__(405, detail)
+
+
 class GoneException(FaNestHttpException):
     def __init__(self, detail: Any = "Gone"):
         super().__init__(410, detail)
@@ -53,6 +63,16 @@ class TooManyRequestsException(FaNestHttpException):
         super().__init__(429, detail)
 
 
+class RequestTimeoutException(FaNestHttpException):
+    def __init__(self, detail: Any = "Request Timeout"):
+        super().__init__(408, detail)
+
+
+class UnsupportedMediaTypeException(FaNestHttpException):
+    def __init__(self, detail: Any = "Unsupported Media Type"):
+        super().__init__(415, detail)
+
+
 class InternalServerErrorException(FaNestHttpException):
     def __init__(self, detail: Any = "Internal Server Error"):
         super().__init__(500, detail)
@@ -61,6 +81,11 @@ class InternalServerErrorException(FaNestHttpException):
 class ServiceUnavailableException(FaNestHttpException):
     def __init__(self, detail: Any = "Service Unavailable"):
         super().__init__(503, detail)
+
+
+class GatewayTimeoutException(FaNestHttpException):
+    def __init__(self, detail: Any = "Gateway Timeout"):
+        super().__init__(504, detail)
 
 
 def Catch(*exceptions: type[Exception]):
