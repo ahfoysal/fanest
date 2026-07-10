@@ -1,7 +1,25 @@
 # Changelog
 
 All notable changes to FaNest are documented here. This project follows
-[Semantic Versioning](https://semver.org/) (currently in the `0.3.0` beta line).
+[Semantic Versioning](https://semver.org/).
+
+## [0.4.0] - 2026-07-10
+
+First stable `0.4.0` release, promoted from the `0.3.0b6` beta after live-service
+certification. Everything in `0.3.0b1`–`0.3.0b6` is included.
+
+### Verified
+- **Live-service certification** run against real **PostgreSQL, Redis and
+  MongoDB** (in addition to the in-memory/fake backends): SQLAlchemy, cache,
+  session, throttler, queue, and Mongo paths all pass. Full suite: 677 passed.
+- **Wheel build + install** certified in a clean temp venv.
+
+### Fixed
+- **session:** `RedisSessionStore` (and `MemorySessionStore`) now implement
+  `clear()`, matching the cache-store interface and the `SessionStore` protocol —
+  a gap surfaced by live Redis certification.
+
+[0.4.0]: https://github.com/ahfoysal/fanest/releases/tag/v0.4.0
 
 ## [0.3.0b6] - 2026-07-10
 

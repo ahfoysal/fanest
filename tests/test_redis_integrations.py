@@ -213,6 +213,32 @@ def test_redis_session_store_load_save_delete_and_close():
     assert fake.closed is True
 
 
+def test_redis_session_store_clear_removes_only_prefixed_sessions():
+    fake = FakeRedis()
+    fake.set("other:app:keep", "1")
+    store = RedisSessionStore(prefix="test:session:", client=fake)
+
+    store.save("a", {"user": 1})
+    store.save("b", {"user": 2})
+    store.clear()
+
+    assert store.load("a") == {}
+    assert store.load("b") == {}
+    assert fake.get("other:app:keep") == "1"  # unrelated keys untouched
+
+
+def test_memory_session_store_clear():
+    from fanest.session import MemorySessionStore
+
+    store = MemorySessionStore()
+    store.save("a", {"user": 1})
+    store.save("b", {"user": 2})
+    store.clear()
+
+    assert store.load("a") == {}
+    assert store.load("b") == {}
+
+
 def test_redis_throttler_store_is_atomic_and_does_not_overcount_denied_hits():
     fake = FakeRedis()
     store = RedisThrottlerStore(prefix="test:throttle:", client=fake)

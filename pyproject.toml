@@ -1,6 +1,6 @@
 [project]
 name = "fanest"
-version = "0.3.0b6"
+version = "0.4.0"
 description = "NestJS-style backend architecture for Python, powered by FastAPI."
 readme = "README.md"
 requires-python = ">=3.10"
