@@ -689,9 +689,13 @@ def _artifact_name(name: str) -> str:
 def _validate_project_name(name: str) -> None:
     if not name or Path(name).name != name or name in {".", ".."}:
         raise typer.BadParameter("Project name must be a single directory name.")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+    # PEP 508 distribution names must start AND end with an alphanumeric, so the
+    # generated pyproject.toml is installable/buildable (a trailing '-', '.' or
+    # '_' produces an invalid distribution name).
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?", name):
         raise typer.BadParameter(
-            "Project name may contain only letters, numbers, dots, dashes and underscores."
+            "Project name may contain only letters, numbers, dots, dashes and underscores, "
+            "and must start and end with a letter or number."
         )
 
 

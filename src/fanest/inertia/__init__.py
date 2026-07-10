@@ -18,6 +18,7 @@ from fanest.inertia.module import (
     MethodOverrideMiddleware,
     OnceProp,
     OptionalProp,
+    ScrollProp,
     ViteAssets,
     inertia_route,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "MethodOverrideMiddleware",
     "OnceProp",
     "OptionalProp",
+    "ScrollProp",
     "ViteAssets",
     "inertia_route",
 ]

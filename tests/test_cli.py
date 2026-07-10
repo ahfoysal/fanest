@@ -763,3 +763,19 @@ def test_cli_info_and_build(tmp_path, monkeypatch):
     assert build_src.exit_code == 0
     assert "Build OK: ." in build.output
     assert "Build OK: src" in build_src.output
+
+
+def test_cli_rejects_trailing_separator_project_names():
+    """PEP 508 distribution names must end with an alphanumeric, so a trailing
+    '-', '.' or '_' (which would break the generated pyproject.toml) is rejected
+    while valid kebab/snake names are accepted."""
+    import pytest
+    import typer
+
+    from fanest.cli.main import _validate_project_name
+
+    for valid in ("blog-api", "my_app", "svc2", "a"):
+        _validate_project_name(valid)  # no raise
+    for invalid in ("trailing-", "ends.", "ends_", "-lead"):
+        with pytest.raises(typer.BadParameter):
+            _validate_project_name(invalid)

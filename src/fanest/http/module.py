@@ -222,9 +222,13 @@ def _normalize_options(options: HttpModuleOptions | dict[str, Any] | None) -> Ht
         "request_interceptors",
         "response_interceptors",
         "error_interceptors",
+        "client_options",
     }
-    explicit = {key: value for key, value in options.items() if key in known_keys}
-    client_options = {key: value for key, value in options.items() if key not in known_keys}
+    explicit = {key: value for key, value in options.items() if key in known_keys and key != "client_options"}
+    # An explicit 'client_options' mapping is forwarded verbatim to httpx.AsyncClient;
+    # any remaining unknown keys are treated as extra client options and merged in.
+    extra_client_options = {key: value for key, value in options.items() if key not in known_keys}
+    client_options = {**dict(options.get("client_options") or {}), **extra_client_options}
     return HttpModuleOptions(
         **explicit,
         client_options=client_options,

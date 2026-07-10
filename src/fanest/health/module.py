@@ -6,6 +6,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, cast
 from urllib import request
+from urllib.error import HTTPError
 
 from fastapi.responses import JSONResponse
 
@@ -139,9 +140,19 @@ class HttpHealthIndicator(HealthIndicator):
         self.expected_status = expected_status
         super().__init__(name, self._check, timeout_seconds=timeout_seconds, tags=tags)
 
-    def _check(self) -> dict[str, Any]:
-        with request.urlopen(self.url, timeout=self.timeout_seconds) as response:
-            status_code = response.status
+    async def _check(self) -> dict[str, Any]:
+        # urllib.request.urlopen is a blocking network call; run it off the event
+        # loop so a slow endpoint cannot stall every other coroutine.
+        return await asyncio.to_thread(self._blocking_check)
+
+    def _blocking_check(self) -> dict[str, Any]:
+        try:
+            with request.urlopen(self.url, timeout=self.timeout_seconds) as response:
+                status_code = response.status
+        except HTTPError as exc:
+            # urlopen raises HTTPError for non-2xx/3xx responses; an expected
+            # status in that range should still be reported healthy.
+            status_code = exc.code
         expected = self.expected_status
         if isinstance(expected, int):
             expected = (expected,)
@@ -308,10 +319,18 @@ class HealthModule:
         imports: list[Any] | None = None,
         is_global: bool = False,
     ) -> type:
-        async def options_factory(*dependencies: Any) -> HealthModuleOptions:
+        # Resolve the user factory exactly once via a shared intermediate
+        # provider; the options/indicators providers then read that single
+        # result instead of each invoking use_factory independently.
+        config_token = token(f"HEALTH_ASYNC_CONFIG::{id(use_factory)}")
+
+        async def config_factory(*dependencies: Any) -> dict[str, Any]:
             result = use_factory(*dependencies)
             if inspect.isawaitable(result):
                 result = await cast(Awaitable[Any], result)
+            return result
+
+        async def options_factory(result: dict[str, Any]) -> HealthModuleOptions:
             _validate_probe_paths(
                 readiness_path=result.get("readiness_path", "/ready"),
                 liveness_path=result.get("liveness_path", "/live"),
@@ -324,18 +343,16 @@ class HealthModule:
                 liveness_path=result.get("liveness_path", "/live"),
             )
 
-        async def indicators_factory(*dependencies: Any) -> list[HealthIndicator]:
-            result = use_factory(*dependencies)
-            if inspect.isawaitable(result):
-                result = await cast(Awaitable[Any], result)
+        async def indicators_factory(result: dict[str, Any]) -> list[HealthIndicator]:
             return result.get("indicators", [])
 
         @Module(
             imports=imports or [],
             controllers=[HealthController],
             providers=[
-                provider_factory(HEALTH_OPTIONS, options_factory, inject=inject or []),
-                provider_factory(HEALTH_INDICATORS, indicators_factory, inject=inject or []),
+                provider_factory(config_token, config_factory, inject=inject or []),
+                provider_factory(HEALTH_OPTIONS, options_factory, inject=[config_token]),
+                provider_factory(HEALTH_INDICATORS, indicators_factory, inject=[config_token]),
                 HealthService,
             ],
             exports=[HealthService, HEALTH_OPTIONS],

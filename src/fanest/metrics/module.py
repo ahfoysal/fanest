@@ -1,3 +1,4 @@
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from math import inf, isfinite
@@ -5,6 +6,9 @@ from typing import Any
 
 from fanest import Controller, Get, Injectable, Module
 from fastapi.responses import Response
+
+_METRIC_NAME_RE = re.compile(r"[a-zA-Z_:][a-zA-Z0-9_:]*")
+_LABEL_NAME_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
 
 @dataclass(frozen=True)
@@ -164,29 +168,48 @@ class MetricsRegistry:
 
     def render_prometheus(self) -> str:
         lines: list[str] = []
+        # The Prometheus text format requires each metric's # HELP/# TYPE lines to
+        # immediately precede that metric's own samples, so emit them per metric.
         for definition in sorted(self._definitions.values(), key=lambda item: item.name):
+            name = definition.name
             if definition.help:
-                lines.append(f"# HELP {definition.name} {self._escape_help(definition.help)}")
-            lines.append(f"# TYPE {definition.name} {definition.kind}")
-        for (name, labels), value in sorted(self._counters.items()):
-            lines.append(f"{name}{self._labels(labels)} {self._format(value)}")
-        for (name, labels), value in sorted(self._gauges.items()):
-            lines.append(f"{name}{self._labels(labels)} {self._format(value)}")
-        for (name, labels), values in sorted(self._histograms.items()):
-            count = len(values)
-            total = sum(values)
-            for bucket in self._histogram_buckets.get(name, ()):
-                bucket_labels = dict(labels)
-                bucket_labels["le"] = "+Inf" if bucket == inf else self._format(bucket)
-                bucket_count = sum(1 for value in values if value <= bucket)
-                lines.append(f"{name}_bucket{self._labels_from_dict(bucket_labels)} {bucket_count}")
-            infinite_labels = dict(labels)
-            infinite_labels["le"] = "+Inf"
-            if not any(bucket == inf for bucket in self._histogram_buckets.get(name, ())):
-                lines.append(f"{name}_bucket{self._labels_from_dict(infinite_labels)} {count}")
-            lines.append(f"{name}_count{self._labels(labels)} {count}")
-            lines.append(f"{name}_sum{self._labels(labels)} {self._format(total)}")
+                lines.append(f"# HELP {name} {self._escape_help(definition.help)}")
+            lines.append(f"# TYPE {name} {definition.kind}")
+            if definition.kind == "counter":
+                for (metric, labels), value in sorted(self._counters.items()):
+                    if metric == name:
+                        lines.append(f"{metric}{self._labels(labels)} {self._format(value)}")
+            elif definition.kind == "gauge":
+                for (metric, labels), value in sorted(self._gauges.items()):
+                    if metric == name:
+                        lines.append(f"{metric}{self._labels(labels)} {self._format(value)}")
+            elif definition.kind == "histogram":
+                for (metric, labels), values in sorted(self._histograms.items()):
+                    if metric == name:
+                        lines.extend(self._render_histogram(metric, labels, values))
         return "\n".join(lines) + ("\n" if lines else "")
+
+    def _render_histogram(
+        self,
+        name: str,
+        labels: tuple[tuple[str, str], ...],
+        values: list[float],
+    ) -> list[str]:
+        lines: list[str] = []
+        count = len(values)
+        total = sum(values)
+        for bucket in self._histogram_buckets.get(name, ()):
+            bucket_labels = dict(labels)
+            bucket_labels["le"] = "+Inf" if bucket == inf else self._format(bucket)
+            bucket_count = sum(1 for value in values if value <= bucket)
+            lines.append(f"{name}_bucket{self._labels_from_dict(bucket_labels)} {bucket_count}")
+        infinite_labels = dict(labels)
+        infinite_labels["le"] = "+Inf"
+        if not any(bucket == inf for bucket in self._histogram_buckets.get(name, ())):
+            lines.append(f"{name}_bucket{self._labels_from_dict(infinite_labels)} {count}")
+        lines.append(f"{name}_count{self._labels(labels)} {count}")
+        lines.append(f"{name}_sum{self._labels(labels)} {self._format(total)}")
+        return lines
 
     def _key(self, name: str, labels: dict[str, Any] | None = None) -> tuple[str, tuple[tuple[str, str], ...]]:
         self._validate_metric_name(name)
@@ -257,15 +280,14 @@ class MetricsRegistry:
             raise ValueError("Metric values must be finite numbers")
 
     def _validate_metric_name(self, name: str) -> None:
-        if not name or not (name[0].isalpha() or name[0] in "_:") or any(
-            not (char.isalnum() or char in "_:") for char in name
-        ):
+        # Prometheus data model: metric names are ASCII [a-zA-Z_:][a-zA-Z0-9_:]*
+        # (str.isalpha/isalnum would wrongly accept Unicode letters/digits).
+        if not _METRIC_NAME_RE.fullmatch(name):
             raise ValueError(f"Invalid Prometheus metric name: {name!r}")
 
     def _validate_label_name(self, name: str) -> None:
-        if not name or not (name[0].isalpha() or name[0] == "_") or any(
-            not (char.isalnum() or char == "_") for char in name
-        ):
+        # Prometheus data model: label names are ASCII [a-zA-Z_][a-zA-Z0-9_]*.
+        if not _LABEL_NAME_RE.fullmatch(name):
             raise ValueError(f"Invalid Prometheus label name: {name!r}")
 
 
