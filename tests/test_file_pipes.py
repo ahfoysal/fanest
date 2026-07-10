@@ -48,7 +48,7 @@ def test_parse_file_pipe_accepts_valid_upload():
         files={"file": ("hello.txt", b"hello", "text/plain")},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 201
     assert response.json() == {"filename": "hello.txt", "type": "text/plain"}
 
 
@@ -120,7 +120,7 @@ def test_file_interceptor_enforces_limits_filter_and_disk_storage(tmp_path):
         files={"avatar": ("hello.json", b"{}", "application/json")},
     )
 
-    assert accepted.status_code == 200
+    assert accepted.status_code == 201
     assert accepted.json()["stored"] == "hello"
     assert accepted.json()["stored_path"].endswith("stored-hello.txt")
     assert too_large.status_code == 413
@@ -192,7 +192,7 @@ def test_disk_storage_sanitizes_filenames_and_rejects_file_destinations(tmp_path
         files={"avatar": ("avatar.txt", b"ok", "text/plain")},
     )
 
-    assert accepted.status_code == 200
+    assert accepted.status_code == 201
     assert accepted.json()["files"] == ["safe.txt"]
     assert accepted.json()["stored_path"].endswith("/safe.txt")
     assert not (tmp_path / "safe.txt").exists()
@@ -234,10 +234,10 @@ def test_files_interceptor_enforces_max_count_and_optional_multi_uploads():
     )
     optional = client.post("/multi-files/optional")
 
-    assert accepted.status_code == 200
+    assert accepted.status_code == 201
     assert accepted.json() == {"filenames": ["one.txt", "two.txt"]}
     assert too_many.status_code == 400
-    assert optional.status_code == 200
+    assert optional.status_code == 201
     assert optional.json() == {"count": 0}
 
 
@@ -294,7 +294,7 @@ def test_file_fields_interceptor_enforces_per_field_counts_and_filter():
         ],
     )
 
-    assert accepted.status_code == 200
+    assert accepted.status_code == 201
     assert accepted.json() == {"avatar": "avatar.txt", "gallery": ["one.txt", "two.txt"]}
     assert too_many.status_code == 400
     assert rejected.status_code == 400
@@ -340,7 +340,7 @@ def test_any_files_interceptor_applies_limits_across_declared_file_parameters():
         ],
     )
 
-    assert accepted.status_code == 200
+    assert accepted.status_code == 201
     assert accepted.json() == {"count": 2}
     assert too_many.status_code == 400
     assert too_large.status_code == 413

@@ -1570,3 +1570,163 @@ def test_for_root_providers_supply_resolver_dependencies():
 
     assert response.status_code == 200
     assert response.json() == {"data": {"total": 42}}
+
+
+def test_graphql_comment_with_brace_does_not_drop_sibling_fields():
+    async def viewer():
+        return {"name": "Ada"}
+
+    async def version():
+        return "v1"
+
+    expected = {"data": {"viewer": {"name": "Ada"}, "version": "v1"}}
+    for doc in (
+        "{ viewer { name } version }",
+        "{\n viewer {\n name # closes with }\n }\n version\n}",
+        "{\n viewer {\n name # opens with {\n }\n version\n}",
+    ):
+        schema = GraphQLSchema()
+        schema.queries["viewer"] = viewer
+        schema.queries["version"] = version
+        assert asyncio.run(schema.execute(doc)) == expected
+
+
+def test_graphql_block_string_argument_value():
+    @ObjectType()
+    class EchoOut:
+        msg: str
+
+    @Resolver
+    class EchoResolver:
+        @Query()
+        async def echo(self, msg: str):
+            return {"msg": msg}
+
+    @Module(imports=[GraphQLModule.for_root(resolvers=[EchoResolver])])
+    class AppModule:
+        pass
+
+    with TestClient(FaNestFactory.create(AppModule)) as client:
+        assert client.post(
+            "/graphql", json={"query": '{ echo(msg: "hi") { msg } }'}
+        ).json() == {"data": {"echo": {"msg": "hi"}}}
+        assert client.post(
+            "/graphql", json={"query": '{ echo(msg: """hi""") { msg } }'}
+        ).json() == {"data": {"echo": {"msg": "hi"}}}
+        assert client.post(
+            "/graphql",
+            json={"query": '{ echo(msg: """line one\nline two""") { msg } }'},
+        ).json() == {"data": {"echo": {"msg": "line one\nline two"}}}
+        # BlockStringValue dedent + \""" escape
+        assert client.post(
+            "/graphql",
+            json={"query": '{ echo(msg: """\n    a\n    b\n""") { msg } }'},
+        ).json() == {"data": {"echo": {"msg": "a\nb"}}}
+        assert client.post(
+            "/graphql",
+            json={"query": '{ echo(msg: """a \\""" b""") { msg } }'},
+        ).json() == {"data": {"echo": {"msg": 'a """ b'}}}
+
+
+def test_graphql_typename_and_fragments_use_objecttype_schema_name():
+    @ObjectType("Book")
+    class BookEntity:
+        def __init__(self, title: str):
+            self.title = title
+
+    @Resolver
+    class BookResolver:
+        @Query()
+        async def featured(self) -> BookEntity:
+            return BookEntity("Dune")
+
+    @Module(
+        imports=[
+            GraphQLModule.for_root(
+                resolvers=[BookResolver], types=[BookEntity], websocket=False
+            )
+        ]
+    )
+    class AppModule:
+        pass
+
+    with TestClient(FaNestFactory.create(AppModule)) as client:
+        def q(query):
+            return client.post("/graphql", json={"query": query}).json()
+
+        assert q("{ featured { title __typename } }") == {
+            "data": {"featured": {"title": "Dune", "__typename": "Book"}}
+        }
+        assert q("{ featured { ... on Book { title } } }") == {
+            "data": {"featured": {"title": "Dune"}}
+        }
+        assert q(
+            "query Q { featured { ...bits } } fragment bits on Book { title }"
+        ) == {"data": {"featured": {"title": "Dune"}}}
+
+
+def test_graphql_nested_enum_serializes_by_name():
+    @EnumType
+    class Role(enum.Enum):
+        ADMIN = "administrator"
+        MEMBER = "member"
+
+    @Resolver
+    class AccountResolver:
+        @Query()
+        async def my_role(self) -> Role:
+            return Role.ADMIN
+
+        @Query()
+        async def viewer(self):
+            return {"name": "Ada", "role": Role.ADMIN}
+
+    @Module(imports=[GraphQLModule.for_root(resolvers=[AccountResolver])])
+    class AppModule:
+        pass
+
+    with TestClient(FaNestFactory.create(AppModule)) as client:
+        assert client.post("/graphql", json={"query": "{ my_role }"}).json() == {
+            "data": {"my_role": "ADMIN"}
+        }
+        assert client.post(
+            "/graphql", json={"query": "{ viewer { name role } }"}
+        ).json() == {"data": {"viewer": {"name": "Ada", "role": "ADMIN"}}}
+
+
+def test_graphql_duplicate_resolvefield_name_across_types():
+    @ObjectType("User")
+    @Resolver
+    class UserResolver:
+        @Query()
+        async def user(self):
+            return {"id": "u1", "name": "ada"}
+
+        @ResolveField("display")
+        async def user_display(self, parent):
+            return f"user:{parent['name']}"
+
+    @ObjectType("Post")
+    @Resolver
+    class PostResolver:
+        @Query()
+        async def post(self):
+            return {"id": "p1", "title": "hello"}
+
+        @ResolveField("display")
+        async def post_display(self, parent):
+            return f"post:{parent['title']}"
+
+    @Module(
+        imports=[GraphQLModule.for_root(resolvers=[UserResolver, PostResolver])]
+    )
+    class AppModule:
+        pass
+
+    with TestClient(FaNestFactory.create(AppModule)) as client:
+        assert client.post(
+            "/graphql", json={"query": "{ user { display } }"}
+        ).json() == {"data": {"user": {"display": "user:ada"}}}
+        assert client.post(
+            "/graphql", json={"query": "{ post { display } }"}
+        ).json() == {"data": {"post": {"display": "post:hello"}}}

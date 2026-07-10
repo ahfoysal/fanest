@@ -1,4 +1,5 @@
 from enum import Enum
+import inspect
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -43,12 +44,20 @@ class ValidationPipe:
 
     def transform(self, value: Any, metadata: dict[str, Any]) -> Any:
         annotation = metadata.get("annotation")
-        if annotation is None or annotation is Any:
+        # An unannotated parameter (e.g. NestJS-style ``q=Query("q")``) arrives
+        # with an empty annotation; treat it like Any so TypeAdapter is never
+        # asked to build a schema for ``inspect._empty`` (which 500s).
+        if annotation is None or annotation is Any or annotation is inspect.Parameter.empty:
             if self.forbid_unknown_values and value is not None:
                 self._raise_errors(
                     [{"type": "unknown_value", "loc": (), "msg": "Unknown value", "input": value}]
                 )
             return value
+        # FastAPI may have already parsed a Body DTO into a model instance before
+        # this pipe runs; still honour forbid_non_whitelisted / whitelist against
+        # any extra fields the model retained (extra="allow").
+        if isinstance(value, BaseModel):
+            return self._apply_options_to_model(value)
         try:
             if isinstance(annotation, type) and issubclass(annotation, BaseModel):
                 self._check_forbidden_extra_fields(annotation, value)
@@ -74,6 +83,26 @@ class ValidationPipe:
                     return annotation.model_construct(**self._strip_extra_fields(annotation, value))
                 return self._strip_extra_fields(annotation, value)
             self._raise_errors(errors, cause=exc)
+
+    def _apply_options_to_model(self, model: BaseModel) -> Any:
+        extra = getattr(model, "model_extra", None) or {}
+        if self.forbid_non_whitelisted and extra:
+            errors = [
+                {
+                    "type": "extra_forbidden",
+                    "loc": (field,),
+                    "msg": "Extra inputs are not permitted",
+                    "input": item,
+                }
+                for field, item in sorted(extra.items())
+            ]
+            self._raise_errors(self._filter_errors(errors))
+        if self.whitelist and extra:
+            # Drop the fields not declared on the model (property whitelisting).
+            declared = set(pydantic_model_fields(type(model)))
+            kept = {key: item for key, item in model.__dict__.items() if key in declared}
+            return type(model).model_construct(**kept)
+        return model
 
     def _check_forbidden_extra_fields(self, annotation: type[BaseModel], value: Any) -> None:
         if not self.forbid_non_whitelisted or not isinstance(value, dict):
@@ -153,12 +182,21 @@ def _json_safe_error_value(value: Any) -> Any:
     return str(value)
 
 
+_INT_STRING = re.compile(r"-?[0-9]+")
+
+
 class ParseIntPipe:
     def transform(self, value: Any, metadata: dict[str, Any]) -> int:
-        try:
+        if isinstance(value, bool):
+            raise BadRequestException(f"{metadata.get('name', 'value')} must be an integer")
+        if isinstance(value, int):
+            return value
+        # NestJS validates the raw string with /^-?\d+$/ (ASCII, anchored) and
+        # rejects underscores, surrounding whitespace and non-ASCII digits that
+        # Python's int() would otherwise accept.
+        if isinstance(value, str) and _INT_STRING.fullmatch(value):
             return int(value)
-        except (TypeError, ValueError) as exc:
-            raise BadRequestException(f"{metadata.get('name', 'value')} must be an integer") from exc
+        raise BadRequestException(f"{metadata.get('name', 'value')} must be an integer")
 
 
 class ParseBoolPipe:
@@ -213,7 +251,16 @@ class ParseArrayPipe:
 
     def transform(self, value: Any, metadata: dict[str, Any]) -> list[Any]:
         if isinstance(value, list):
-            return value
+            # FastAPI resolves a list-annotated query param to a single-element
+            # list holding the raw "1,2,3" string before pipes run — still split
+            # each element on the separator so ?ids=1,2,3 yields ['1','2','3'].
+            result: list[Any] = []
+            for item in value:
+                if isinstance(item, str) and self.separator in item:
+                    result.extend(part for part in item.split(self.separator) if part != "")
+                else:
+                    result.append(item)
+            return result
         if isinstance(value, str):
             return [item for item in value.split(self.separator) if item != ""]
         raise BadRequestException(f"{metadata.get('name', 'value')} must be an array")

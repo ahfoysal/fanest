@@ -61,6 +61,7 @@ class FaNestApplication:
         self.global_interceptors: list[Any] = []
         self.global_filters: list[Any] = []
         self._app: FastAPI | None = None
+        self._shutdown_hooks: Any = None
 
     def set_global_prefix(self, prefix: str) -> "FaNestApplication":
         self._ensure_not_built()
@@ -97,6 +98,18 @@ class FaNestApplication:
         serve_static(self.build(), path, directory, name=name)
         return self
 
+    def enable_shutdown_hooks(self, signals: list[str] | None = None) -> "FaNestApplication":
+        """Run lifecycle shutdown hooks on process signals (Nest's
+        ``enableShutdownHooks``). Defaults to SIGTERM and SIGINT; pass signal
+        names to listen to a custom set. Handlers chain onto whatever the ASGI
+        server installed, and ``before_application_shutdown`` /
+        ``on_application_shutdown`` hooks that take a parameter receive the
+        signal name. Must be called before the server starts serving."""
+        self._shutdown_hooks = list(signals) if signals else True
+        if self._app is not None:
+            self._app.state.fanest_shutdown_hooks = self._shutdown_hooks
+        return self
+
     def use_global_guards(self, *guards: Any) -> "FaNestApplication":
         self._ensure_not_built()
         self.global_guards.extend(guards)
@@ -129,6 +142,8 @@ class FaNestApplication:
                 global_interceptors=self.global_interceptors,
                 global_filters=self.global_filters,
             )
+            if self._shutdown_hooks:
+                self._app.state.fanest_shutdown_hooks = self._shutdown_hooks
         return self._app
 
     async def build_async(self) -> FastAPI:
@@ -143,6 +158,8 @@ class FaNestApplication:
                 global_interceptors=self.global_interceptors,
                 global_filters=self.global_filters,
             )
+            if self._shutdown_hooks:
+                self._app.state.fanest_shutdown_hooks = self._shutdown_hooks
         return self._app
 
     @property

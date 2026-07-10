@@ -21,10 +21,22 @@ def Injectable(scope: str = "singleton") -> Callable[[type[T]], type[T]]:
     return decorator
 
 
-def Controller(prefix: str = "", *, host: str | None = None) -> Callable[[type[T]], type[T]]:
+def Controller(
+    prefix: str = "",
+    *,
+    host: str | None = None,
+    scope: str = "singleton",
+) -> Callable[[type[T]], type[T]]:
+    """Register a controller. Like NestJS, controllers default to singleton
+    scope — instantiated once at bootstrap, with lifecycle hooks
+    (``on_module_init`` / ``on_application_bootstrap`` / shutdown) fired. Pass
+    ``scope="request"`` for a fresh controller per request; the scope also
+    bubbles to ``request`` automatically when the controller injects a
+    request-scoped provider (e.g. the ``REQUEST`` token)."""
+
     def decorator(cls: type[T]) -> type[T]:
         setattr(cls, "__fanest_controller__", ControllerMetadata(prefix=prefix, host=host))
-        setattr(cls, "__fanest_provider__", ProviderMetadata(scope="request"))
+        setattr(cls, "__fanest_provider__", ProviderMetadata(scope=scope))
         return cls
 
     return decorator

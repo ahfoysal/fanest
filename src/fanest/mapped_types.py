@@ -2,7 +2,7 @@ import functools
 from copy import deepcopy
 from typing import Any, cast, get_args, get_origin
 
-from pydantic import BaseModel, create_model, field_validator
+from pydantic import BaseModel, create_model, field_validator, model_validator
 
 
 def PartialType(model: type[BaseModel]) -> type[BaseModel]:
@@ -20,7 +20,10 @@ def PartialType(model: type[BaseModel]) -> type[BaseModel]:
         create_model(
             f"Partial{model.__name__}",
             __base__=BaseModel,
-            __validators__=_field_validators_for(model, list(model.model_fields), optional=True),
+            __validators__={
+                **_field_validators_for(model, list(model.model_fields), optional=True),
+                **_model_validators_for(model, optional=True),
+            },
             **cast(Any, fields),
         ),
     )
@@ -39,7 +42,10 @@ def PickType(model: type[BaseModel], fields: list[str]) -> type[BaseModel]:
         create_model(
             f"Pick{model.__name__}",
             __base__=BaseModel,
-            __validators__=_field_validators_for(model, fields),
+            __validators__={
+                **_field_validators_for(model, fields),
+                **_model_validators_for(model),
+            },
             **cast(Any, model_fields),
         ),
     )
@@ -72,6 +78,8 @@ def IntersectionType(left: type[BaseModel], right: type[BaseModel]) -> type[Base
                     f"right_{key}": value
                     for key, value in _field_validators_for(right, list(right.model_fields)).items()
                 },
+                **{f"left_model_{key}": value for key, value in _model_validators_for(left).items()},
+                **{f"right_model_{key}": value for key, value in _model_validators_for(right).items()},
             },
             **cast(Any, model_fields),
         ),
@@ -120,6 +128,39 @@ def _field_validators_for(
             json_schema_input_type=decorator.info.json_schema_input_type,
         )(classmethod(function))
     return validators
+
+
+def _model_validators_for(model: type[BaseModel], *, optional: bool = False) -> dict[str, Any]:
+    # Mapped models are built with __base__=BaseModel, so class-level
+    # @model_validator decorators are not inherited — transplant them so
+    # cross-field validation survives (matching NestJS mapped types).
+    decorators = getattr(model, "__pydantic_decorators__", None)
+    if decorators is None:
+        return {}
+    validators: dict[str, Any] = {}
+    for name, decorator in decorators.model_validators.items():
+        function = getattr(decorator.func, "__func__", decorator.func)
+        mode = decorator.info.mode
+        if mode == "after":
+            # An 'after' validator runs on the constructed instance; for
+            # PartialType skip it when any referenced field is unset (None) so
+            # a genuinely partial payload doesn't trip a cross-field rule.
+            validators[name] = model_validator(mode="after")(
+                _optional_after_model_validator(function) if optional else function
+            )
+        else:
+            validators[name] = model_validator(mode=mode)(classmethod(function))
+    return validators
+
+
+def _optional_after_model_validator(function: Any) -> Any:
+    @functools.wraps(function)
+    def wrapper(self: Any) -> Any:
+        if any(value is None for value in self.__dict__.values()):
+            return self
+        return function(self)
+
+    return wrapper
 
 
 def _optional_validator(function: Any) -> Any:

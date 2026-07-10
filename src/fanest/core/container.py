@@ -3,6 +3,8 @@ from contextvars import ContextVar
 from typing import Any, get_type_hints
 
 from fanest.core.metadata import (
+    INQUIRER,
+    REQUEST,
     ClassProvider,
     ExistingProvider,
     FactoryProvider,
@@ -24,6 +26,17 @@ _request_instances: ContextVar[dict[Any, Any] | None] = ContextVar(
 _resolving_instances: ContextVar[set[Any] | None] = ContextVar(
     "fanest_resolving_instances", default=None
 )
+_current_request: ContextVar[Any] = ContextVar("fanest_current_request", default=None)
+_inquirer_stack: ContextVar[tuple[Any, ...]] = ContextVar("fanest_inquirer_stack", default=())
+
+
+def _current_request_value() -> Any:
+    return _current_request.get()
+
+
+def _current_inquirer_value() -> Any:
+    stack = _inquirer_stack.get()
+    return stack[-2] if len(stack) >= 2 else None
 
 
 class ForwardRefProxy:
@@ -69,6 +82,8 @@ class FaNestContainer:
         websocket_manager = WebSocketManager()
         self.register(ValueProvider(provide=WebSocketManager, use_value=websocket_manager))
         self.register(ValueProvider(provide=SocketIoServer, use_value=SocketIoServer(websocket_manager)))
+        self.register(FactoryProvider(provide=REQUEST, use_factory=_current_request_value, scope="request"))
+        self.register(FactoryProvider(provide=INQUIRER, use_factory=_current_inquirer_value, scope="transient"))
 
     def set_root_module(self, module_key: Any) -> None:
         self._root_module_key = module_key
@@ -116,6 +131,15 @@ class FaNestContainer:
     def end_request(self, token: Any) -> None:
         _request_instances.reset(token)
 
+    def set_current_request(self, request: Any):
+        return _current_request.set(request)
+
+    def reset_current_request(self, token: Any) -> None:
+        _current_request.reset(token)
+
+    def current_request(self) -> Any:
+        return _current_request.get()
+
     def override(self, token: Any, value: Any) -> None:
         provider = self._override_provider(token, value)
         if token in APP_ENHANCER_TOKENS:
@@ -153,6 +177,10 @@ class FaNestContainer:
         for module_key, provider in self._multi_providers.get(token, []):
             if isinstance(provider, FactoryProvider) and inspect.iscoroutinefunction(provider.use_factory):
                 continue
+            scoped_class = self._scoped_enhancer_class(provider, module_key)
+            if scoped_class is not None:
+                resolved.append(scoped_class)
+                continue
             result = self._resolve_provider(provider, module_key=module_key)
             if inspect.isawaitable(result):
                 if inspect.iscoroutine(result):
@@ -162,10 +190,35 @@ class FaNestContainer:
         return resolved
 
     async def resolve_all_async(self, token: Any) -> list[Any]:
-        return [
-            await self._resolve_provider_async(provider, module_key=module_key)
-            for module_key, provider in self._multi_providers.get(token, [])
-        ]
+        resolved = []
+        for module_key, provider in self._multi_providers.get(token, []):
+            scoped_class = self._scoped_enhancer_class(provider, module_key)
+            if scoped_class is not None:
+                resolved.append(scoped_class)
+                continue
+            resolved.append(await self._resolve_provider_async(provider, module_key=module_key))
+        return resolved
+
+    def _scoped_enhancer_class(self, provider: ProviderDefinition, module_key: Any | None) -> type | None:
+        """For a request/transient-scoped class enhancer (APP_GUARD/APP_PIPE/…),
+        register the class as a resolvable provider and return it so callers
+        resolve a fresh instance per request instead of caching one singleton.
+        Returns ``None`` for singleton enhancers (resolved eagerly as before)."""
+        if isinstance(provider, ClassProvider):
+            enhancer_class = provider.use_class
+        elif inspect.isclass(provider):
+            enhancer_class = provider
+        else:
+            return None
+        scope = provider.scope if isinstance(provider, ClassProvider) and provider.scope else self._class_scope(enhancer_class)
+        if scope == "singleton":
+            return None
+        if enhancer_class not in self._providers:
+            self._providers[enhancer_class] = ClassProvider(
+                provide=enhancer_class, use_class=enhancer_class, scope=scope
+            )
+            self._invalidate_provider_cache(enhancer_class)
+        return enhancer_class
 
     def has_provider(
         self,
@@ -324,7 +377,11 @@ class FaNestContainer:
         if isinstance(provider, ExistingProvider):
             return self.resolve(provider.use_existing, module_key=module_key)
         if isinstance(provider, FactoryProvider):
-            dependencies = [self._resolve_injected_token(token, module_key=module_key) for token in provider.inject]
+            stack_token = _inquirer_stack.set((*_inquirer_stack.get(), provider.provide))
+            try:
+                dependencies = [self._resolve_injected_token(token, module_key=module_key) for token in provider.inject]
+            finally:
+                _inquirer_stack.reset(stack_token)
             result = provider.use_factory(*dependencies)
             if inspect.isawaitable(result):
                 if inspect.iscoroutine(result):
@@ -347,10 +404,14 @@ class FaNestContainer:
         if isinstance(provider, ExistingProvider):
             return await self.resolve_async(provider.use_existing, module_key=module_key)
         if isinstance(provider, FactoryProvider):
-            dependencies = [
-                await self._resolve_injected_token_async(token, module_key=module_key)
-                for token in provider.inject
-            ]
+            stack_token = _inquirer_stack.set((*_inquirer_stack.get(), provider.provide))
+            try:
+                dependencies = [
+                    await self._resolve_injected_token_async(token, module_key=module_key)
+                    for token in provider.inject
+                ]
+            finally:
+                _inquirer_stack.reset(stack_token)
             result = provider.use_factory(*dependencies)
             if inspect.isawaitable(result):
                 return await result
@@ -361,7 +422,9 @@ class FaNestContainer:
 
     def _provider_scope(self, provider: ProviderDefinition) -> str:
         if isinstance(provider, ClassProvider):
-            return self._class_scope(provider.use_class)
+            return provider.scope or self._class_scope(provider.use_class)
+        if isinstance(provider, FactoryProvider):
+            return provider.scope
         if inspect.isclass(provider):
             return self._class_scope(provider)
         return "singleton"
@@ -536,7 +599,22 @@ class FaNestContainer:
     def _instantiate(self, provider: type, module_key: Any | None = None) -> Any:
         parameters, type_hints = self._constructor_metadata(provider)
         kwargs: dict[str, Any] = {}
+        stack_token = _inquirer_stack.set((*_inquirer_stack.get(), provider))
+        try:
+            self._collect_instantiation_kwargs(provider, parameters, type_hints, kwargs, module_key)
+        finally:
+            _inquirer_stack.reset(stack_token)
 
+        return provider(**kwargs)
+
+    def _collect_instantiation_kwargs(
+        self,
+        provider: type,
+        parameters: dict[str, inspect.Parameter],
+        type_hints: dict[str, Any],
+        kwargs: dict[str, Any],
+        module_key: Any | None,
+    ) -> None:
         for name, parameter in parameters.items():
             if name == "self":
                 continue
@@ -565,12 +643,25 @@ class FaNestContainer:
                 continue
             kwargs[name] = self.resolve(annotation, module_key=module_key)
 
-        return provider(**kwargs)
-
     async def _instantiate_async(self, provider: type, module_key: Any | None = None) -> Any:
         parameters, type_hints = self._constructor_metadata(provider)
         kwargs: dict[str, Any] = {}
+        stack_token = _inquirer_stack.set((*_inquirer_stack.get(), provider))
+        try:
+            await self._collect_instantiation_kwargs_async(provider, parameters, type_hints, kwargs, module_key)
+        finally:
+            _inquirer_stack.reset(stack_token)
 
+        return provider(**kwargs)
+
+    async def _collect_instantiation_kwargs_async(
+        self,
+        provider: type,
+        parameters: dict[str, inspect.Parameter],
+        type_hints: dict[str, Any],
+        kwargs: dict[str, Any],
+        module_key: Any | None,
+    ) -> None:
         for name, parameter in parameters.items():
             if name == "self":
                 continue
@@ -601,8 +692,6 @@ class FaNestContainer:
                 kwargs[name] = await self._resolve_forward_ref_async(annotation, module_key)
                 continue
             kwargs[name] = await self.resolve_async(annotation, module_key=module_key)
-
-        return provider(**kwargs)
 
     def _constructor_metadata(self, provider: type) -> tuple[dict[str, inspect.Parameter], dict[str, Any]]:
         cached = self._dependency_cache.get(provider)

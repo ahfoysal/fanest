@@ -1,5 +1,6 @@
 from fanest.auth.jwt import (
     AuthModule,
+    CurrentSecurityScopes,
     CurrentUser,
     JWT_OPTIONS,
     JwtAuthGuard,
@@ -8,6 +9,11 @@ from fanest.auth.jwt import (
     Public,
     Roles,
     RolesGuard,
+    Scopes,
+    ScopesGuard,
+    SecurityScopes,
+    granted_scopes,
+    scopes_for,
 )
 from fanest.auth.passport import AuthGuard, PassportModule, PassportService, PassportStrategy
 from fanest.auth.policies import (
@@ -36,6 +42,12 @@ __all__ = [
     "Public",
     "Roles",
     "RolesGuard",
+    "CurrentSecurityScopes",
+    "Scopes",
+    "ScopesGuard",
+    "SecurityScopes",
+    "granted_scopes",
+    "scopes_for",
     "PassportModule",
     "PassportService",
     "PassportStrategy",

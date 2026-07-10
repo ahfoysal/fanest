@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from fanest.schedule import CronExpression, CronJob, Interval
+from fanest.schedule import Cron, CronExpression, CronJob, Interval
 from fanest.schedule.runner import ScheduleRunner
 
 
@@ -138,3 +138,125 @@ async def test_scheduler_registry_records_run_and_error_counts():
     assert job.run_count >= 2
     assert job.error_count == 1
     assert job.last_error == "first tick failed"
+
+
+# --- Regression: property getters must not fire at bootstrap ------------------------------------
+class PropertySideEffectService:
+    property_calls = 0
+    interval_runs = 0
+
+    @property
+    def dangerous(self):
+        # A property with a side effect (here, raising) that must never be touched by start().
+        type(self).property_calls += 1
+        raise RuntimeError("property getter fired at bootstrap")
+
+    @Interval(0.01, name="prop-guard")
+    async def tick(self):
+        type(self).interval_runs += 1
+
+
+@pytest.mark.anyio
+async def test_start_does_not_invoke_property_getters_at_bootstrap():
+    PropertySideEffectService.property_calls = 0
+    PropertySideEffectService.interval_runs = 0
+    runner = ScheduleRunner([PropertySideEffectService()])
+
+    runner.start()
+    assert PropertySideEffectService.property_calls == 0
+
+    await asyncio.sleep(0.03)
+    await runner.stop()
+
+    # The property must never have been read, yet the decorated handler must still run.
+    assert PropertySideEffectService.property_calls == 0
+    assert PropertySideEffectService.interval_runs > 0
+
+
+# --- Regression: invalid cron / bad timezone must fail fast at registration ---------------------
+class InvalidCronService:
+    @Cron("this is not a cron expression")
+    async def bad(self):  # pragma: no cover - never scheduled
+        pass
+
+
+def test_invalid_cron_expression_fails_fast_at_registration():
+    runner = ScheduleRunner([InvalidCronService()])
+
+    with pytest.raises(ValueError, match="Invalid cron expression"):
+        runner.start()
+
+
+class ConflictingTimezoneService:
+    @CronJob(CronExpression.EVERY_SECOND, time_zone="UTC", utc_offset=0)
+    async def bad(self):  # pragma: no cover - never scheduled
+        pass
+
+
+def test_conflicting_timezone_options_fail_fast_at_registration():
+    runner = ScheduleRunner([ConflictingTimezoneService()])
+
+    with pytest.raises(ValueError, match="both time_zone and utc_offset"):
+        runner.start()
+
+
+# --- Regression: no missed-tick burst after an event-loop stall ---------------------------------
+class BurstIntervalService:
+    ticks: list[float] = []
+
+    @Interval(0.02, name="burst")
+    async def tick(self):
+        type(self).ticks.append(time.monotonic())
+
+
+@pytest.mark.anyio
+async def test_interval_does_not_replay_missed_ticks_as_burst_after_stall():
+    BurstIntervalService.ticks = []
+    runner = ScheduleRunner([BurstIntervalService()])
+    runner.start()
+
+    await asyncio.sleep(0.05)  # a few normal ticks
+    time.sleep(0.3)  # synchronously stall the event loop (~15 missed 20ms ticks)
+    await asyncio.sleep(0.05)  # let the scheduler recover
+    await runner.stop()
+
+    ticks = BurstIntervalService.ticks
+    delay = 0.02
+    # A burst shows up as many near-instant executions replayed back-to-back. With catch-up
+    # semantics the stall produces at most a single recovery tick, not a cluster.
+    tiny_gaps = sum(1 for a, b in zip(ticks, ticks[1:]) if (b - a) < delay * 0.5)
+    assert tiny_gaps <= 1, ticks
+
+
+# --- Regression: same-named provider classes must not collide onto one job name -----------------
+def _make_tasks_service():
+    class TasksService:
+        runs = 0
+
+        @Interval(0.01)
+        async def handle(self):
+            type(self).runs += 1
+
+    return TasksService
+
+
+@pytest.mark.anyio
+async def test_same_named_provider_classes_do_not_drop_jobs():
+    ServiceA = _make_tasks_service()
+    ServiceB = _make_tasks_service()
+    # Genuinely identical implicit name base (same module, qualname, and method name).
+    assert ServiceA.__qualname__ == ServiceB.__qualname__
+    ServiceA.runs = 0
+    ServiceB.runs = 0
+
+    runner = ScheduleRunner([ServiceA(), ServiceB()])
+    runner.start()
+
+    # Both distinct providers must be scheduled; neither is silently overwritten/dropped.
+    assert len(runner.registry.list()) == 2
+
+    await asyncio.sleep(0.05)
+    await runner.stop()
+
+    assert ServiceA.runs > 0
+    assert ServiceB.runs > 0

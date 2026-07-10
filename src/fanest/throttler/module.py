@@ -179,14 +179,37 @@ class ThrottlerGuard:
     def __init__(self, throttler_service: ThrottlerService):
         self.throttler_service = throttler_service
 
+    @staticmethod
+    def _metadata(target, key):
+        if hasattr(target, key):
+            return getattr(target, key)
+        func = getattr(target, "__func__", None)
+        if func is not None and hasattr(func, key):
+            return getattr(func, key)
+        controller_class = getattr(target, "__class__", None)
+        if controller_class is not None and hasattr(controller_class, key):
+            return getattr(controller_class, key)
+        return None
+
     async def can_activate(self, context):
-        if getattr(context.controller, "__fanest_skip_throttle__", False) or getattr(
-            context.handler,
-            "__fanest_skip_throttle__",
-            False,
-        ):
+        # A method-level @SkipThrottle(...) overrides the controller-level one
+        # (so @SkipThrottle(False) can re-enable throttling under a skipped
+        # controller); otherwise the controller value applies.
+        handler_skip = self._metadata(context.handler, "__fanest_skip_throttle__")
+        controller_skip = self._metadata(context.controller, "__fanest_skip_throttle__")
+        skip = handler_skip if handler_skip is not None else controller_skip
+        if skip:
             return True
-        options = getattr(context.handler, "__fanest_throttle__", {})
+        # Throttle options merge controller-level and method-level (method wins),
+        # so a class-level @Throttle applies to every handler.
+        options = {
+            **(self._metadata(context.controller, "__fanest_throttle__") or {}),
+            **{
+                key: value
+                for key, value in (self._metadata(context.handler, "__fanest_throttle__") or {}).items()
+                if value is not None
+            },
+        }
         tracker = await self._tracker(context)
         route = getattr(context.handler, "__qualname__", repr(context.handler))
         method = getattr(context.request, "method", "")

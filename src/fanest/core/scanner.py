@@ -5,6 +5,8 @@ from typing import Any, get_type_hints
 
 from fanest.common.middleware import MiddlewareConsumer, MiddlewareRoute
 from fanest.core.metadata import (
+    INQUIRER,
+    REQUEST,
     DynamicModule,
     ExistingProvider,
     FactoryProvider,
@@ -30,6 +32,8 @@ FRAMEWORK_PROVIDER_TOKENS = {
     SchedulerRegistry,
     SocketIoServer,
     WebSocketManager,
+    REQUEST,
+    INQUIRER,
 }
 
 
@@ -62,6 +66,8 @@ class ModuleRecord:
 
 
 def provider_token(provider: ProviderDefinition) -> Any:
+    if isinstance(provider, ForwardRef):
+        return provider_token(provider.factory())
     provide = getattr(provider, "provide", None)
     if provide is not None:
         return provide
@@ -76,6 +82,7 @@ class ModuleScanner:
         self.middlewares: list[type] = []
         self.app_middlewares: list[dict[str, Any]] = []
         self.static_assets: list[dict[str, str]] = []
+        self.router_paths: dict[type, str] = {}
         self.records: dict[Any, ModuleRecord] = {}
         self.controller_modules: dict[type, Any] = {}
         self.gateway_modules: dict[type, Any] = {}
@@ -108,8 +115,16 @@ class ModuleScanner:
             metadata=metadata,
         )
 
+        # Normalize imports in place (dict / callable / DynamicModule forms all
+        # become concrete DynamicModule or module-class refs) so downstream
+        # identity matching in _lifecycle_records works — matching the async
+        # scan and preventing an unhashable-dict crash at lifespan startup.
+        normalized_imports = []
         for imported_module in metadata.imports:
-            self._scan_module(imported_module)
+            imported_ref = self._normalize_module_ref(imported_module)
+            normalized_imports.append(imported_ref)
+            self._scan_module(imported_ref)
+        metadata.imports[:] = normalized_imports
 
         for implicit_provider in self._module_implicit_providers(metadata, module_type):
             if implicit_provider not in metadata.providers:
@@ -132,6 +147,8 @@ class ModuleScanner:
         self.middlewares.extend(self._configured_middlewares(module_type))
         self.app_middlewares.extend(getattr(module_type, "__fanest_app_middlewares__", []))
         self.static_assets.extend(getattr(module_type, "__fanest_static_assets__", []))
+        if isinstance(module_ref, DynamicModule) and module_ref.router_paths:
+            self.router_paths.update(module_ref.router_paths)
 
     async def _scan_module_async(self, module: Any) -> None:
         module_ref = await self._normalize_module_ref_async(module)
@@ -180,6 +197,8 @@ class ModuleScanner:
         self.middlewares.extend(self._configured_middlewares(module_type))
         self.app_middlewares.extend(getattr(module_type, "__fanest_app_middlewares__", []))
         self.static_assets.extend(getattr(module_type, "__fanest_static_assets__", []))
+        if isinstance(module_ref, DynamicModule) and module_ref.router_paths:
+            self.router_paths.update(module_ref.router_paths)
 
     def _validate_module_boundaries(self) -> None:
         for record in self.records.values():
@@ -427,6 +446,7 @@ class ModuleScanner:
             tuple(self._object_fingerprint(middleware) for middleware in metadata.middlewares),
             tuple(self._object_fingerprint(export) for export in metadata.exports),
             metadata.global_module,
+            self._object_fingerprint(module.router_paths) if module.router_paths else None,
         )
 
     def _import_fingerprint(self, imported: Any) -> Any:
@@ -570,7 +590,14 @@ class ModuleScanner:
                 ):
                     for component in getattr(handler, key, []):
                         add(component)
-                for parameter in inspect.signature(handler).parameters.values():
+                try:
+                    handler_parameters = inspect.signature(handler).parameters.values()
+                except (TypeError, ValueError):
+                    # Builtins / C callables (e.g. `helper = max`) have no
+                    # introspectable signature — NestJS only inspects routed
+                    # handlers, so a plain callable attribute must not crash the app.
+                    continue
+                for parameter in handler_parameters:
                     source = parameter.default
                     if isinstance(source, ParameterSource):
                         for pipe in source.pipes:

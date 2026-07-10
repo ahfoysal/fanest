@@ -644,7 +644,7 @@ def test_asgi_lifespan_startup_and_shutdown_calls_hooks() -> None:
         assert client.get("/").json() == {"ok": True}
         assert events == ["init", "bootstrap"]
 
-    assert events == ["init", "bootstrap", "before_shutdown", "destroy", "shutdown"]
+    assert events == ["init", "bootstrap", "destroy", "before_shutdown", "shutdown"]
 
 
 def test_package_build_smoke_writes_dist_to_temp_directory(tmp_path: Path) -> None:

@@ -161,7 +161,7 @@ def test_global_prefix_uri_versioning_and_raw_body_share_one_route_shape():
 
     response = client.post("/api/v2/items/versioned-raw", json={"ok": True})
 
-    assert response.status_code == 200
+    assert response.status_code == 201
     assert response.json() == {
         "raw": '{"ok":true}',
         "path": "/api/v2/items/versioned-raw",

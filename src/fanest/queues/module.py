@@ -293,12 +293,12 @@ class QueueService:
     def __init__(self, options: dict[str, Any] | None = Optional(QUEUE_OPTIONS)):
         options = options if isinstance(options, dict) else {}
         self._handlers: dict[tuple[str, str], list[Any]] = {}
-        self._active: dict[str, Job] = {}
+        self._active: dict[tuple[str, str], Job] = {}
         self._completed: list[Job] = []
         self._failed: list[Job] = []
         self._dead_letter: list[Job] = []
-        self._delayed: dict[str, Job] = {}
-        self._attempts: dict[str, list[JobAttempt]] = {}
+        self._delayed: dict[tuple[str, str], Job] = {}
+        self._attempts: dict[tuple[str, str], list[JobAttempt]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         backend = options.get("backend")
         if backend is not None:
@@ -348,7 +348,7 @@ class QueueService:
         await self.backend.add(job)
         if delay > 0:
             delayed_job = self._copy_job(job, status="delayed")
-            self._delayed[job.id] = delayed_job
+            self._delayed[(job.queue, job.id)] = delayed_job
             await self._update_backend(delayed_job)
             self._schedule_background(self._dispatch_after_delay(job))
             return job
@@ -358,10 +358,10 @@ class QueueService:
     async def _dispatch_after_delay(self, job: Job) -> None:
         try:
             await asyncio.sleep(job.delay)
-            self._delayed.pop(job.id, None)
+            self._delayed.pop((job.queue, job.id), None)
             await self._dispatch_job(job, raise_on_failure=False)
         except asyncio.CancelledError:
-            self._delayed.pop(job.id, None)
+            self._delayed.pop((job.queue, job.id), None)
             raise
 
     async def _dispatch_job(self, job: Job, *, raise_on_failure: bool) -> None:
@@ -369,7 +369,7 @@ class QueueService:
         if not handlers:
             return
         active_job = self._copy_job(job, status="active", processed_at=time.monotonic())
-        self._active[job.id] = active_job
+        self._active[(job.queue, job.id)] = active_job
         await self._update_backend(active_job)
         try:
             for handler in handlers:
@@ -393,7 +393,7 @@ class QueueService:
             self._completed.append(completed)
             await self._update_backend(completed)
         finally:
-            self._active.pop(job.id, None)
+            self._active.pop((job.queue, job.id), None)
 
     async def _run_handler(self, handler: Any, job: Job) -> None:
         last_error: Exception | None = None
@@ -422,30 +422,35 @@ class QueueService:
         return self.backend.jobs(queue)
 
     def waiting_jobs(self, queue: str | None = None) -> list[Job]:
-        hidden_ids = {
-            *self._active,
-            *self._delayed,
-            *(job.id for job in self._completed),
-            *(job.id for job in self._failed),
-        }
-        return [job for job in self.jobs(queue) if job.id not in hidden_ids]
+        hidden: set[tuple[str, str]] = set(self._active)
+        hidden.update(self._delayed)
+        hidden.update((job.queue, job.id) for job in self._completed)
+        hidden.update((job.queue, job.id) for job in self._failed)
+        return [job for job in self.jobs(queue) if (job.queue, job.id) not in hidden]
 
-    def get_job(self, job_id: str) -> Job:
+    def get_job(self, job_id: str, queue: str | None = None) -> Job:
         for collection in (
             self._active.values(),
             self._delayed.values(),
             self._completed,
             self._failed,
             self._dead_letter,
-            self.jobs(),
+            self.jobs(queue),
         ):
             for job in collection:
-                if job.id == job_id:
+                if job.id == job_id and (queue is None or job.queue == queue):
                     return job
-        raise KeyError(f"No queue job registered for {job_id!r}.")
+        scope = f" in queue {queue!r}" if queue is not None else ""
+        raise KeyError(f"No queue job registered for {job_id!r}{scope}.")
 
-    def attempts(self, job_id: str) -> list[JobAttempt]:
-        return list(self._attempts.get(job_id, []))
+    def attempts(self, job_id: str, queue: str | None = None) -> list[JobAttempt]:
+        if queue is not None:
+            return list(self._attempts.get((queue, job_id), []))
+        result: list[JobAttempt] = []
+        for (attempt_queue, attempt_id), entries in self._attempts.items():
+            if attempt_id == job_id:
+                result.extend(entries)
+        return result
 
     def active_jobs(self, queue: str | None = None) -> list[Job]:
         return self._filter_jobs(self._active.values(), queue)
@@ -486,34 +491,33 @@ class QueueService:
     def clean(self, *, status: str | None = None, queue: str | None = None) -> int:
         if status not in (None, "completed", "failed", "dead_letter"):
             raise ValueError("Queue clean status must be completed, failed, dead_letter, or None.")
-        removed = 0
-        removed_ids: set[str] = set()
+        removed_keys: set[tuple[str, str]] = set()
 
-        def _split(jobs: list[Job]) -> tuple[list[Job], list[Job]]:
+        def _matches(job: Job) -> bool:
+            return queue is None or job.queue == queue
+
+        def _split(jobs: list[Job]) -> list[Job]:
             kept: list[Job] = []
-            dropped: list[Job] = []
             for job in jobs:
-                if queue is not None and job.queue != queue:
-                    kept.append(job)
+                if _matches(job):
+                    removed_keys.add((job.queue, job.id))
                 else:
-                    dropped.append(job)
-            return kept, dropped
+                    kept.append(job)
+            return kept
 
         if status in (None, "completed"):
-            self._completed, dropped = _split(self._completed)
-            removed += len(dropped)
-            removed_ids.update(job.id for job in dropped)
-        if status in (None, "failed"):
-            self._failed, dropped = _split(self._failed)
-            removed += len(dropped)
-            removed_ids.update(job.id for job in dropped)
-        if status in (None, "dead_letter"):
-            self._dead_letter, dropped = _split(self._dead_letter)
-            removed += len(dropped)
-            removed_ids.update(job.id for job in dropped)
-        if removed_ids:
-            self._remove_from_backend(removed_ids)
-        return removed
+            self._completed = _split(self._completed)
+        # Permanently-failed jobs are mirrored across _failed and _dead_letter
+        # and share a single backend record, so cleaning either status must
+        # purge both lists together to avoid leaving a phantom in the other view.
+        if status in (None, "failed", "dead_letter"):
+            self._failed = _split(self._failed)
+            self._dead_letter = _split(self._dead_letter)
+        for key in removed_keys:
+            self._attempts.pop(key, None)
+        if removed_keys:
+            self._remove_from_backend({job_id for _, job_id in removed_keys})
+        return len(removed_keys)
 
     async def close(self) -> None:
         for task in list(self._background_tasks):
@@ -605,7 +609,7 @@ class QueueService:
         raise ValueError("Queue job backoff must be a number or a dictionary.")
 
     def _record_attempt(self, job: Job, *, success: bool, error: str | None = None) -> None:
-        self._attempts.setdefault(job.id, []).append(
+        self._attempts.setdefault((job.queue, job.id), []).append(
             JobAttempt(
                 job_id=job.id,
                 attempt=job.attempts,

@@ -38,6 +38,17 @@ class InjectionToken:
     name: str
 
 
+#: Request-scoped token resolving to the current HTTP request (or websocket).
+#: Injecting it bubbles the consumer's effective scope up to "request",
+#: mirroring Nest's ``REQUEST`` from ``@nestjs/core``.
+REQUEST = InjectionToken("REQUEST")
+
+#: Transient token resolving to the class into which the current provider is
+#: being injected, mirroring Nest's ``INQUIRER``. ``None`` at the top of a
+#: resolution chain.
+INQUIRER = InjectionToken("INQUIRER")
+
+
 @dataclass(frozen=True)
 class InjectMarker:
     token: Any
@@ -56,6 +67,7 @@ class ForwardRef:
 class ClassProvider:
     provide: Any
     use_class: type
+    scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +81,7 @@ class FactoryProvider:
     provide: Any
     use_factory: Any
     inject: list[Any] = field(default_factory=list)
+    scope: str = "singleton"
 
 
 @dataclass(frozen=True)
@@ -101,6 +114,8 @@ class DynamicModule:
     middlewares: list[Any] = field(default_factory=list)
     exports: list[Any] = field(default_factory=list)
     global_module: bool = False
+    #: Module-class → route-prefix mapping contributed by RouterModule.register.
+    router_paths: dict[type, str] | None = None
 
 
 @dataclass(frozen=True)

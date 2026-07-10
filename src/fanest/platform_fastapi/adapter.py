@@ -82,6 +82,7 @@ class FastApiAdapter:
         versioning: VersioningOptions | None = None,
         controller_modules: dict[type, Any] | None = None,
         gateway_modules: dict[type, Any] | None = None,
+        module_route_prefixes: dict[Any, str] | None = None,
     ) -> None:
         self.app = app
         self.container = container
@@ -93,6 +94,7 @@ class FastApiAdapter:
         self.versioning = versioning
         self.controller_modules = controller_modules or {}
         self.gateway_modules = gateway_modules or {}
+        self.module_route_prefixes = module_route_prefixes or {}
         self._parameter_cache: dict[Any, dict[str, inspect.Parameter]] = {}
         self._non_uri_versioned_routes: set[tuple[str, str]] = set()
 
@@ -110,8 +112,9 @@ class FastApiAdapter:
         )
         if controller_metadata is None:
             raise TypeError(f"{controller.__name__} is not a FaNest controller.")
-        if getattr(controller, "__fanest_swagger_exclude_controller__", False):
-            return
+        # @ApiExcludeController is documentation-only (like NestJS): the routes
+        # keep serving, they are just omitted from the OpenAPI schema.
+        exclude_from_docs = getattr(controller, "__fanest_swagger_exclude_controller__", False)
 
         routes: list[tuple[str, Callable[..., Any], RouteMetadata]] = []
         for _, handler in inspect.getmembers(controller, predicate=inspect.isfunction):
@@ -186,14 +189,25 @@ class FastApiAdapter:
                 extra = dict(route_options.get("openapi_extra", {}))
                 extra["security"] = [*extra.get("security", []), *securities]
                 route_options["openapi_extra"] = extra
+            module_prefix = self.module_route_prefixes.get(
+                self.controller_modules.get(controller), ""
+            )
             for version in path_versions:
                 path = self._versioned_path(
                     controller_metadata.prefix,
                     route_metadata.path,
                     version,
                     versioning,
+                    module_prefix=module_prefix,
                 )
                 methods = self._route_methods(route_metadata.method)
+                # NestJS defaults POST handlers to 201 Created, every other
+                # verb to 200 — unless the route sets an explicit status /
+                # @HttpCode (which is already merged into route_options).
+                if "status_code" not in route_options and methods == ["POST"]:
+                    route_options["status_code"] = 201
+                if exclude_from_docs:
+                    route_options.setdefault("include_in_schema", False)
                 self._ensure_supported_versioned_route(path, methods, versioning, route_version)
                 self.app.add_api_route(
                     path,
@@ -226,6 +240,7 @@ class FastApiAdapter:
         route_path: str,
         version: str | None,
         versioning: VersioningOptions | None,
+        module_prefix: str = "",
     ) -> str:
         version_prefix = ""
         if version and (versioning is None or versioning.type == VersioningType.URI):
@@ -234,6 +249,7 @@ class FastApiAdapter:
         return self._join_paths(
             self.global_prefix,
             version_prefix,
+            module_prefix,
             controller_prefix,
             route_path,
         )
@@ -537,6 +553,7 @@ class FastApiAdapter:
         ) -> Any:
             kwargs = self._restore_reserved_user_parameter_names(handler_function, kwargs)
             request_scope = self.container.begin_request()
+            current_request_token = self.container.set_current_request(request)
             end_request_on_return = True
             self._attach_raw_body(request)
             controller = await self.container.resolve_async(controller_class, module_key=module_key)
@@ -549,6 +566,7 @@ class FastApiAdapter:
             )
             try:
                 self._ensure_request_version(request, route_version, versioning)
+                self._ensure_host_matches(controller, request)
                 await self._run_guards(controller, handler, context)
                 context.kwargs.update(self._bind_request_parameters(handler, request, kwargs))
                 context.kwargs.update(self._bind_response_parameters(handler, response, kwargs))
@@ -638,6 +656,7 @@ class FastApiAdapter:
                     return handled
                 raise
             finally:
+                self.container.reset_current_request(current_request_token)
                 if end_request_on_return:
                     self.container.end_request(request_scope)
 
@@ -654,8 +673,14 @@ class FastApiAdapter:
         route_version: Any,
         versioning: VersioningOptions | None,
     ) -> None:
-        if route_version is None or versioning is None or versioning.type == VersioningType.URI:
+        if versioning is None or versioning.type == VersioningType.URI:
             return
+        # An un-versioned route inherits the configured default_version, so a
+        # request asking for a different version 404s (NestJS defaultVersion).
+        if route_version is None:
+            if not versioning.default_version:
+                return
+            route_version = versioning.default_version
         if route_version == VERSION_NEUTRAL:
             return
         route_versions = {str(version) for version in self._route_versions(route_version, versioning) if version}
@@ -1068,6 +1093,32 @@ class FastApiAdapter:
                     bound[name] = source.default
         return bound
 
+    def _ensure_host_matches(self, controller: Any, request: Request) -> None:
+        # A host-scoped controller (@Controller(host=...)) only serves requests
+        # whose Host header matches its (possibly parameterized) pattern; every
+        # other host 404s, matching NestJS sub-domain routing.
+        metadata: ControllerMetadata | None = getattr(controller.__class__, "__fanest_controller__", None)
+        if metadata is None or metadata.host is None:
+            return
+        if not self._host_matches(metadata.host, request.url.hostname):
+            raise HTTPException(status_code=404, detail="Not Found")
+
+    def _host_matches(self, pattern: str, hostname: str | None) -> bool:
+        if hostname is None:
+            return False
+        pattern_parts = pattern.split(".")
+        host_parts = hostname.split(".")
+        if len(pattern_parts) != len(host_parts):
+            return False
+        for pattern_part, value in zip(pattern_parts, host_parts, strict=True):
+            if pattern_part.startswith(":") and len(pattern_part) > 1:
+                continue
+            if pattern_part.startswith("{") and pattern_part.endswith("}"):
+                continue
+            if pattern_part != value:
+                return False
+        return True
+
     def _host_params(self, controller: Any, hostname: str | None) -> dict[str, str]:
         metadata: ControllerMetadata | None = getattr(controller.__class__, "__fanest_controller__", None)
         if metadata is None or metadata.host is None or hostname is None:
@@ -1412,12 +1463,14 @@ class FastApiAdapter:
         if controller_class is None or handler_name is None:
             return None
         request_scope = self.container.begin_request()
+        current_request_token = self.container.set_current_request(request)
         try:
             controller = await self.container.resolve_async(controller_class, module_key=module_key)
             handler = getattr(controller, handler_name)
             context = ExecutionContext(handler=handler, controller=controller, request=request, kwargs={})
             return await self._run_filters(controller, handler, context, exc)
         finally:
+            self.container.reset_current_request(current_request_token)
             self.container.end_request(request_scope)
 
     def _collect(self, controller: Any, handler: Callable[..., Any], key: str) -> list[Any]:
@@ -1507,7 +1560,13 @@ class FastApiAdapter:
             *getattr(handler, "__fanest_interceptors__", []),
         ]
         for interceptor in candidates:
-            instance = interceptor() if inspect.isclass(interceptor) else interceptor
+            # File-upload interceptors are always supplied as configured
+            # instances (FilesInterceptor("files"), ...). A bare class here is a
+            # DI interceptor with an injected constructor — skip it rather than
+            # instantiating with no args (which crashed app startup).
+            if inspect.isclass(interceptor):
+                continue
+            instance = interceptor
             if isinstance(instance, FilesInterceptor) and instance.field_name == field_name:
                 return instance.max_count
             if isinstance(instance, FileFieldsInterceptor):
@@ -1531,6 +1590,9 @@ class FastApiAdapter:
             code = pending.get("status_code")
             if code is not None:
                 return code
+        # NestJS default: POST → 201 Created, all other verbs → 200.
+        if route_metadata is not None and self._route_methods(route_metadata.method) == ["POST"]:
+            return 201
         return 200
 
     def _response_headers(self, controller: Any, handler: Callable[..., Any]) -> list[tuple[str, str]]:

@@ -71,10 +71,10 @@ def test_lifecycle_hooks_run_in_nest_style_order():
         "second:init",
         "first:bootstrap",
         "second:bootstrap",
-        "second:before_shutdown",
-        "first:before_shutdown",
         "second:destroy",
         "first:destroy",
+        "second:before_shutdown",
+        "first:before_shutdown",
         "second:shutdown",
         "first:shutdown",
     ]
@@ -89,8 +89,8 @@ def test_use_existing_alias_does_not_duplicate_lifecycle_hooks():
     assert events == [
         "first:init",
         "first:bootstrap",
-        "first:before_shutdown",
         "first:destroy",
+        "first:before_shutdown",
         "first:shutdown",
     ]
 

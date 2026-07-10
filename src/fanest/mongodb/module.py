@@ -244,8 +244,29 @@ class MongoCollection:
 
 
 def _get_path(document: dict[str, Any], path: str, default: Any = None) -> Any:
-    current: Any = document
-    for part in path.split("."):
+    return _walk_path(document, path.split("."), default)
+
+
+def _walk_path(current: Any, parts: list[str], default: Any) -> Any:
+    for index, part in enumerate(parts):
+        if isinstance(current, list):
+            # Numeric segment indexes into the array (items.0.name); a
+            # non-numeric segment maps the remaining path over every embedded
+            # document and collects the matches, mirroring MongoDB's
+            # "Query an Array of Embedded Documents" traversal.
+            if part.isdigit() and int(part) < len(current):
+                current = current[int(part)]
+                continue
+            collected: list[Any] = []
+            for element in current:
+                value = _walk_path(element, parts[index:], _MISSING)
+                if value is _MISSING:
+                    continue
+                if isinstance(value, list):
+                    collected.extend(value)
+                else:
+                    collected.append(value)
+            return collected if collected else default
         if not isinstance(current, dict) or part not in current:
             return default
         current = current[part]
@@ -306,13 +327,18 @@ def _apply_update(stored: dict[str, Any], update: dict[str, Any]) -> None:
             current = _get_path(stored, key, [])
             if not isinstance(current, list):
                 raise TypeError(f"Cannot apply $pull to non-array field: {key}")
-            _set_path(stored, key, [item for item in current if item != value])
+            _set_path(stored, key, [item for item in current if not _pull_matches(item, value)])
         for key, value in update.get("$addToSet", {}).items():
             current = _get_path(stored, key, [])
             if not isinstance(current, list):
                 raise TypeError(f"Cannot apply $addToSet to non-array field: {key}")
-            if value not in current:
-                current.append(value)
+            # $each adds each element individually (deduplicated), matching MongoDB.
+            additions = value["$each"] if isinstance(value, dict) and "$each" in value else [value]
+            if isinstance(value, dict) and "$each" in value and not isinstance(additions, list):
+                raise TypeError("$addToSet $each requires an array value.")
+            for item in additions:
+                if item not in current:
+                    current.append(item)
             _set_path(stored, key, current)
         return
     for key, value in update.items():
@@ -341,10 +367,19 @@ def _sort_documents(
     return ordered
 
 
-def _sort_key(value: Any) -> tuple[bool, Any]:
-    # Order missing/None values first (as MongoDB treats null as lowest) so
-    # sorting a heterogeneous collection never compares None against a value.
-    return (value is not None, value)
+def _sort_key(value: Any) -> tuple[int, Any]:
+    # Emulate MongoDB's BSON total ordering so sorting a heterogeneous
+    # collection never raises TypeError comparing incomparable Python types:
+    # null < numbers < strings < everything-else (stringified).
+    if value is None:
+        return (0, 0)
+    if isinstance(value, bool):
+        return (1, int(value))
+    if isinstance(value, (int, float)):
+        return (1, value)
+    if isinstance(value, str):
+        return (2, value)
+    return (3, repr(value))
 
 
 def _project_document(document: dict[str, Any], projection: list[str] | dict[str, int | bool]) -> dict[str, Any]:
@@ -392,7 +427,9 @@ def _matches_query(document: dict[str, Any], query: dict[str, Any]) -> bool:
             if not _matches_operators(actual, exists, expected):
                 return False
         elif isinstance(actual, list):
-            if expected not in actual:
+            # MongoDB matches an array field either by whole-array equality or
+            # if any element equals the queried value.
+            if actual != expected and expected not in actual:
                 return False
         elif actual != expected:
             return False
@@ -402,11 +439,30 @@ def _matches_query(document: dict[str, Any], query: dict[str, Any]) -> bool:
 _MISSING = object()
 
 
+def _value_equals(actual: Any, expected: Any) -> bool:
+    # Equality against an array field matches whole-array equality OR element
+    # containment (MongoDB semantics).
+    if actual == expected:
+        return True
+    return isinstance(actual, list) and expected in actual
+
+
+def _pull_matches(item: Any, condition: Any) -> bool:
+    """Whether an array element is removed by ``$pull``. A dict condition is a
+    set of query operators ({'$gt': 5}) or a sub-document match ({'score': 8});
+    any other value is plain equality (MongoDB semantics)."""
+    if isinstance(condition, dict):
+        if any(str(key).startswith("$") for key in condition):
+            return _matches_operators(item, item is not _MISSING, condition)
+        return isinstance(item, dict) and _matches_query(item, condition)
+    return item == condition
+
+
 def _matches_operators(actual: Any, exists: bool, operators: dict[str, Any]) -> bool:
     for operator, expected in operators.items():
-        if operator == "$eq" and actual != expected:
+        if operator == "$eq" and not _value_equals(actual, expected):
             return False
-        if operator == "$ne" and actual == expected:
+        if operator == "$ne" and _value_equals(actual, expected):
             return False
         if operator == "$gt" and (not exists or not _range_matches(actual, expected, "$gt")):
             return False
@@ -499,8 +555,15 @@ class MotorCollection:
 
     async def update_one(self, query: dict[str, Any], update: dict[str, Any]) -> dict[str, Any] | None:
         changes = update if any(str(k).startswith("$") for k in update) else {"$set": update}
+        # Capture the matched document's _id first so we can return the updated
+        # document even when the update mutates a field named in the query
+        # (e.g. a status transition) — re-querying with the original filter
+        # would otherwise miss it.
+        target = await self._collection.find_one(query)
         await self._collection.update_one(query, changes)
-        return await self.find_one(query)
+        if target is None:
+            return None
+        return await self._collection.find_one({"_id": target["_id"]})
 
     async def update_many(self, query: dict[str, Any], update: dict[str, Any]) -> int:
         changes = update if any(str(k).startswith("$") for k in update) else {"$set": update}

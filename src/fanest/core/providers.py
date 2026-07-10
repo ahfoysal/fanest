@@ -1,6 +1,8 @@
 from typing import Any
 
 from fanest.core.metadata import (
+    INQUIRER,
+    REQUEST,
     ClassProvider,
     ExistingProvider,
     ForwardRef,
@@ -9,6 +11,21 @@ from fanest.core.metadata import (
     InjectionToken,
     ValueProvider,
 )
+
+__all__ = [
+    "INQUIRER",
+    "REQUEST",
+    "Inject",
+    "Optional",
+    "Self",
+    "SkipSelf",
+    "forward_ref",
+    "token",
+    "use_class",
+    "use_existing",
+    "use_factory",
+    "use_value",
+]
 
 
 def token(name: str) -> InjectionToken:
@@ -48,16 +65,21 @@ def forward_ref(factory: Any) -> ForwardRef:
     return ForwardRef(factory=factory)
 
 
-def use_class(provide: Any, use_class: type) -> ClassProvider:
-    return ClassProvider(provide=provide, use_class=use_class)
+def use_class(provide: Any, use_class: type, scope: str | None = None) -> ClassProvider:
+    return ClassProvider(provide=provide, use_class=use_class, scope=scope)
 
 
 def use_value(provide: Any, use_value: Any) -> ValueProvider:
     return ValueProvider(provide=provide, use_value=use_value)
 
 
-def use_factory(provide: Any, use_factory: Any, inject: list[Any] | None = None) -> FactoryProvider:
-    return FactoryProvider(provide=provide, use_factory=use_factory, inject=inject or [])
+def use_factory(
+    provide: Any,
+    use_factory: Any,
+    inject: list[Any] | None = None,
+    scope: str = "singleton",
+) -> FactoryProvider:
+    return FactoryProvider(provide=provide, use_factory=use_factory, inject=inject or [], scope=scope)
 
 
 def use_existing(provide: Any, use_existing: Any) -> ExistingProvider:

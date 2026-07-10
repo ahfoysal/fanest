@@ -15,6 +15,13 @@ logger = logging.getLogger("fanest.events")
 
 def OnEvent(event: str, *, priority: int = 0, prepend: bool = False):
     def decorator(handler):
+        # Accumulate subscriptions so stacked @OnEvent(...) decorators each
+        # register (matching @nestjs/event-emitter's extendArrayMetadata),
+        # instead of the outermost silently overwriting the inner ones.
+        subscriptions = list(getattr(handler, "__fanest_events__", []))
+        subscriptions.insert(0, {"event": event, "priority": priority, "prepend": prepend})
+        setattr(handler, "__fanest_events__", subscriptions)
+        # Keep the single-value attributes for backward compatibility.
         setattr(handler, "__fanest_event__", event)
         setattr(handler, "__fanest_event_priority__", priority)
         setattr(handler, "__fanest_event_prepend__", prepend)
@@ -79,13 +86,23 @@ class EventEmitter:
         self._handlers: dict[str, list[Callable[..., Any]]] = {}
         self._once_handlers: dict[str, list[Callable[..., Any]]] = {}
         self._priorities: dict[Any, int] = {}
+        self._order: dict[Any, int] = {}
+        self._sequence: int = 0
         self._errors: list[EventError] = []
+
+    def _record_order(self, event: str, handler: Callable[..., Any], *, prepend: bool = False) -> None:
+        self._sequence += 1
+        # Prepended listeners sort before appended ones at equal priority
+        # (negative rank), most-recent-prepend first; appended listeners keep
+        # registration order (positive rank).
+        self._order[(event, self._handler_key(handler))] = -self._sequence if prepend else self._sequence
 
     def on(self, event: str, handler: Callable[..., Any], *, prepend: bool = False, priority: int = 0) -> None:
         handlers = self._handlers.setdefault(event, [])
         if self._handler_key(handler) not in {self._handler_key(item) for item in handlers}:
             self._enforce_max_listeners(event, len(handlers) + len(self._once_handlers.get(event, [])) + 1)
             self._priorities[(event, self._handler_key(handler))] = priority
+            self._record_order(event, handler, prepend=prepend)
             if prepend:
                 handlers.insert(0, handler)
             else:
@@ -97,6 +114,7 @@ class EventEmitter:
         if self._handler_key(handler) not in {self._handler_key(item) for item in handlers}:
             self._enforce_max_listeners(event, len(handlers) + len(self._handlers.get(event, [])) + 1)
             self._priorities[(event, self._handler_key(handler))] = priority
+            self._record_order(event, handler, prepend=prepend)
             if prepend:
                 handlers.insert(0, handler)
             else:
@@ -182,16 +200,22 @@ class EventEmitter:
         self._errors.clear()
 
     def _collect_handlers(self, event: str) -> list[Callable[..., Any]]:
-        collected: list[tuple[int, Callable[..., Any]]] = []
+        # Merge on() and once() listeners into one list ordered by priority
+        # (descending) then registration order (ascending), so a once() listener
+        # registered before an on() listener of equal priority fires first —
+        # matching Node's single ordered listener array.
+        collected: list[tuple[int, int, Callable[..., Any]]] = []
         event_names = self._matching_event_names(event)
         for name in event_names:
             for handler in self._handlers.get(name, []):
-                collected.append((self._priorities.get((name, self._handler_key(handler)), 0), handler))
+                key = self._handler_key(handler)
+                collected.append((self._priorities.get((name, key), 0), self._order.get((name, key), 0), handler))
         for name in event_names:
             for handler in self._once_handlers.pop(name, []):
-                collected.append((self._priorities.get((name, self._handler_key(handler)), 0), handler))
-        collected.sort(key=lambda item: item[0], reverse=True)
-        return [handler for _, handler in collected]
+                key = self._handler_key(handler)
+                collected.append((self._priorities.get((name, key), 0), self._order.get((name, key), 0), handler))
+        collected.sort(key=lambda item: (-item[0], item[1]))
+        return [handler for _, _, handler in collected]
 
     def _matching_event_names(self, event: str) -> list[str]:
         names = [event]
@@ -200,7 +224,7 @@ class EventEmitter:
         for registered in [*self._handlers.keys(), *self._once_handlers.keys()]:
             if registered == event or registered in names:
                 continue
-            if registered == "*" or _event_matches(registered, event):
+            if _event_matches(registered, event):
                 names.append(registered)
         return names
 
@@ -267,11 +291,27 @@ class EventEmitter:
 def _event_matches(pattern: str, event: str) -> bool:
     if "*" not in pattern:
         return pattern == event
-    pattern_parts = pattern.split(".")
-    event_parts = event.split(".")
-    if len(pattern_parts) != len(event_parts):
+    return _segments_match(pattern.split("."), event.split("."))
+
+
+def _segments_match(pattern_parts: list[str], event_parts: list[str]) -> bool:
+    # eventemitter2 semantics (used by @nestjs/event-emitter): "*" matches
+    # exactly one segment; "**" matches one or more segments (so "order.**"
+    # matches order.created and order.created.v1, and "**" matches everything).
+    if not pattern_parts:
+        return not event_parts
+    head, rest = pattern_parts[0], pattern_parts[1:]
+    if head == "**":
+        if not event_parts:
+            return False
+        if not rest:
+            return True
+        return any(_segments_match(rest, event_parts[index:]) for index in range(1, len(event_parts) + 1))
+    if not event_parts:
         return False
-    return all(pattern_part == "*" or pattern_part == event_part for pattern_part, event_part in zip(pattern_parts, event_parts))
+    if head == "*" or head == event_parts[0]:
+        return _segments_match(rest, event_parts[1:])
+    return False
 
 
 class EventEmitterModule:
