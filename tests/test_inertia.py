@@ -1032,3 +1032,200 @@ def test_encrypt_history_routes_middleware():
         assert client.get("/enc/secret", headers=headers).json()["encryptHistory"] is True
         assert client.get("/enc/admin/users", headers=headers).json()["encryptHistory"] is True  # prefix match
         assert client.get("/enc/public", headers=headers).json()["encryptHistory"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Beta hardening: debug env-gate for the error filter
+# --------------------------------------------------------------------------- #
+def test_exception_filter_reraises_in_debug_mode():
+    from fanest.common.exceptions import NotFoundException
+    from fanest.inertia import InertiaExceptionFilter
+
+    @Controller("dbg")
+    class DbgPages:
+        def __init__(self, inertia: InertiaService):
+            self.inertia = inertia
+
+        @Get("/missing")
+        async def missing(self):
+            raise NotFoundException()
+
+    @Module(imports=[InertiaModule.for_root(version="1", debug=True)], controllers=[DbgPages])
+    class DbgApp:
+        pass
+
+    app = FaNestFactory.create(DbgApp, global_filters=[InertiaExceptionFilter])
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/dbg/missing", headers={"X-Inertia": "true", "X-Inertia-Version": "1"})
+    # debug -> the filter re-raises so the dev sees the real error, NOT an Inertia page
+    assert resp.status_code == 404
+    assert "component" not in resp.json()
+
+
+# --------------------------------------------------------------------------- #
+# Protocol conformance: pin the exact page-object shape so a core change can't
+# silently break the Inertia contract (key set, always-present base keys,
+# empty-key omission, v2 metadata shapes).
+# --------------------------------------------------------------------------- #
+@Controller("cf")
+class ConformancePages:
+    def __init__(self, inertia: InertiaService):
+        self.inertia = inertia
+
+    @Get("/full")
+    async def full(self):
+        return await self.inertia.render(
+            "Full",
+            {
+                "plain": 1,
+                "m": self.inertia.merge([1]),
+                "p": self.inertia.merge([1], prepend=True),
+                "d": self.inertia.deep_merge({"x": []}, match_on=["id"]),
+                "later": self.inertia.defer(lambda: 1, group="g"),
+                "cfg": self.inertia.once(lambda: 2, expires_at=5),
+            },
+        )
+
+    @Get("/min")
+    async def minimal(self):
+        return await self.inertia.render("Min", {"x": 1})
+
+
+@Module(imports=[InertiaModule.for_root(version="cf1")], controllers=[ConformancePages])
+class ConformanceApp:
+    pass
+
+
+def _cf_client():
+    return TestClient(FaNestFactory.create(ConformanceApp))
+
+
+_BASE_KEYS = {"component", "props", "url", "version", "clearHistory", "encryptHistory"}
+
+
+def test_conformance_full_page_object_shape():
+    with _cf_client() as client:
+        page = client.get("/cf/full", headers={"X-Inertia": "true", "X-Inertia-Version": "cf1"}).json()
+    # exact top-level key set — nothing extra may leak in, nothing may drop out
+    assert set(page) == _BASE_KEYS | {
+        "mergeProps",
+        "prependProps",
+        "deepMergeProps",
+        "matchPropsOn",
+        "deferredProps",
+        "onceProps",
+    }
+    # base keys carry their contract types/values
+    assert page["component"] == "Full"
+    assert page["version"] == "cf1"
+    assert page["clearHistory"] is False and page["encryptHistory"] is False
+    assert isinstance(page["clearHistory"], bool) and isinstance(page["encryptHistory"], bool)
+    # v2 metadata: exact shapes (byte-parity with inertia-laravel)
+    assert page["mergeProps"] == ["m"]
+    assert page["prependProps"] == ["p"]
+    assert page["deepMergeProps"] == ["d"]
+    assert page["matchPropsOn"] == ["d.id"]
+    assert page["deferredProps"] == {"g": ["later"]}
+    assert page["onceProps"] == {"cfg": {"prop": "cfg", "expiresAt": 5}}
+    # errors bag is always present, as a dict
+    assert page["props"]["errors"] == {}
+
+
+def test_conformance_minimal_page_omits_all_empty_keys():
+    with _cf_client() as client:
+        page = client.get("/cf/min", headers={"X-Inertia": "true", "X-Inertia-Version": "cf1"}).json()
+    # a plain render emits ONLY the six always-present base keys
+    assert set(page) == _BASE_KEYS
+    assert set(page["props"]) == {"x", "errors"}
+
+
+# --------------------------------------------------------------------------- #
+# scrollProps / infinite scroll (Inertia v2)
+# --------------------------------------------------------------------------- #
+@Controller("scroll")
+class ScrollPages:
+    def __init__(self, inertia: InertiaService):
+        self.inertia = inertia
+
+    @Get("/feed")
+    async def feed(self):
+        return await self.inertia.render(
+            "Feed",
+            {
+                "users": self.inertia.scroll(
+                    {"data": [{"id": 1}], "meta": {"total": 1}},
+                    metadata={"pageName": "page", "previousPage": None, "nextPage": 2, "currentPage": 1},
+                    match_on=["id"],
+                ),
+            },
+        )
+
+    @Get("/auto")
+    async def auto(self):
+        # metadata=None -> pageName defaults to "page", currentPage to 1
+        return await self.inertia.render("Feed", {"items": self.inertia.scroll({"data": []})})
+
+
+@Module(imports=[InertiaModule.for_root(version="s1")], controllers=[ScrollPages])
+class ScrollApp:
+    pass
+
+
+def _scroll_client():
+    return TestClient(FaNestFactory.create(ScrollApp))
+
+
+def test_scroll_prop_append_default():
+    with _scroll_client() as client:
+        page = client.get("/scroll/feed", headers={"X-Inertia": "true", "X-Inertia-Version": "s1"}).json()
+    # default (no intent header) -> append: the "{key}.{wrapper}" path lands in mergeProps
+    assert page["mergeProps"] == ["users.data"]
+    assert "prependProps" not in page
+    assert page["matchPropsOn"] == ["users.data.id"]
+    assert page["scrollProps"] == {
+        "users": {"pageName": "page", "previousPage": None, "nextPage": 2, "currentPage": 1, "reset": False}
+    }
+    # the value itself is still sent under the prop
+    assert page["props"]["users"] == {"data": [{"id": 1}], "meta": {"total": 1}}
+
+
+def test_scroll_prop_prepend_intent():
+    with _scroll_client() as client:
+        page = client.get(
+            "/scroll/feed",
+            headers={
+                "X-Inertia": "true",
+                "X-Inertia-Version": "s1",
+                "X-Inertia-Infinite-Scroll-Merge-Intent": "prepend",
+            },
+        ).json()
+    # scrolling up -> the merge path moves to prependProps, mergeProps drops out
+    assert page["prependProps"] == ["users.data"]
+    assert "mergeProps" not in page
+    assert page["scrollProps"]["users"]["reset"] is False
+
+
+def test_scroll_prop_reset_keeps_scrollprops_but_drops_merge():
+    with _scroll_client() as client:
+        page = client.get(
+            "/scroll/feed",
+            headers={"X-Inertia": "true", "X-Inertia-Version": "s1", "X-Inertia-Reset": "users"},
+        ).json()
+    # reset -> no longer advertised as a merge/prepend prop, but STILL in scrollProps (reset=true)
+    assert "mergeProps" not in page
+    assert "prependProps" not in page
+    assert page["scrollProps"]["users"]["reset"] is True
+    assert page["props"]["users"]["data"] == [{"id": 1}]  # value still sent
+
+
+def test_scroll_prop_default_metadata():
+    with _scroll_client() as client:
+        page = client.get("/scroll/auto", headers={"X-Inertia": "true", "X-Inertia-Version": "s1"}).json()
+    assert page["mergeProps"] == ["items.data"]
+    assert page["scrollProps"]["items"] == {
+        "pageName": "page",
+        "previousPage": None,
+        "nextPage": None,
+        "currentPage": 1,
+        "reset": False,
+    }
