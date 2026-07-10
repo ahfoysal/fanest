@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Any
 
 from fastapi import FastAPI
@@ -120,6 +121,8 @@ class DocumentBuilder:
         requirements: list[str] | None = None,
     ) -> "DocumentBuilder":
         self._config["components"]["securitySchemes"][name] = scheme
+        if requirements is not None:
+            self._config["security"].append({name: requirements})
         return self
 
     def add_global_security(
@@ -147,7 +150,10 @@ class SwaggerModule:
 
     @staticmethod
     def create_document(app: FastAPI, config: dict[str, Any] | None = None) -> dict[str, Any]:
-        schema = app.openapi()
+        # app.openapi() returns FastAPI's process-cached schema dict; deep-copy
+        # it before mutating so building two documents (public/admin) doesn't
+        # corrupt the cache or leak one document's config into the other.
+        schema = deepcopy(app.openapi())
         config = config or {}
         info = schema.setdefault("info", {})
         for key in ["title", "version", "description"]:
@@ -169,9 +175,21 @@ class SwaggerModule:
             schema["security"] = config["security"]
         SwaggerModule._expand_fanest_schema_extensions(schema)
         SwaggerModule._add_extra_model_schemas(schema)
+        SwaggerModule._strip_hidden_component_schemas(schema)
         SwaggerModule._merge_multipart_inline_schema_refs(schema)
         SwaggerModule._dedupe_operation_parameters(schema)
         return schema
+
+    @staticmethod
+    def _strip_hidden_component_schemas(schema: dict[str, Any]) -> None:
+        # @ApiHideProperty fields must be dropped from every published model
+        # schema (not just the extra models), and the internal "hidden" marker
+        # must never leak into the OpenAPI JSON.
+        schemas = schema.get("components", {}).get("schemas", {})
+        if isinstance(schemas, dict):
+            for model_schema in schemas.values():
+                if isinstance(model_schema, dict):
+                    SwaggerModule._strip_hidden_properties(model_schema)
 
     @staticmethod
     def setup(path: str, app: FastAPI, document: dict[str, Any]) -> None:
@@ -221,7 +239,9 @@ class SwaggerModule:
             for method, operation in methods.items():
                 if method.lower() not in SwaggerModule._HTTP_METHODS or not isinstance(operation, dict):
                     continue
-                operation_id = operation.get("operationId") or SwaggerModule._operation_name(method, path)
+                operation_id = SwaggerModule._safe_method_name(
+                    operation.get("operationId") or SwaggerModule._operation_name(method, path)
+                )
                 lines.extend(
                     [
                         f"  async {operation_id}(options: RequestInit = {{}}): Promise<Response> {{",
@@ -237,6 +257,25 @@ class SwaggerModule:
     def _operation_name(method: str, path: str) -> str:
         suffix = "".join(part.title() for part in path.strip("/").replace("{", "").replace("}", "").split("/"))
         return f"{method.lower()}{suffix or 'Root'}"
+
+    @staticmethod
+    def _safe_method_name(operation_id: str) -> str:
+        # OpenAPI operationIds may contain characters illegal in a TS method
+        # name (hyphens, dots, spaces from a valid but non-identifier id).
+        # Turn separators into camelCase and drop anything else so the emitted
+        # client parses.
+        cleaned: list[str] = []
+        capitalize_next = False
+        for index, char in enumerate(operation_id):
+            if char.isalnum():
+                cleaned.append(char.upper() if capitalize_next else char)
+                capitalize_next = False
+            else:
+                capitalize_next = bool(cleaned)
+        name = "".join(cleaned)
+        if not name or not (name[0].isalpha() or name[0] == "_"):
+            name = f"op{name}" if name else "operation"
+        return name
 
     @staticmethod
     def _add_extra_model_schemas(schema: dict[str, Any]) -> None:
@@ -388,6 +427,10 @@ class SwaggerModule:
         for parameter in parameters:
             if not isinstance(parameter, dict):
                 key = (None, None)
+            elif "$ref" in parameter:
+                # Reference Object parameters have no in/name here; key them by
+                # their $ref so distinct references don't all collide on (None, None).
+                key = ("$ref", parameter["$ref"])
             else:
                 key = (parameter.get("in"), parameter.get("name"))
             if key not in selected:

@@ -323,3 +323,124 @@ def test_swagger_decorators_and_module_setup():
     default_docs = client.get("/docs").text
     assert "/openapi.json" in default_docs
     assert client.get("/openapi.json").json() == client.get("/api-docs/openapi.json").json()
+
+
+# --------------------------------------------------------------------------- #
+# Round-2 swagger regressions
+# --------------------------------------------------------------------------- #
+def test_create_document_does_not_corrupt_across_configs():
+    from fanest import Controller, FaNestFactory, Get, Module
+    from fanest.swagger import DocumentBuilder, SwaggerModule
+
+    @Controller("a")
+    class A:
+        @Get("/")
+        async def read(self):
+            return {}
+
+    @Module(controllers=[A])
+    class M:
+        pass
+
+    app = FaNestFactory.create(M)
+    public = SwaggerModule.create_document(app, DocumentBuilder().set_title("Public API").build())
+    admin = SwaggerModule.create_document(app, DocumentBuilder().set_title("Admin API").build())
+    assert public is not admin
+    assert public["info"]["title"] == "Public API"
+    assert admin["info"]["title"] == "Admin API"
+
+
+def test_add_security_requirements_are_registered():
+    from fanest.swagger import DocumentBuilder
+
+    config = (
+        DocumentBuilder()
+        .add_security("apiKey", {"type": "apiKey", "in": "header", "name": "X-Key"}, requirements=["read"])
+        .build()
+    )
+    assert {"apiKey": ["read"]} in config["security"]
+
+
+def test_generate_typescript_client_sanitizes_method_names():
+    import re
+
+    from fanest.swagger import SwaggerModule
+
+    document = {
+        "openapi": "3.0.0",
+        "paths": {
+            "/health-check": {"get": {"operationId": "find-pet"}},
+            "/v1.2/items": {"get": {}},
+        },
+    }
+    source = SwaggerModule.generate_typescript_client(document)
+    methods = re.findall(r"async (\w+)\(", source)
+    assert methods and all(name.isidentifier() for name in methods)
+
+
+def test_reference_object_parameters_are_not_deduped_away():
+    from fanest.swagger import SwaggerModule
+
+    schema = {
+        "openapi": "3.0.0",
+        "paths": {
+            "/x": {
+                "get": {
+                    "parameters": [
+                        {"$ref": "#/components/parameters/TenantHeader"},
+                        {"$ref": "#/components/parameters/TraceHeader"},
+                    ]
+                }
+            }
+        },
+    }
+    SwaggerModule._dedupe_operation_parameters(schema)
+    refs = {p["$ref"] for p in schema["paths"]["/x"]["get"]["parameters"]}
+    assert refs == {
+        "#/components/parameters/TenantHeader",
+        "#/components/parameters/TraceHeader",
+    }
+
+
+def test_int_enum_and_dict_schema_types():
+    from enum import IntEnum
+
+    from fanest.swagger.decorators import _schema_for_type
+
+    class Priority(IntEnum):
+        LOW = 1
+        HIGH = 2
+
+    assert _schema_for_type(Priority) == {"enum": [1, 2], "type": "integer"}
+    assert _schema_for_type(dict[str, int]) == {
+        "type": "object",
+        "additionalProperties": {"type": "integer"},
+    }
+
+
+def test_api_hide_property_hidden_from_component_schemas():
+    from typing import Any, cast
+
+    from pydantic import BaseModel
+
+    from fanest import Body, Controller, FaNestFactory, Module, Post
+    from fanest.swagger import ApiHideProperty, SwaggerModule
+
+    class CreateDto(BaseModel):
+        name: str
+        internal_token: str = ApiHideProperty()
+
+    @Controller("things")
+    class T:
+        @Post("/")
+        async def create(self, dto: CreateDto = cast(Any, Body())):
+            return {"ok": True}
+
+    @Module(controllers=[T])
+    class M:
+        pass
+
+    document = SwaggerModule.create_document(FaNestFactory.create(M))
+    properties = document["components"]["schemas"]["CreateDto"]["properties"]
+    assert "internal_token" not in properties
+    assert all(not (isinstance(value, dict) and value.get("hidden")) for value in properties.values())

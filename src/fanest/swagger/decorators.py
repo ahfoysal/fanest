@@ -668,6 +668,11 @@ def _schema_for_type(type_: Any, *, is_array: bool = False) -> dict[str, Any] | 
     if origin in {list, tuple, set} and args:
         schema = {"type": "array", "items": _schema_for_type(args[0]) or {}}
         is_array = False
+    elif origin is dict or type_ is dict:
+        # A mapping is an OpenAPI object; typed values become additionalProperties.
+        value_args = args[1:] if len(args) == 2 else ()
+        schema = {"type": "object"}
+        schema["additionalProperties"] = _schema_for_type(value_args[0]) if value_args else True
     elif origin in {Literal}:
         values = list(args)
         schema = {"enum": values}
@@ -691,7 +696,15 @@ def _schema_for_type(type_: Any, *, is_array: bool = False) -> dict[str, Any] | 
         if type_ not in _FANEST_EXTRA_MODELS:
             _FANEST_EXTRA_MODELS.append(type_)
     elif inspect.isclass(type_) and issubclass(type_, Enum):
-        schema = {"type": "string", "enum": [item.value for item in type_]}
+        members = list(type_)
+        schema = {"enum": [item.value for item in members]}
+        # Infer the JSON type from the members (IntEnum → integer, etc.)
+        # instead of hardcoding string.
+        if members:
+            primitive = _primitive_openapi_type(type(members[0].value))
+            schema["type"] = primitive or "string"
+        else:
+            schema["type"] = "string"
     elif primitive_type := _primitive_openapi_type(type_):
         schema = {"type": primitive_type}
     else:
