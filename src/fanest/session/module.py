@@ -17,6 +17,8 @@ class SessionStore(Protocol):
 
     def delete(self, session_id: str) -> None: ...
 
+    def clear(self) -> None: ...
+
 
 class MemorySessionStore:
     def __init__(self) -> None:
@@ -43,6 +45,10 @@ class MemorySessionStore:
     def delete(self, session_id: str) -> None:
         self.sessions.pop(session_id, None)
         self._expiry.pop(session_id, None)
+
+    def clear(self) -> None:
+        self.sessions.clear()
+        self._expiry.clear()
 
 
 class RedisSessionStore:
@@ -86,6 +92,13 @@ class RedisSessionStore:
 
     def delete(self, session_id: str) -> None:
         self._client.delete(f"{self.prefix}{session_id}")
+
+    def clear(self) -> None:
+        # Remove every session under this store's prefix (mirrors
+        # RedisCacheStore.clear — never a blind FLUSHDB).
+        keys = list(self._client.scan_iter(match=f"{self.prefix}*"))
+        if keys:
+            self._client.delete(*keys)
 
     def close(self) -> None:
         close = getattr(self._client, "close", None)
