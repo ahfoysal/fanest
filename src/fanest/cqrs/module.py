@@ -136,7 +136,7 @@ class CommandBus:
             return result
         except Exception as error:
             await self._capture("command", command, handler, error)
-            return None
+            raise
 
     def _handler_for(self, message_type: type) -> Any | None:
         handler = self._handlers.get(message_type)
@@ -148,8 +148,10 @@ class CommandBus:
         return None
 
     async def _capture(self, source: str, message: Any, handler: Any, error: BaseException) -> None:
-        if self.options.rethrow_unhandled_exceptions:
-            raise error
+        # Unlike the fire-and-forget event/saga pipeline, a command/query
+        # handler error propagates to the caller (→ exception filter → 5xx),
+        # matching @nestjs/cqrs, while still being published to the
+        # UnhandledExceptionBus for observability.
         if self.exceptions is not None:
             await self.exceptions.publish_async(CqrsUnhandledException(source, message, error, handler))
         logger.exception("%s handler failed", source)
@@ -181,7 +183,7 @@ class QueryBus:
             return result
         except Exception as error:
             await self._capture("query", query, handler, error)
-            return None
+            raise
 
     def _handler_for(self, message_type: type) -> Any | None:
         handler = self._handlers.get(message_type)
@@ -193,8 +195,9 @@ class QueryBus:
         return None
 
     async def _capture(self, source: str, message: Any, handler: Any, error: BaseException) -> None:
-        if self.options.rethrow_unhandled_exceptions:
-            raise error
+        # A query handler error propagates to the caller (→ exception filter →
+        # 5xx), matching @nestjs/cqrs, while still being published to the
+        # UnhandledExceptionBus for observability.
         if self.exceptions is not None:
             await self.exceptions.publish_async(CqrsUnhandledException(source, message, error, handler))
         logger.exception("%s handler failed", source)
@@ -252,12 +255,21 @@ class EventBus:
 
     def _sagas_for(self, message_type: type) -> list[Callable[[Any], Any]]:
         sagas = [*self._sagas.get(message_type, []), *self._sagas.get(object, [])]
-        if not self.options.allow_subclass_handlers:
-            return sagas
-        for registered_type, candidates in self._sagas.items():
-            if registered_type not in {message_type, object} and issubclass(message_type, registered_type):
-                sagas.extend(candidates)
-        return sagas
+        if self.options.allow_subclass_handlers:
+            for registered_type, candidates in self._sagas.items():
+                if registered_type not in {message_type, object} and issubclass(message_type, registered_type):
+                    sagas.extend(candidates)
+        # Dedupe so a saga registered for both a child event and its base
+        # doesn't run (and dispatch its command) twice, matching _handlers_for.
+        deduped: list[Callable[[Any], Any]] = []
+        seen: set[Any] = set()
+        for saga in sagas:
+            key = self._handler_key(saga)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(saga)
+        return deduped
 
     async def _run_sagas(self, event: Any) -> None:
         for saga in self._sagas_for(type(event)):

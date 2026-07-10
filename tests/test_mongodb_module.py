@@ -90,8 +90,11 @@ class FakeMotorCollection:
     def find(self, query, projection=None):
         return FakeMotorCursor(self.memory, query, projection)
 
-    async def find_one(self, query):
-        return await self.memory.find_one(query)
+    async def find_one(self, query, projection=None):
+        document = await self.memory.find_one(query)
+        if document is not None and isinstance(projection, dict) and projection.get("_id"):
+            return {"_id": document["_id"]}
+        return document
 
     async def update_one(self, query, update):
         updated = await self.memory.update_one(query, update)
@@ -591,3 +594,54 @@ def test_mongo_for_root_async_wires_service_and_collections():
             raise AssertionError("closed MongoService should reject new collection access")
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# Round-2 in-memory Mongo parity regressions
+# --------------------------------------------------------------------------- #
+@pytest.mark.anyio
+async def test_inmemory_mongo_array_query_and_update_parity():
+    collection = MongoCollection("parity")
+    await collection.insert_one(
+        {"_id": "1", "tags": [1, 2], "items": [{"name": "x", "score": 5}, {"name": "y", "score": 8}]}
+    )
+
+    # Dotted-path traversal into arrays of embedded documents.
+    assert len(await collection.find({"items.name": "x"})) == 1
+    assert len(await collection.find({"items.0.name": "x"})) == 1
+    # Whole-array equality and element-level $eq / $ne.
+    assert len(await collection.find({"tags": [1, 2]})) == 1
+    assert len(await collection.find({"tags": {"$eq": 1}})) == 1
+    assert len(await collection.find({"tags": {"$ne": 1}})) == 0
+
+    # $addToSet honours $each.
+    await collection.update_one({"_id": "1"}, {"$addToSet": {"tags": {"$each": [2, 3, 4]}}})
+    assert (await collection.find_one({"_id": "1"}))["tags"] == [1, 2, 3, 4]
+
+    # $pull honours operator and sub-document conditions.
+    await collection.update_one({"_id": "1"}, {"$pull": {"tags": {"$gte": 3}}})
+    assert (await collection.find_one({"_id": "1"}))["tags"] == [1, 2]
+    await collection.update_one({"_id": "1"}, {"$pull": {"items": {"score": 8}}})
+    assert [i["name"] for i in (await collection.find_one({"_id": "1"}))["items"]] == ["x"]
+
+
+@pytest.mark.anyio
+async def test_inmemory_mongo_mixed_type_sort_does_not_crash():
+    collection = MongoCollection("mixedsort")
+    await collection.insert_one({"_id": "1", "v": "abc"})
+    await collection.insert_one({"_id": "2", "v": 3})
+    await collection.insert_one({"_id": "3", "v": None})
+    result = await collection.find({}, sort=("v", 1))
+    # null < numbers < strings, no TypeError.
+    assert [d["v"] for d in result] == [None, 3, "abc"]
+
+
+@pytest.mark.anyio
+async def test_motor_update_one_returns_updated_doc_after_queried_field_changes():
+    collection = MotorCollection(FakeMotorCollection("orders"))
+    await collection.insert_one({"_id": "order-1", "status": "pending"})
+    # The update mutates the field named in the query — re-querying with the
+    # original filter would miss it; the fix returns the updated document.
+    updated = await collection.update_one({"status": "pending"}, {"$set": {"status": "shipped"}})
+    assert updated is not None
+    assert updated["status"] == "shipped"

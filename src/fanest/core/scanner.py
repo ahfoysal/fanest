@@ -66,6 +66,8 @@ class ModuleRecord:
 
 
 def provider_token(provider: ProviderDefinition) -> Any:
+    if isinstance(provider, ForwardRef):
+        return provider_token(provider.factory())
     provide = getattr(provider, "provide", None)
     if provide is not None:
         return provide
@@ -113,8 +115,16 @@ class ModuleScanner:
             metadata=metadata,
         )
 
+        # Normalize imports in place (dict / callable / DynamicModule forms all
+        # become concrete DynamicModule or module-class refs) so downstream
+        # identity matching in _lifecycle_records works — matching the async
+        # scan and preventing an unhashable-dict crash at lifespan startup.
+        normalized_imports = []
         for imported_module in metadata.imports:
-            self._scan_module(imported_module)
+            imported_ref = self._normalize_module_ref(imported_module)
+            normalized_imports.append(imported_ref)
+            self._scan_module(imported_ref)
+        metadata.imports[:] = normalized_imports
 
         for implicit_provider in self._module_implicit_providers(metadata, module_type):
             if implicit_provider not in metadata.providers:
@@ -580,7 +590,14 @@ class ModuleScanner:
                 ):
                     for component in getattr(handler, key, []):
                         add(component)
-                for parameter in inspect.signature(handler).parameters.values():
+                try:
+                    handler_parameters = inspect.signature(handler).parameters.values()
+                except (TypeError, ValueError):
+                    # Builtins / C callables (e.g. `helper = max`) have no
+                    # introspectable signature — NestJS only inspects routed
+                    # handlers, so a plain callable attribute must not crash the app.
+                    continue
+                for parameter in handler_parameters:
                     source = parameter.default
                     if isinstance(source, ParameterSource):
                         for pipe in source.pipes:

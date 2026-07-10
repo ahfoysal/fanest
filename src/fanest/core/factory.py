@@ -580,7 +580,14 @@ class FaNestFactory:
         seen_instance_ids: set[int] = set()
         ordered_records = FaNestFactory._lifecycle_records(records)
         for module_key, record in ordered_records:
-            for provider in [*record.metadata.providers, *record.metadata.gateways]:
+            # Controllers participate in the lifecycle exactly like providers in
+            # NestJS: they are eagerly instantiated at bootstrap and their
+            # on_module_init / on_application_bootstrap / shutdown hooks fire.
+            for provider in [
+                *record.metadata.providers,
+                *record.metadata.gateways,
+                *record.metadata.controllers,
+            ]:
                 if container.provider_token(provider) in APP_ENHANCER_TOKENS:
                     continue
                 provider_type = FaNestFactory._provider_type(provider)
@@ -622,6 +629,11 @@ class FaNestFactory:
                 if hook is not None:
                     await FaNestFactory._call_lifecycle_hook(hook)
         for instance in extra_instances or []:
+            # Request/transient-scoped global enhancers are passed as their class
+            # (resolved fresh per request), not an instance — they have no
+            # singleton lifecycle to run here.
+            if inspect.isclass(instance):
+                continue
             instance_id = id(instance)
             if instance_id in seen_instance_ids:
                 continue
@@ -644,21 +656,23 @@ class FaNestFactory:
         schedule_runner: Any,
         signal_name: str | None = None,
     ) -> None:
-        """Stop the schedule runner and run ``before_application_shutdown``,
-        ``on_module_destroy`` and ``on_application_shutdown`` hooks in reverse
-        registration order. Shared by the HTTP lifespan and the context.
+        """Stop the schedule runner and run ``on_module_destroy``,
+        ``before_application_shutdown`` and ``on_application_shutdown`` hooks in
+        reverse registration order — matching Nest's documented shutdown
+        sequence (``onModuleDestroy`` → ``beforeApplicationShutdown`` →
+        ``onApplicationShutdown``). Shared by the HTTP lifespan and the context.
         ``before_application_shutdown`` and ``on_application_shutdown`` hooks
         that accept a positional parameter receive the triggering signal name
         (or ``None``), matching Nest."""
         await schedule_runner.stop()
         for instance in reversed(instances):
-            hook = getattr(instance, "before_application_shutdown", None)
-            if hook is not None:
-                await FaNestFactory._call_lifecycle_hook(hook, signal_name)
-        for instance in reversed(instances):
             hook = getattr(instance, "on_module_destroy", None)
             if hook is not None:
                 await FaNestFactory._call_lifecycle_hook(hook)
+        for instance in reversed(instances):
+            hook = getattr(instance, "before_application_shutdown", None)
+            if hook is not None:
+                await FaNestFactory._call_lifecycle_hook(hook, signal_name)
         for instance in reversed(instances):
             hook = getattr(instance, "on_application_shutdown", None)
             if hook is not None:
@@ -769,18 +783,29 @@ class FaNestFactory:
         except Exception:
             return
         for _, handler in inspect.getmembers(provider, predicate=inspect.isfunction):
-            event = getattr(handler, "__fanest_event__", None)
-            if event is not None:
+            subscriptions = getattr(handler, "__fanest_events__", None)
+            if not subscriptions:
+                event = getattr(handler, "__fanest_event__", None)
+                if event is None:
+                    continue
+                subscriptions = [
+                    {
+                        "event": event,
+                        "priority": getattr(handler, "__fanest_event_priority__", 0),
+                        "prepend": getattr(handler, "__fanest_event_prepend__", False),
+                    }
+                ]
+            for subscription in subscriptions:
                 emitter.on(
-                    event,
+                    subscription["event"],
                     FaNestFactory._lazy_dispatch_handler(
                         container,
                         provider,
                         handler.__name__,
                         module_key,
                     ),
-                    prepend=getattr(handler, "__fanest_event_prepend__", False),
-                    priority=getattr(handler, "__fanest_event_priority__", 0),
+                    prepend=subscription.get("prepend", False),
+                    priority=subscription.get("priority", 0),
                 )
 
     @staticmethod

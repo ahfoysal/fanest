@@ -177,6 +177,10 @@ class FaNestContainer:
         for module_key, provider in self._multi_providers.get(token, []):
             if isinstance(provider, FactoryProvider) and inspect.iscoroutinefunction(provider.use_factory):
                 continue
+            scoped_class = self._scoped_enhancer_class(provider, module_key)
+            if scoped_class is not None:
+                resolved.append(scoped_class)
+                continue
             result = self._resolve_provider(provider, module_key=module_key)
             if inspect.isawaitable(result):
                 if inspect.iscoroutine(result):
@@ -186,10 +190,35 @@ class FaNestContainer:
         return resolved
 
     async def resolve_all_async(self, token: Any) -> list[Any]:
-        return [
-            await self._resolve_provider_async(provider, module_key=module_key)
-            for module_key, provider in self._multi_providers.get(token, [])
-        ]
+        resolved = []
+        for module_key, provider in self._multi_providers.get(token, []):
+            scoped_class = self._scoped_enhancer_class(provider, module_key)
+            if scoped_class is not None:
+                resolved.append(scoped_class)
+                continue
+            resolved.append(await self._resolve_provider_async(provider, module_key=module_key))
+        return resolved
+
+    def _scoped_enhancer_class(self, provider: ProviderDefinition, module_key: Any | None) -> type | None:
+        """For a request/transient-scoped class enhancer (APP_GUARD/APP_PIPE/…),
+        register the class as a resolvable provider and return it so callers
+        resolve a fresh instance per request instead of caching one singleton.
+        Returns ``None`` for singleton enhancers (resolved eagerly as before)."""
+        if isinstance(provider, ClassProvider):
+            enhancer_class = provider.use_class
+        elif inspect.isclass(provider):
+            enhancer_class = provider
+        else:
+            return None
+        scope = provider.scope if isinstance(provider, ClassProvider) and provider.scope else self._class_scope(enhancer_class)
+        if scope == "singleton":
+            return None
+        if enhancer_class not in self._providers:
+            self._providers[enhancer_class] = ClassProvider(
+                provide=enhancer_class, use_class=enhancer_class, scope=scope
+            )
+            self._invalidate_provider_cache(enhancer_class)
+        return enhancer_class
 
     def has_provider(
         self,
