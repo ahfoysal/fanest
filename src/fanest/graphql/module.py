@@ -590,14 +590,14 @@ class GraphQLSchema:
         self.queries: dict[str, Any] = {}
         self.mutations: dict[str, Any] = {}
         self.subscriptions: dict[str, Any] = {}
-        self.field_resolvers: dict[str, Any] = {}
+        self.field_resolvers: dict[tuple[str, str], Any] = {}
         self.types: dict[str, GraphQLObjectMetadata] = {}
         self.scalars: dict[str, dict[str, Any]] = {}
         self.directives: dict[str, GraphQLDirectiveMetadata] = {
             "include": GraphQLDirectiveMetadata("include", ("FIELD", "FRAGMENT_SPREAD", "INLINE_FRAGMENT")),
             "skip": GraphQLDirectiveMetadata("skip", ("FIELD", "FRAGMENT_SPREAD", "INLINE_FRAGMENT")),
         }
-        self._field_registrations: dict[tuple[str, str], Any] = {}
+        self._field_registrations: dict[tuple[str, ...], Any] = {}
         self._sdl = federation_sdl or ""
         self.federation = federation
         self.max_complexity = max_complexity
@@ -699,7 +699,12 @@ class GraphQLSchema:
             kind = metadata["kind"]
             name = metadata["name"]
             registration_key = getattr(handler, "__fanest_registration_key__", id(handler))
-            field_key = (kind, name)
+            owner_type = type_metadata.name if type_metadata is not None else resolver.__class__.__name__
+            try:
+                handler.__fanest_graphql_owner_type__ = owner_type
+            except (AttributeError, TypeError):
+                pass
+            field_key: tuple[str, ...] = (kind, owner_type, name) if kind == "field" else (kind, name)
             previous_registration = self._field_registrations.get(field_key)
             if previous_registration is not None and previous_registration != registration_key:
                 raise ValueError(f"Duplicate GraphQL {kind} field registered: {name}")
@@ -709,7 +714,7 @@ class GraphQLSchema:
             elif kind == "mutation":
                 self.mutations[name] = handler
             elif kind == "field":
-                self.field_resolvers[name] = handler
+                self.field_resolvers[(owner_type, name)] = handler
             else:
                 self.subscriptions[name] = handler
         if type_metadata is not None:
@@ -983,6 +988,7 @@ class GraphQLSchema:
                     result,
                     graphql_field,
                     [graphql_field.response_key],
+                    self._handler_owner_type(handler),
                 )
             except Exception as exc:
                 data[graphql_field.response_key] = None
@@ -1076,7 +1082,7 @@ class GraphQLSchema:
                         ):
                             if hook_result is not None:
                                 item = hook_result
-                        shaped = await self._shape_result(item, graphql_field, [graphql_field.response_key])
+                        shaped = await self._shape_result(item, graphql_field, [graphql_field.response_key], self._handler_owner_type(handler))
                         yield {"data": {graphql_field.response_key: shaped}}
                 elif inspect.isgenerator(result):
                     for item in result:
@@ -1091,7 +1097,7 @@ class GraphQLSchema:
                         ):
                             if hook_result is not None:
                                 item = hook_result
-                        shaped = await self._shape_result(item, graphql_field, [graphql_field.response_key])
+                        shaped = await self._shape_result(item, graphql_field, [graphql_field.response_key], self._handler_owner_type(handler))
                         yield {"data": {graphql_field.response_key: shaped}}
                 else:
                     result = await self._apply_subscription_hooks(handler, result, variables, graphql_field.args)
@@ -1105,7 +1111,7 @@ class GraphQLSchema:
                     ):
                         if hook_result is not None:
                             result = hook_result
-                    shaped = await self._shape_result(result, graphql_field, [graphql_field.response_key])
+                    shaped = await self._shape_result(result, graphql_field, [graphql_field.response_key], self._handler_owner_type(handler))
                     yield {"data": {graphql_field.response_key: shaped}}
             except Exception as exc:
                 error = self._format_error(str(exc), path=[graphql_field.response_key], location=graphql_field.location)
@@ -1462,6 +1468,18 @@ class GraphQLSchema:
     def _component_instance(self, component: Any) -> Any:
         return component() if inspect.isclass(component) else component
 
+    def _handler_owner_type(self, handler: Any) -> str | None:
+        tagged = getattr(handler, "__fanest_graphql_owner_type__", None)
+        if isinstance(tagged, str):
+            return tagged
+        owner = getattr(handler, "__self__", None)
+        if owner is None:
+            return None
+        metadata = getattr(type(owner), "__fanest_graphql_type__", None)
+        if metadata is not None and metadata.kind in {"object", "interface"}:
+            return metadata.name
+        return None
+
     async def _serialize_handler_result(self, handler: Any, value: Any) -> Any:
         signature = getattr(handler, "__fanest_target_signature__", inspect.signature(handler))
         return await self._coerce_scalar(
@@ -1503,33 +1521,68 @@ class GraphQLSchema:
             return self.scalars.get(str(name))
         return None
 
-    async def _shape_result(self, value: Any, field: GraphQLField, path: list[str | int]) -> Any:
+    async def _shape_result(
+        self,
+        value: Any,
+        field: GraphQLField,
+        path: list[str | int],
+        parent_type: str | None = None,
+    ) -> Any:
         selection = field.selection or []
         if not selection:
-            return value
+            return self._serialize_leaf(value)
         if value is None:
             return None
         if isinstance(value, list | tuple):
             shaped_items = []
             for index, item in enumerate(value):
-                shaped_items.append(await self._shape_selection(item, selection, [*path, index]))
+                shaped_items.append(await self._shape_selection(item, selection, [*path, index], parent_type))
             return shaped_items
-        return await self._shape_selection(value, selection, path)
+        return await self._shape_selection(value, selection, path, parent_type)
 
-    async def _shape_selection(self, value: Any, selection: list[GraphQLField], path: list[str | int]) -> dict[str, Any]:
+    def _serialize_leaf(self, value: Any) -> Any:
+        if isinstance(value, list | tuple):
+            return [self._serialize_leaf(item) for item in value]
+        if isinstance(value, enum.Enum):
+            metadata = getattr(type(value), "__fanest_graphql_type__", None)
+            if metadata is not None and metadata.kind == "enum":
+                return value.name
+        return value
+
+    async def _shape_selection(
+        self,
+        value: Any,
+        selection: list[GraphQLField],
+        path: list[str | int],
+        parent_type: str | None = None,
+    ) -> dict[str, Any]:
         shaped: dict[str, Any] = {}
+        current_type = self._value_type_name(value) or parent_type
         for child in selection:
             if child.type_condition is not None and not self._matches_type_condition(value, child.type_condition):
                 continue
             if child.handler_name == "__typename":
                 shaped[child.response_key] = self._typename_for(value)
                 continue
-            child_value = await self._resolve_child_field(value, child, path)
-            shaped[child.response_key] = await self._shape_result(child_value, child, [*path, child.response_key])
+            child_value = await self._resolve_child_field(value, child, path, current_type)
+            shaped[child.response_key] = await self._shape_result(
+                child_value,
+                child,
+                [*path, child.response_key],
+                self._value_type_name(child_value),
+            )
         return shaped
 
-    async def _resolve_child_field(self, value: Any, child: GraphQLField, path: list[str | int]) -> Any:
-        field_resolver = self.field_resolvers.get(child.handler_name)
+    async def _resolve_child_field(
+        self,
+        value: Any,
+        child: GraphQLField,
+        path: list[str | int],
+        parent_type: str | None = None,
+    ) -> Any:
+        field_resolver = None
+        if parent_type is not None:
+            field_resolver = self.field_resolvers.get((parent_type, child.handler_name))
         middleware = list(self.field_middleware)
         if field_resolver is not None:
             middleware.extend(getattr(field_resolver, "__fanest_graphql_field_middleware__", []))
@@ -1599,9 +1652,22 @@ class GraphQLSchema:
             return attr
         return None
 
-    def _typename_for(self, value: Any) -> str:
+    def _value_type_name(self, value: Any) -> str | None:
+        metadata = getattr(type(value), "__fanest_graphql_type__", None)
+        if metadata is not None and metadata.kind in {"object", "interface"}:
+            return metadata.name
         if isinstance(value, dict):
-            return value.get("__typename") or "Object"
+            typename = value.get("__typename")
+            if typename:
+                return str(typename)
+        return None
+
+    def _typename_for(self, value: Any) -> str:
+        name = self._value_type_name(value)
+        if name is not None:
+            return name
+        if isinstance(value, dict):
+            return "Object"
         return type(value).__name__
 
     def _matches_type_condition(self, value: Any, type_condition: str) -> bool:
@@ -2058,6 +2124,10 @@ class GraphQLSchema:
         index += 1
         while index < len(document) and depth > 0:
             char = document[index]
+            if char == "#":
+                while index < len(document) and document[index] not in {"\n", "\r"}:
+                    index += 1
+                continue
             if char in {'"', "'"}:
                 index = self._skip_string(document, index)
                 continue
@@ -2072,6 +2142,16 @@ class GraphQLSchema:
 
     def _skip_string(self, document: str, index: int) -> int:
         quote = document[index]
+        if quote == '"' and document[index : index + 3] == '"""':
+            index += 3
+            while index < len(document):
+                if document[index] == "\\" and document[index : index + 4] == '\\"""':
+                    index += 4
+                    continue
+                if document[index : index + 3] == '"""':
+                    return index + 3
+                index += 1
+            raise GraphQLParseError("Unclosed string literal")
         index += 1
         while index < len(document):
             if document[index] == "\\":
@@ -2188,8 +2268,12 @@ class GraphQLSchema:
             return name, index
         raise GraphQLParseError(f"Unexpected value token: {char}")
 
+    _block_string_line_pattern = re.compile(r"\r\n|[\n\r]")
+
     def _read_string_value(self, document: str, index: int) -> tuple[str, int]:
         quote = document[index]
+        if quote == '"' and document[index : index + 3] == '"""':
+            return self._read_block_string_value(document, index)
         index += 1
         value: list[str] = []
         escapes = {
@@ -2218,6 +2302,37 @@ class GraphQLSchema:
             value.append(char)
             index += 1
         raise GraphQLParseError("Unclosed string literal")
+
+    def _read_block_string_value(self, document: str, index: int) -> tuple[str, int]:
+        index += 3
+        chars: list[str] = []
+        while index < len(document):
+            if document[index] == "\\" and document[index : index + 4] == '\\"""':
+                chars.append('"""')
+                index += 4
+                continue
+            if document[index : index + 3] == '"""':
+                return self._dedent_block_string("".join(chars)), index + 3
+            chars.append(document[index])
+            index += 1
+        raise GraphQLParseError("Unclosed string literal")
+
+    def _dedent_block_string(self, raw: str) -> str:
+        lines = self._block_string_line_pattern.split(raw)
+        common_indent: int | None = None
+        for line in lines[1:]:
+            stripped = line.lstrip(" \t")
+            if stripped:
+                indent = len(line) - len(stripped)
+                if common_indent is None or indent < common_indent:
+                    common_indent = indent
+        if common_indent:
+            lines = [lines[0], *(line[common_indent:] for line in lines[1:])]
+        while lines and not lines[0].strip(" \t"):
+            lines.pop(0)
+        while lines and not lines[-1].strip(" \t"):
+            lines.pop()
+        return "\n".join(lines)
 
     def _read_list_value(
         self,
