@@ -110,7 +110,17 @@ class MailerService:
             attachments=attachments,
         )
         self._record(message)
-        self._send_transport(message)
+        result = self._send_transport(message)
+        if inspect.isawaitable(result):
+            # A sync send() cannot await an async transport; silently dropping the
+            # coroutine means the mail is never delivered. Fail loudly and steer
+            # callers to send_async() instead of leaking an un-awaited coroutine.
+            if inspect.iscoroutine(result):
+                result.close()
+            raise RuntimeError(
+                "Transport.send() returned an awaitable; use MailerService.send_async() "
+                "for asynchronous transports."
+            )
         return message
 
     async def send_async(

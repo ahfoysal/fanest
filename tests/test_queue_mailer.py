@@ -588,6 +588,27 @@ def test_mailer_module_supports_async_transports_and_attachment_objects():
     )
 
 
+def test_sync_send_with_async_transport_fails_loudly_without_leaking_coroutine():
+    import warnings
+
+    transport = AsyncRecordingMailerTransport()
+    transport.messages = []
+    mailer = MailerService({"transport": transport})
+
+    with warnings.catch_warnings():
+        # A leaked un-awaited coroutine would surface as a RuntimeWarning here.
+        warnings.simplefilter("error", RuntimeWarning)
+        with pytest.raises(RuntimeError, match="send_async"):
+            mailer.send(to="ada@example.com", subject="Hello", text="hi")
+
+    # Nothing was delivered, and the async transport is still usable via send_async.
+    assert transport.messages == []
+    message = asyncio.run(
+        mailer.send_async(to="ada@example.com", subject="Hello", text="hi")
+    )
+    assert transport.messages == [message]
+
+
 def test_smtp_transport_builds_mime_message_without_leaking_bcc():
     transport = SmtpMailerTransport({"from": "noreply@example.com"})
     message = MailMessage(

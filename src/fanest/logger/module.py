@@ -179,12 +179,12 @@ class Logger:
     def _configure_logger(self, logger: logging.Logger, options: LoggerOptions) -> None:
         logger.setLevel(_coerce_level(options.level))
         logger.propagate = options.propagate
-        if logger.handlers:
-            for handler in logger.handlers:
-                handler.setLevel(_coerce_level(options.level))
-                if handler.formatter is None:
-                    handler.setFormatter(self._formatter(options))
-            return
+        # Re-registering a logger with the same name returns the cached
+        # logging.Logger. Rebuild its handlers from the requested options so a new
+        # stream/structured/handlers configuration is actually applied (and not
+        # silently dropped) while avoiding duplicate handlers.
+        for existing in list(logger.handlers):
+            logger.removeHandler(existing)
         handlers = list(options.handlers) or [logging.StreamHandler(options.stream or sys.stderr)]
         for handler in handlers:
             handler.setLevel(_coerce_level(options.level))
@@ -244,6 +244,8 @@ def _coerce_level(level: int | str) -> int:
     normalized = level.strip().upper()
     if normalized == "LOG":
         return logging.INFO
+    if normalized == "VERBOSE":
+        return logging.DEBUG
     if normalized in logging._nameToLevel:
         return logging._nameToLevel[normalized]
     raise ValueError(f"Unknown log level: {level}")
