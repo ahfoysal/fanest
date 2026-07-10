@@ -9,3 +9,7 @@ __pycache__/
 fanest-example.db
 dist/
 build/
+node_modules/
+.omc/
+# Local Inertia dev demo (Vite + node_modules) — not part of the package
+examples/inertia-demo/
