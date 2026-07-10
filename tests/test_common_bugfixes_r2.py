@@ -41,7 +41,7 @@ def test_once_and_on_fire_in_registration_order():
     emitter.once("x", lambda p: order.append("A"))
     emitter.on("x", lambda p: order.append("B"))
     emitter.on("x", lambda p: order.append("C"))
-    asyncio.run(emitter.emit("x"))
+    asyncio.run(emitter.emit_async("x"))
     assert order == ["A", "B", "C"]
 
 
@@ -52,7 +52,7 @@ def test_multi_level_wildcard_semantics():
     emitter.on("order.**", lambda p: hits.append("order"))
     emitter.on("foo.*", lambda p: hits.append("single"))
     for event in ("boot", "order.created", "order.created.v1", "foo.bar", "foo.bar.baz"):
-        asyncio.run(emitter.emit(event))
+        asyncio.run(emitter.emit_async(event))
     assert hits.count("all") == 5  # ** matches every event
     assert hits.count("order") == 2  # order.** matches created and created.v1
     assert hits.count("single") == 1  # foo.* matches only foo.bar
@@ -62,8 +62,8 @@ def test_single_star_matches_only_one_segment():
     emitter = EventEmitter()
     hits: list[int] = []
     emitter.on("*", lambda p: hits.append(1))
-    asyncio.run(emitter.emit("boot"))
-    asyncio.run(emitter.emit("a.b"))
+    asyncio.run(emitter.emit_async("boot"))
+    asyncio.run(emitter.emit_async("a.b"))
     assert hits == [1]
 
 
