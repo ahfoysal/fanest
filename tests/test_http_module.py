@@ -112,6 +112,39 @@ async def test_http_register_async_supports_async_options_factory():
 
 
 @pytest.mark.anyio
+async def test_http_module_forwards_client_options_dict_key():
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    # A dict-style options payload containing the documented 'client_options'
+    # key must be accepted and forwarded to httpx.AsyncClient (not crash).
+    @Module(
+        imports=[
+            HttpModule.register(
+                {
+                    "base_url": "https://client-options.example.test",
+                    "client_options": {"transport": httpx.MockTransport(handler)},
+                }
+            )
+        ]
+    )
+    class AppModule:
+        pass
+
+    app = FaNestFactory.create(AppModule)
+    service = app.state.fanest_container.resolve(HttpService)
+
+    response = await service.get("/ping")
+
+    assert response.json() == {"ok": True}
+    assert captured["path"] == "/ping"
+    await service.aclose()
+
+
+@pytest.mark.anyio
 async def test_http_module_accepts_options_object_json_helpers_and_streaming():
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/stream":

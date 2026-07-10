@@ -72,6 +72,51 @@ def test_metrics_registry_rejects_invalid_names_labels_and_values():
             raise AssertionError("invalid metric input should fail")
 
 
+def test_render_prometheus_groups_help_type_with_each_metrics_samples():
+    registry = MetricsRegistry()
+
+    registry.counter("a_total", help="A help")
+    registry.inc("a_total")
+    registry.gauge("b_gauge", help="B help")
+    registry.set_gauge("b_gauge", 5)
+    registry.observe("c_seconds", 0.5, labels={"queue": "email"})
+
+    rendered = registry.render_prometheus()
+    lines = rendered.splitlines()
+
+    # Each metric's # TYPE line must be immediately followed by its own samples,
+    # not by a later metric's samples (the Prometheus exposition format requires it).
+    assert lines[lines.index("# TYPE a_total counter") + 1] == "a_total 1"
+    assert lines[lines.index("# TYPE b_gauge gauge") + 1] == "b_gauge 5"
+    # The histogram block stays contiguous under its own # TYPE line.
+    hist_type = lines.index("# TYPE c_seconds histogram")
+    assert lines[hist_type + 1].startswith("c_seconds_bucket")
+    assert 'c_seconds_count{queue="email"} 1' in rendered
+
+
+def test_metric_and_label_name_validation_is_ascii_only():
+    registry = MetricsRegistry()
+
+    for bad_name in ["café_total", "naïve", "metric²"]:
+        try:
+            registry.inc(bad_name)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"non-ASCII metric name {bad_name!r} should be rejected")
+
+    try:
+        registry.inc("jobs_total", labels={"café": "x"})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("non-ASCII label name should be rejected")
+
+    # ASCII names remain valid.
+    registry.inc("jobs_total", labels={"queue": "email"})
+    assert registry.get("jobs_total", labels={"queue": "email"}) == 1
+
+
 def test_discovery_graph_exporter_snapshots_providers_controllers_and_module_edges():
     class OrdersModule:
         pass

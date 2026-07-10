@@ -152,3 +152,85 @@ def test_http_health_indicator_reports_status_code(monkeypatch):
             "status_code": 204,
         }
     }
+
+
+def test_http_health_indicator_runs_blocking_urlopen_off_the_event_loop(monkeypatch):
+    import anyio
+    import threading
+
+    seen: dict[str, threading.Thread] = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    def fake_urlopen(*args, **kwargs):
+        seen["thread"] = threading.current_thread()
+        return Response()
+
+    async def exercise():
+        seen["loop_thread"] = threading.current_thread()
+        indicator = HttpHealthIndicator("upstream", url="https://api.test/health", expected_status=(200,))
+        return await indicator.run()
+
+    monkeypatch.setattr("fanest.health.module.request.urlopen", fake_urlopen)
+
+    result = anyio.run(exercise)
+
+    # The blocking urlopen must not execute on the event loop thread.
+    assert seen["thread"] is not seen["loop_thread"]
+    assert result["upstream"]["status"] == "ok"
+
+
+def test_http_health_indicator_treats_expected_non_2xx_status_as_healthy(monkeypatch):
+    from email.message import Message
+    from urllib.error import HTTPError
+
+    def raising_urlopen(*args, **kwargs):
+        raise HTTPError("https://api.test/health", 503, "unavailable", Message(), None)
+
+    monkeypatch.setattr("fanest.health.module.request.urlopen", raising_urlopen)
+    indicator = HttpHealthIndicator("upstream", url="https://api.test/health", expected_status=(503,))
+
+    import anyio
+
+    result = anyio.run(indicator.run)
+
+    assert result == {
+        "upstream": {
+            "status": "ok",
+            "url": "https://api.test/health",
+            "status_code": 503,
+        }
+    }
+
+
+def test_health_register_async_invokes_user_factory_once():
+    import anyio
+
+    calls = {"count": 0}
+
+    def factory():
+        calls["count"] += 1
+        return {"indicators": [HealthIndicator("database", lambda: {"status": "ok"})]}
+
+    module = HealthModule.register_async(use_factory=factory)
+
+    @Module(imports=[module])
+    class AsyncHealthApp:
+        pass
+
+    async def exercise():
+        app = await FaNestFactory.create_async(AsyncHealthApp)
+        service = await app.state.fanest_container.resolve_async(HealthService)
+        return await service.check()
+
+    result = anyio.run(exercise)
+
+    assert calls["count"] == 1
+    assert result["details"]["database"]["status"] == "ok"

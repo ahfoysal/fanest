@@ -66,6 +66,45 @@ def test_logger_can_use_custom_handlers_and_remove_them():
     assert cast(Any, records[0]).fanest_extra == {"code": "slow"}
 
 
+def test_logger_reregistration_applies_new_stream_and_structured_options():
+    first_stream = io.StringIO()
+    second_stream = io.StringIO()
+
+    Logger(LoggerOptions(context="ReRegisteredLogger", stream=first_stream, structured=False))
+    # Re-registering the same context must apply the new stream/structured config
+    # rather than silently reusing the cached logger's handlers.
+    reconfigured = Logger(
+        LoggerOptions(
+            context="ReRegisteredLogger",
+            stream=second_stream,
+            structured=True,
+            include_timestamp=False,
+        )
+    )
+
+    reconfigured.log("hello", invoice_id="inv_1")
+    reconfigured.flush()
+
+    assert first_stream.getvalue() == ""
+    payload = json.loads(second_stream.getvalue().splitlines()[0])
+    assert payload == {
+        "level": "info",
+        "message": "hello",
+        "context": "ReRegisteredLogger",
+        "invoice_id": "inv_1",
+    }
+
+
+def test_logger_module_register_accepts_verbose_level():
+    module = LoggerModule.register(level="verbose", context="VerboseLogger")
+    options_provider = module.__fanest_module__.providers[0]
+
+    assert options_provider.use_value.level == logging.DEBUG
+
+    logger = Logger(options_provider.use_value)
+    assert logger.is_level_enabled("debug")
+
+
 def test_logger_module_register_exports_configurable_options():
     module = LoggerModule.register(
         context="ConfiguredLogger",
