@@ -1032,3 +1032,108 @@ def test_encrypt_history_routes_middleware():
         assert client.get("/enc/secret", headers=headers).json()["encryptHistory"] is True
         assert client.get("/enc/admin/users", headers=headers).json()["encryptHistory"] is True  # prefix match
         assert client.get("/enc/public", headers=headers).json()["encryptHistory"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Beta hardening: debug env-gate for the error filter
+# --------------------------------------------------------------------------- #
+def test_exception_filter_reraises_in_debug_mode():
+    from fanest.common.exceptions import NotFoundException
+    from fanest.inertia import InertiaExceptionFilter
+
+    @Controller("dbg")
+    class DbgPages:
+        def __init__(self, inertia: InertiaService):
+            self.inertia = inertia
+
+        @Get("/missing")
+        async def missing(self):
+            raise NotFoundException()
+
+    @Module(imports=[InertiaModule.for_root(version="1", debug=True)], controllers=[DbgPages])
+    class DbgApp:
+        pass
+
+    app = FaNestFactory.create(DbgApp, global_filters=[InertiaExceptionFilter])
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/dbg/missing", headers={"X-Inertia": "true", "X-Inertia-Version": "1"})
+    # debug -> the filter re-raises so the dev sees the real error, NOT an Inertia page
+    assert resp.status_code == 404
+    assert "component" not in resp.json()
+
+
+# --------------------------------------------------------------------------- #
+# Protocol conformance: pin the exact page-object shape so a core change can't
+# silently break the Inertia contract (key set, always-present base keys,
+# empty-key omission, v2 metadata shapes).
+# --------------------------------------------------------------------------- #
+@Controller("cf")
+class ConformancePages:
+    def __init__(self, inertia: InertiaService):
+        self.inertia = inertia
+
+    @Get("/full")
+    async def full(self):
+        return await self.inertia.render(
+            "Full",
+            {
+                "plain": 1,
+                "m": self.inertia.merge([1]),
+                "p": self.inertia.merge([1], prepend=True),
+                "d": self.inertia.deep_merge({"x": []}, match_on=["id"]),
+                "later": self.inertia.defer(lambda: 1, group="g"),
+                "cfg": self.inertia.once(lambda: 2, expires_at=5),
+            },
+        )
+
+    @Get("/min")
+    async def minimal(self):
+        return await self.inertia.render("Min", {"x": 1})
+
+
+@Module(imports=[InertiaModule.for_root(version="cf1")], controllers=[ConformancePages])
+class ConformanceApp:
+    pass
+
+
+def _cf_client():
+    return TestClient(FaNestFactory.create(ConformanceApp))
+
+
+_BASE_KEYS = {"component", "props", "url", "version", "clearHistory", "encryptHistory"}
+
+
+def test_conformance_full_page_object_shape():
+    with _cf_client() as client:
+        page = client.get("/cf/full", headers={"X-Inertia": "true", "X-Inertia-Version": "cf1"}).json()
+    # exact top-level key set — nothing extra may leak in, nothing may drop out
+    assert set(page) == _BASE_KEYS | {
+        "mergeProps",
+        "prependProps",
+        "deepMergeProps",
+        "matchPropsOn",
+        "deferredProps",
+        "onceProps",
+    }
+    # base keys carry their contract types/values
+    assert page["component"] == "Full"
+    assert page["version"] == "cf1"
+    assert page["clearHistory"] is False and page["encryptHistory"] is False
+    assert isinstance(page["clearHistory"], bool) and isinstance(page["encryptHistory"], bool)
+    # v2 metadata: exact shapes (byte-parity with inertia-laravel)
+    assert page["mergeProps"] == ["m"]
+    assert page["prependProps"] == ["p"]
+    assert page["deepMergeProps"] == ["d"]
+    assert page["matchPropsOn"] == ["d.id"]
+    assert page["deferredProps"] == {"g": ["later"]}
+    assert page["onceProps"] == {"cfg": {"prop": "cfg", "expiresAt": 5}}
+    # errors bag is always present, as a dict
+    assert page["props"]["errors"] == {}
+
+
+def test_conformance_minimal_page_omits_all_empty_keys():
+    with _cf_client() as client:
+        page = client.get("/cf/min", headers={"X-Inertia": "true", "X-Inertia-Version": "cf1"}).json()
+    # a plain render emits ONLY the six always-present base keys
+    assert set(page) == _BASE_KEYS
+    assert set(page["props"]) == {"x", "errors"}
