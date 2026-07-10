@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from croniter import croniter  # type: ignore[reportMissingModuleSource]
+from croniter import CroniterError, croniter  # type: ignore[reportMissingModuleSource]
 
 from fanest.schedule.registry import SchedulerRegistry
 
@@ -24,13 +24,32 @@ class ScheduleRunner:
 
     def start(self) -> None:
         for provider in self.providers:
-            for handler_name, handler in inspect.getmembers(provider, predicate=callable):
-                metadata = getattr(handler, "__fanest_schedule__", None)
-                if metadata is None:
-                    continue
-                name = metadata.get("name") or self._default_name(provider, handler_name, metadata["type"])
+            for handler_name, handler, metadata in self._iter_scheduled_handlers(provider):
+                explicit = metadata.get("name")
+                if explicit is not None:
+                    if explicit in self._definitions:
+                        raise ValueError(f"Duplicate scheduled job name {explicit!r} is already registered.")
+                    name = explicit
+                else:
+                    name = self._unique_default_name(provider, handler_name, metadata["type"])
                 self._definitions[name] = (metadata, handler)
                 self.resume_job(name)
+
+    def _iter_scheduled_handlers(self, provider: Any) -> Iterable[tuple[str, Any, dict[str, Any]]]:
+        # Enumerate schedule-decorated handlers WITHOUT triggering property getters.
+        # inspect.getmembers()/getattr() would invoke every @property on the provider at
+        # bootstrap; we instead read the raw class attributes and only bind the methods that
+        # actually carry schedule metadata.
+        seen: set[str] = set()
+        for klass in type(provider).__mro__:
+            for attr_name, attr in vars(klass).items():
+                if attr_name in seen:
+                    continue
+                seen.add(attr_name)
+                metadata = getattr(attr, "__fanest_schedule__", None)
+                if metadata is None:
+                    continue
+                yield attr_name, getattr(provider, attr_name), metadata
 
     async def stop(self) -> None:
         self.registry.clear()
@@ -58,7 +77,25 @@ class ScheduleRunner:
             metadata, handler = self._definitions[name]
         except KeyError as exc:
             raise KeyError(f"No scheduled job definition registered for {name!r}.") from exc
+        self._validate_definition(name, metadata)
         self._schedule(name, metadata, self._make_coroutine(metadata, handler))
+
+    def _validate_definition(self, name: str, metadata: dict[str, Any]) -> None:
+        # Fail fast at registration for bad cron config instead of letting the cron task die
+        # silently on its first await with no diagnostics.
+        if metadata["type"] != "cron":
+            return
+        # Raises ValueError on a time_zone/utc_offset conflict, or ZoneInfoNotFoundError on a
+        # bad zone name.
+        self._cron_timezone(time_zone=metadata.get("time_zone"), utc_offset=metadata.get("utc_offset"))
+        expression = metadata["expression"]
+        second_at_beginning = len(expression.split()) == 6
+        try:
+            croniter(expression, datetime.now(timezone.utc), second_at_beginning=second_at_beginning)
+        except CroniterError as exc:
+            raise ValueError(
+                f"Invalid cron expression {expression!r} for scheduled job {name!r}: {exc}"
+            ) from exc
 
     def cancel_job(self, name: str) -> None:
         self.pause_job(name)
@@ -88,7 +125,22 @@ class ScheduleRunner:
             pass
 
     def _default_name(self, provider: Any, handler_name: str, kind: str) -> str:
-        return f"{provider.__class__.__name__}.{handler_name}:{kind}"
+        # Qualify with module + qualname so two different provider classes that happen to share
+        # a class name and method name do not collide onto the same implicit job name.
+        cls = type(provider)
+        return f"{cls.__module__}.{cls.__qualname__}.{handler_name}:{kind}"
+
+    def _unique_default_name(self, provider: Any, handler_name: str, kind: str) -> str:
+        base = self._default_name(provider, handler_name, kind)
+        if base not in self._definitions:
+            return base
+        # Distinct provider instances can still share a qualname (e.g. factory-produced
+        # classes); disambiguate so both jobs schedule instead of one silently overwriting the
+        # other.
+        counter = 2
+        while f"{base}#{counter}" in self._definitions:
+            counter += 1
+        return f"{base}#{counter}"
 
     async def _run_interval(self, metadata: dict[str, Any], handler: Any) -> None:
         delay = float(metadata["seconds"])
@@ -102,6 +154,12 @@ class ScheduleRunner:
                 self.running_jobs.add(running_task)
                 running_task.add_done_callback(self.running_jobs.discard)
             next_run += delay
+            # If the event loop stalled, skip past every missed tick to the next FUTURE
+            # occurrence instead of replaying them all as a zero-delay burst.
+            now = time.monotonic()
+            if next_run <= now:
+                missed = int((now - next_run) // delay) + 1
+                next_run += missed * delay
 
     async def _run_timeout(self, metadata: dict[str, Any], handler: Any) -> None:
         await asyncio.sleep(float(metadata["seconds"]))
@@ -129,6 +187,16 @@ class ScheduleRunner:
                 time_zone=metadata.get("time_zone"),
                 utc_offset=metadata.get("utc_offset"),
             )
+            # If the event loop stalled, skip past every missed occurrence to the next FUTURE
+            # one instead of replaying each missed tick as a zero-delay burst.
+            now = self._cron_now(time_zone=metadata.get("time_zone"), utc_offset=metadata.get("utc_offset"))
+            while next_run <= now:
+                next_run = self.next_cron_datetime(
+                    expression,
+                    next_run,
+                    time_zone=metadata.get("time_zone"),
+                    utc_offset=metadata.get("utc_offset"),
+                )
 
     def next_cron_delay(
         self,
