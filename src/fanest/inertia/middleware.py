@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import re
 import secrets
 from typing import Any
+from urllib.parse import quote
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -30,81 +32,88 @@ class InertiaMiddleware:
         # seed shared data from config
         share = self.config.share
         if callable(share):
-            state.shared.update(share(request) or {})
+            result = share(request)
+            if isinstance(result, dict):  # ignore a stray non-dict return
+                state.shared.update(result)
         elif isinstance(share, dict):
-            state.shared.update(share)
+            # deep-copy so a handler mutating a nested shared value can't leak it
+            # into the process-wide config dict (and thus other requests).
+            state.shared.update(copy.deepcopy(share))
         # consume session flash data (validation errors from the previous
         # request become the auto-shared `errors` prop, Laravel-style)
         _consume_flash(state)
         token_reset = _current.set(state)
-
-        # asset version check: stale GET -> force a full reload (409 + Location)
-        if is_inertia and request.method == "GET":
-            client_version = request.headers.get("x-inertia-version", "")
-            current_version = _resolve_version(self.config, state)
-            if current_version and client_version != current_version:
-                # reflash so flashed data (e.g. errors) survives the forced
-                # full reload, matching Laravel's session reflash on 409
-                session = scope.get("session")
-                if state.flash_consumed and state.flash and isinstance(session, dict):
-                    session[_FLASH_KEY] = state.flash
-                _current.reset(token_reset)
-                response = Response(
-                    status_code=409,
-                    headers={"X-Inertia-Location": str(request.url)},
-                )
-                await response(scope, receive, send)
-                return
-
-        pending_start: dict[str, Any] | None = None
-
-        async def send_wrapper(message: dict[str, Any]) -> None:
-            nonlocal pending_start
-            if message["type"] == "http.response.start":
-                headers = list(message.get("headers", []))
-                # always advertise Vary: X-Inertia
-                if not any(k.lower() == b"vary" for k, _ in headers):
-                    headers.append((b"vary", b"X-Inertia"))
-                # redirect after PUT/PATCH/DELETE must be 303 so the browser
-                # re-issues the follow-up as GET. Only 302 is converted —
-                # Laravel leaves explicit 301/307/308 choices untouched.
-                if (
-                    is_inertia
-                    and request.method in {"PUT", "PATCH", "DELETE"}
-                    and message.get("status") == 302
-                ):
-                    message["status"] = 303
-                message["headers"] = headers
-                # An Inertia request that produced an empty OK response is
-                # redirected back (Laravel's onEmptyResponse); hold the start
-                # message until the body reveals whether it is empty. Both 200
-                # and 201 are treated as "OK" because a handler returning nothing
-                # defaults to 200 on GET and 201 on POST (NestJS semantics).
-                if is_inertia and message.get("status") in (200, 201):
-                    pending_start = message
-                    return
-            elif message["type"] == "http.response.body" and pending_start is not None:
-                start, pending_start = pending_start, None
-                body = message.get("body", b"")
-                if not message.get("more_body") and body in (b"", b"null"):
-                    referer = request.headers.get("referer") or "/"
-                    status = 303 if request.method in {"PUT", "PATCH", "DELETE"} else 302
-                    await send(
-                        {
-                            "type": "http.response.start",
-                            "status": status,
-                            "headers": [
-                                (b"location", referer.encode("latin-1")),
-                                (b"vary", b"X-Inertia"),
-                            ],
-                        }
-                    )
-                    await send({"type": "http.response.body", "body": b""})
-                    return
-                await send(start)
-            await send(message)
-
         try:
+            # asset version check: stale GET -> force a full reload (409 + Location)
+            if is_inertia and request.method == "GET":
+                client_version = request.headers.get("x-inertia-version", "")
+                current_version = _resolve_version(self.config, state)
+                if current_version and client_version != current_version:
+                    # reflash so flashed data (e.g. errors) survives the forced
+                    # full reload, matching Laravel's session reflash on 409
+                    session = scope.get("session")
+                    if state.flash_consumed and state.flash and isinstance(session, dict):
+                        session[_FLASH_KEY] = state.flash
+                    # percent-encode so a non-latin-1 URL (CJK/emoji slug) can't
+                    # crash Starlette's latin-1 header encoding on the reload.
+                    location = quote(str(request.url), safe=":/?#[]@!$&'()*+,;=~")
+                    response = Response(status_code=409, headers={"X-Inertia-Location": location})
+                    await response(scope, receive, send)
+                    return
+
+            pending_start: dict[str, Any] | None = None
+
+            async def send_wrapper(message: dict[str, Any]) -> None:
+                nonlocal pending_start
+                if message["type"] == "http.response.start":
+                    headers = list(message.get("headers", []))
+                    # always advertise Vary: X-Inertia — merge into any existing
+                    # Vary rather than dropping ours (else a shared cache keyed
+                    # without X-Inertia could serve a JSON page to a browser).
+                    vary_idx = next((i for i, (k, _) in enumerate(headers) if k.lower() == b"vary"), None)
+                    if vary_idx is None:
+                        headers.append((b"vary", b"X-Inertia"))
+                    elif b"x-inertia" not in headers[vary_idx][1].lower():
+                        headers[vary_idx] = (headers[vary_idx][0], headers[vary_idx][1] + b", X-Inertia")
+                    # redirect after PUT/PATCH/DELETE must be 303 so the browser
+                    # re-issues the follow-up as GET. Only 302 is converted —
+                    # Laravel leaves explicit 301/307/308 choices untouched.
+                    if (
+                        is_inertia
+                        and request.method in {"PUT", "PATCH", "DELETE"}
+                        and message.get("status") == 302
+                    ):
+                        message["status"] = 303
+                    message["headers"] = headers
+                    # An Inertia request that produced an empty OK response is
+                    # redirected back (Laravel's onEmptyResponse); hold the start
+                    # message until the body reveals whether it is empty. Both 200
+                    # and 201 are treated as "OK" because a handler returning nothing
+                    # defaults to 200 on GET and 201 on POST (NestJS semantics).
+                    if is_inertia and message.get("status") in (200, 201):
+                        pending_start = message
+                        return
+                elif message["type"] == "http.response.body" and pending_start is not None:
+                    start, pending_start = pending_start, None
+                    body = message.get("body", b"")
+                    if not message.get("more_body") and body in (b"", b"null"):
+                        referer = request.headers.get("referer") or "/"
+                        status = 303 if request.method in {"PUT", "PATCH", "DELETE"} else 302
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": status,
+                                "headers": [
+                                    (b"location", referer.encode("latin-1")),
+                                    (b"vary", b"X-Inertia"),
+                                ],
+                            }
+                        )
+                        await send({"type": "http.response.body", "body": b""})
+                        return
+                    await send(start)
+                await send(message)
+
             await self.app(scope, receive, send_wrapper)
         finally:
             _current.reset(token_reset)
@@ -133,6 +142,7 @@ class MethodOverrideMiddleware:
     can hit update/delete handlers (browsers can't send those verbs multipart)."""
 
     _SPOOFABLE = {"PUT", "PATCH", "DELETE"}
+    _MAX_SCAN = 64 * 1024  # only scan the head of a form body for the `_method` field
 
     def __init__(self, app: Any) -> None:
         self.app = app
@@ -146,8 +156,12 @@ class MethodOverrideMiddleware:
         override_method = override.decode("latin-1").upper() if override else None
         content_type = headers.get(b"content-type", b"").decode("latin-1")
         if override_method is None and ("form-data" in content_type or "x-www-form-urlencoded" in content_type):
+            # The `_method` field is an early form field, so only buffer up to a
+            # cap to locate it; a large upload then streams the rest straight to
+            # the app instead of being held (and copied) whole in memory.
             body = bytearray()
             messages: list[dict[str, Any]] = []
+            capped = False
             more = True
             while more:
                 message = await receive()
@@ -155,15 +169,22 @@ class MethodOverrideMiddleware:
                 if message.get("type") == "http.request":
                     body.extend(message.get("body", b""))
                     more = message.get("more_body", False)
+                    if len(body) > self._MAX_SCAN:
+                        capped = True
+                        break
                 else:
                     more = False
             override_method = _extract_method_field(bytes(body), content_type)
             iterator = iter(messages)
+            original_receive = receive
 
             async def replay() -> dict[str, Any]:
                 try:
                     return next(iterator)
                 except StopIteration:
+                    # oversized body: hand the remaining chunks straight from the client
+                    if capped:
+                        return await original_receive()
                     return {"type": "http.request", "body": b"", "more_body": False}
 
             receive = replay
@@ -175,6 +196,17 @@ class MethodOverrideMiddleware:
 # --------------------------------------------------------------------------- #
 # CSRF — double-submit XSRF-TOKEN cookie + X-XSRF-TOKEN header (axios default)
 # --------------------------------------------------------------------------- #
+def _tokens_match(cookie_token: str | None, header_token: str | None) -> bool:
+    """Constant-time double-submit comparison. A missing or non-ASCII token is a
+    clean mismatch (419), never a 500 from ``compare_digest`` raising on unicode."""
+    if not cookie_token or not header_token:
+        return False
+    try:
+        return secrets.compare_digest(header_token, cookie_token)
+    except TypeError:
+        return False
+
+
 class InertiaCsrfMiddleware:
     """Issues an ``XSRF-TOKEN`` cookie and verifies the matching ``X-XSRF-TOKEN``
     header on state-changing requests — the CSRF story the Inertia/axios client
@@ -207,7 +239,7 @@ class InertiaCsrfMiddleware:
         cookie_token = request.cookies.get(self.cookie_name)
         if request.method in self._PROTECTED and request.url.path not in self.exclude:
             header_token = request.headers.get(self.header_name)
-            if not cookie_token or not header_token or not secrets.compare_digest(header_token, cookie_token):
+            if not _tokens_match(cookie_token, header_token):
                 # 419 like Laravel; the Inertia client surfaces "page expired".
                 response = Response("CSRF token mismatch", status_code=419, headers={"Vary": "X-Inertia"})
                 await response(scope, receive, send)

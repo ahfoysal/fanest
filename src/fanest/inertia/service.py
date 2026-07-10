@@ -109,7 +109,9 @@ class InertiaService:
         return self
 
     def set_root_view(self, view: str) -> "InertiaService":
-        self.config.root_view = view
+        # Per-request only: InertiaService is a process-wide singleton, so mutating
+        # self.config here would leak the root view into every other request.
+        _state().root_view = view
         return self
 
     def share(self, key: str | dict[str, Any], value: Any = None) -> "InertiaService":
@@ -192,6 +194,11 @@ class InertiaService:
         return session
 
     def set_version(self, version: str) -> "InertiaService":
+        """Override the asset version for THIS response's page object. Note: the
+        middleware's stale-version 409 check compares the client against the
+        global ``version`` config, so a per-request version that diverges from it
+        will trigger a full-reload loop — keep this consistent with the configured
+        version (prefer ``for_root(version=...)`` for global versioning)."""
         _state().version = version
         return self
 

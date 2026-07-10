@@ -20,8 +20,22 @@ class InertiaComponentNotFoundError(RuntimeError):
     matching file under any configured page path — mirrors Laravel's guard."""
 
 
+class _InertiaJSONResponse(JSONResponse):
+    """JSON page response that tolerates non-JSON-native props (datetime, UUID,
+    Decimal, Enum, set, ...) via ``default=str`` — matching the first-load HTML
+    path so a prop that renders on first load can't 500 on later X-Inertia
+    navigations (Starlette's plain JSONResponse has no ``default``)."""
+
+    def render(self, content: Any) -> bytes:
+        return json.dumps(content, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+
+
 def _ensure_component_exists(config: InertiaConfig, component: str) -> None:
     relative = component.replace("\\", "/")
+    # Reject path traversal so a (possibly user-supplied) component name cannot
+    # probe files outside the configured page paths.
+    if relative.startswith("/") or ".." in relative.split("/"):
+        raise InertiaComponentNotFoundError(f"Invalid Inertia page component name: '{component}'.")
     for base in config.page_paths:
         base_path = Path(base)
         for ext in config.page_extensions:
@@ -37,9 +51,11 @@ def _ensure_component_exists(config: InertiaConfig, component: str) -> None:
 def _with_fragment(url: str, fragment: str | None, enabled: bool) -> str:
     """Carry a URL ``#fragment`` through a redirect (Laravel ``->withFragment()``).
     An explicit fragment replaces one already on the URL; existing fragments are
-    otherwise left intact."""
+    otherwise left intact. CR/LF are stripped so the value can't inject headers."""
+    url = url.replace("\r", "").replace("\n", "")
     if not enabled or not fragment:
         return url
+    fragment = fragment.replace("\r", "").replace("\n", "")
     base = url.split("#", 1)[0]
     return f"{base}#{fragment.lstrip('#')}"
 
@@ -108,11 +124,19 @@ def _render_template(
         # so old 3-arg templates keep working and richer ones get view data + the page.
         render_fn = cast(Callable[..., str], template)
         args: tuple[Any, ...] = (vite, head, body, view_data, page)
+        # Pass only as many positional args as the template actually accepts, so a
+        # 3-arg template, a 5-arg one, or *args all work (keyword-only params are
+        # excluded rather than passed positionally, which would TypeError).
         try:
-            count = len(inspect.signature(render_fn).parameters)
+            params = list(inspect.signature(render_fn).parameters.values())
+            if any(p.kind == p.VAR_POSITIONAL for p in params):
+                count = 5
+            else:
+                count = sum(1 for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD))
+            count = count or 3
         except (TypeError, ValueError):
             count = 3
-        return render_fn(*args[: max(3, min(count, 5))])
+        return render_fn(*args[: min(count, 5)])
     return str(template).replace("@inertiaHead", f"{vite.tags()}\n{head}").replace("@inertia", body)
 
 
@@ -177,9 +201,10 @@ async def _render_response(
     if cache is not None:
         page["cache"] = list(cache) if isinstance(cache, (list, tuple)) else [cache]
 
-    # X-Inertia visit -> JSON page object
-    if request.headers.get("x-inertia"):
-        return JSONResponse(page, headers={"X-Inertia": "true", "Vary": "X-Inertia"})
+    # X-Inertia visit -> JSON page object. Use presence (is not None) to match the
+    # middleware, so a malformed empty `X-Inertia:` header is handled consistently.
+    if request.headers.get("x-inertia") is not None:
+        return _InertiaJSONResponse(page, headers={"X-Inertia": "true", "Vary": "X-Inertia"})
 
     # First visit -> full HTML document (optionally server-side rendered)
     vite = ViteAssets(config.vite)
@@ -188,18 +213,23 @@ async def _render_response(
     if ssr.enabled and not disable_ssr:
         ssr_result = await ssr.render(page)
 
-    if ssr_result is not None:
+    # Use SSR output only when it is a well-formed {head, body} with a real body;
+    # any malformed shape (list/str/missing/empty body) falls back to CSR.
+    head = ""
+    if isinstance(ssr_result, dict) and ssr_result.get("body"):
         head_fragments = ssr_result.get("head", [])
         head = "\n".join(head_fragments) if isinstance(head_fragments, list) else str(head_fragments)
-        body = ssr_result.get("body", "")
+        body = ssr_result["body"]
     else:
         encoded = html.escape(json.dumps(page, separators=(",", ":"), default=str), quote=True)
-        head = ""
         body = f'<div id="{html.escape(config.root_element, quote=True)}" data-page="{encoded}"></div>'
 
-    # root view may come from the builder, a plain config string, or a
-    # request-aware callable (middleware-base ``root_view(request)`` override).
+    # root view precedence: the builder's per-response override, then the
+    # per-request set_root_view (state.root_view), then a request-aware config
+    # callable (middleware-base ``root_view(request)``), else the config string.
     effective_root_view = root_view
+    if effective_root_view is None:
+        effective_root_view = state.root_view
     if effective_root_view is None and callable(config.root_view):
         effective_root_view = config.root_view(request)
     document = _render_template(config, effective_root_view, vite, head, body, view_data or {}, page)

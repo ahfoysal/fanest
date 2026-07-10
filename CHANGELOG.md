@@ -3,6 +3,34 @@
 All notable changes to FaNest are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-07-10
+
+First release actually published to PyPI (the v0.4.0 tag's publish step was
+blocked by a red test gate; see the test fix below). Includes an Inertia
+adapter stabilization pass.
+
+### Fixed
+- **CI/release gate:** event tests used `asyncio.run(emitter.emit(...))`;
+  `emit()` returns a fire-and-forget awaitable, not a coroutine, which
+  `asyncio.run()` rejects on Python 3.10–3.13. Switched to the `emit_async()`
+  coroutine variant (test-only; the shipped package was unaffected). This
+  unblocks the Release workflow's publish step.
+- **Inertia adapter — adversarial stabilization pass:**
+  - `set_root_view()` no longer mutates the singleton service's shared config
+    (per-request state instead) — a cross-request leak; proven isolated under
+    300 concurrent requests.
+  - `X-Inertia` JSON responses tolerate non-native props (datetime/UUID/Decimal/
+    set/Enum) via `default=str`, matching the HTML path (previously 500'd on SPA
+    navigation).
+  - stale-version 409 percent-encodes the URL (non-latin-1 slugs no longer crash
+    Starlette header encoding); deep-copied dict-form shared props; bounded
+    method-override body scan + streamed large uploads (DoS); TypeError-safe CSRF
+    compare (clean 419); resilient Vite manifest/hot-file reads; SSR falls back
+    to CSR on malformed results; `Vary: X-Inertia` merged not dropped; path-
+    traversal rejected in `ensure_pages_exist`; CR/LF stripped from redirects.
+
+[0.4.1]: https://github.com/ahfoysal/fanest/releases/tag/v0.4.1
+
 ## [0.4.0] - 2026-07-10
 
 First stable `0.4.0` release, promoted from the `0.3.0b6` beta after live-service

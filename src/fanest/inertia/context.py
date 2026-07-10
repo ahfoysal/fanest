@@ -22,6 +22,7 @@ class _InertiaState:
     request: Request
     shared: dict[str, Any] = field(default_factory=dict)
     version: str | None = None
+    root_view: str | None = None
     encrypt_history: bool = False
     clear_history: bool = False
     flash: dict[str, Any] = field(default_factory=dict)

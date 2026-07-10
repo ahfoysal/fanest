@@ -33,9 +33,11 @@ def _extract_page(response: Any) -> dict[str, Any]:
     if 'data-page="' in text:
         encoded = text.split('data-page="', 1)[1].split('"', 1)[0]
         return json.loads(html.unescape(encoded))
-    # script-tag variant
-    if 'data-page="app"' in text or 'type="application/json"' in text:
-        raw = text.split('type="application/json">', 1)[1].split("</script>", 1)[0]
+    # script-tag variant — guard on the exact split marker so a partial match
+    # raises the clear AssertionError below instead of an IndexError.
+    marker = 'type="application/json">'
+    if marker in text:
+        raw = text.split(marker, 1)[1].split("</script>", 1)[0]
         return json.loads(raw)
     raise AssertionError("Response is not an Inertia response (no page object found)")
 
