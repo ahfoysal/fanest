@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import logging
 import subprocess
 import sys
 import warnings
@@ -19,6 +20,8 @@ from fanest import Inject, Module, use_value
 
 
 _UNHANDLED = object()
+
+logger = logging.getLogger("fanest.microservices")
 
 
 @dataclass(frozen=True)
@@ -470,12 +473,19 @@ class RedisTransport(InMemoryTransport):
             await self._client.xadd(reply_to, response)
 
     async def _handle_event(self, payload: dict[str, str]) -> None:
-        await self._dispatch_event(
-            payload.get("pattern", ""),
-            self._load(payload.get("data", "null")),
-            headers=self._load(payload.get("headers", "{}")) or {},
-            raw=payload,
-        )
+        pattern = payload.get("pattern", "")
+        try:
+            await self._dispatch_event(
+                pattern,
+                self._load(payload.get("data", "null")),
+                headers=self._load(payload.get("headers", "{}")) or {},
+                raw=payload,
+            )
+        except Exception:
+            logger.exception(
+                "Unhandled error in event handler(s) for pattern %r; listener continuing.",
+                pattern,
+            )
 
     def _stream(self, name: str) -> str:
         return f"{self.prefix}{name}"
@@ -499,6 +509,7 @@ class TcpTransport(InMemoryTransport):
         port: int = 8877,
         bind_host: str | None = None,
         response_timeout: float = 5,
+        max_frame_bytes: int = 16 * 1024 * 1024,
         serializer: MicroserviceSerializer | None = None,
         deserializer: MicroserviceSerializer | None = None,
     ) -> None:
@@ -507,11 +518,14 @@ class TcpTransport(InMemoryTransport):
         self.port = port
         self.bind_host = bind_host or host
         self.response_timeout = response_timeout
+        self.max_frame_bytes = max_frame_bytes
         self._server: asyncio.AbstractServer | None = None
 
     async def connect(self) -> None:
         if (self.message_handlers or self.event_handlers) and self._server is None:
-            self._server = await asyncio.start_server(self._handle_client, self.bind_host, self.port)
+            self._server = await asyncio.start_server(
+                self._handle_client, self.bind_host, self.port, limit=self.max_frame_bytes
+            )
             sockets = self._server.sockets or []
             if sockets:
                 bound_host, bound_port = sockets[0].getsockname()[:2]
@@ -570,7 +584,9 @@ class TcpTransport(InMemoryTransport):
 
     async def _write_frame(self, frame: dict[str, Any], *, wait_for_response: bool) -> Any:
         try:
-            reader, writer = await asyncio.open_connection(self.host, self.port)
+            reader, writer = await asyncio.open_connection(
+                self.host, self.port, limit=self.max_frame_bytes
+            )
         except OSError as exc:
             raise MicroserviceTransportError(
                 f"Could not connect to TCP microservice at {self.host}:{self.port}"
@@ -695,12 +711,13 @@ class _BrokerTransport(InMemoryTransport):
         self,
         *,
         adapter: TransportAdapter | None = None,
+        configured: bool = False,
         serializer: MicroserviceSerializer | None = None,
         deserializer: MicroserviceSerializer | None = None,
     ) -> None:
         super().__init__(self._broker, serializer=serializer, deserializer=deserializer)
         self.adapter = adapter
-        if adapter is None:
+        if adapter is None and not configured:
             warnings.warn(
                 f"The '{self._broker}' microservice transport is running in single-process mode. "
                 "Pass a real broker URL/client or adapter=... for cross-service messaging.",
@@ -745,7 +762,12 @@ class NatsTransport(_BrokerTransport):
         serializer: MicroserviceSerializer | None = None,
         deserializer: MicroserviceSerializer | None = None,
     ) -> None:
-        super().__init__(adapter=adapter, serializer=serializer, deserializer=deserializer)
+        super().__init__(
+            adapter=adapter,
+            configured=url is not None or client is not None,
+            serializer=serializer,
+            deserializer=deserializer,
+        )
         self.url = url
         self.subject_prefix = subject_prefix
         self.listen_subject = listen_subject
@@ -791,7 +813,13 @@ class NatsTransport(_BrokerTransport):
             return await super().send(pattern, data)
         subject = self._subject(pattern)
         response = await self._client.request(subject, self.serializer.serialize(data))
-        return self._load(cast(bytes | str | None, getattr(response, "data", response)))
+        payload = self._load(cast(bytes | str | None, getattr(response, "data", response)))
+        if isinstance(payload, dict) and payload.get("error"):
+            raise MicroserviceRemoteError(
+                str(payload["error"]),
+                error_type=str(payload.get("error_type") or "Error"),
+            )
+        return payload
 
     async def emit(self, pattern: Any, data: Any) -> None:
         if self.event_handlers.get(serialize_pattern(pattern)) or self._client is None:
@@ -832,7 +860,13 @@ class NatsTransport(_BrokerTransport):
                     self.serializer.serialize({"error": str(exc), "error_type": type(exc).__name__}),
                 )
             return
-        await self._dispatch_event(pattern, data, raw=message, metadata={"subject": subject})
+        try:
+            await self._dispatch_event(pattern, data, raw=message, metadata={"subject": subject})
+        except Exception:
+            logger.exception(
+                "Unhandled error in event handler(s) for pattern %r; listener continuing.",
+                pattern,
+            )
 
     def _subject(self, pattern: Any) -> str:
         return f"{self.subject_prefix}{serialize_pattern(pattern)}"
@@ -867,7 +901,12 @@ class RabbitMqTransport(_BrokerTransport):
         serializer: MicroserviceSerializer | None = None,
         deserializer: MicroserviceSerializer | None = None,
     ) -> None:
-        super().__init__(adapter=adapter, serializer=serializer, deserializer=deserializer)
+        super().__init__(
+            adapter=adapter,
+            configured=url is not None or client is not None,
+            serializer=serializer,
+            deserializer=deserializer,
+        )
         self.url = url
         self.exchange_name = exchange
         self.queue_name = queue
@@ -999,7 +1038,13 @@ class RabbitMqTransport(_BrokerTransport):
                     routing_key=reply_to,
                 )
                 return
-            await self._dispatch_event(pattern, data, raw=message, metadata=metadata)
+            try:
+                await self._dispatch_event(pattern, data, raw=message, metadata=metadata)
+            except Exception:
+                logger.exception(
+                    "Unhandled error in event handler(s) for pattern %r; listener continuing.",
+                    pattern,
+                )
 
     def create_context(self, **kwargs: Any) -> MicroserviceContext:
         metadata = kwargs.get("metadata") or {}
@@ -1033,7 +1078,17 @@ class KafkaTransport(_BrokerTransport):
         serializer: MicroserviceSerializer | None = None,
         deserializer: MicroserviceSerializer | None = None,
     ) -> None:
-        super().__init__(adapter=adapter, serializer=serializer, deserializer=deserializer)
+        super().__init__(
+            adapter=adapter,
+            configured=(
+                bootstrap_servers is not None
+                or producer is not None
+                or consumer is not None
+                or reply_consumer is not None
+            ),
+            serializer=serializer,
+            deserializer=deserializer,
+        )
         self.bootstrap_servers = bootstrap_servers
         self.topic = topic
         self.group_id = group_id
@@ -1172,7 +1227,15 @@ class KafkaTransport(_BrokerTransport):
                     reply_to=reply_to,
                 )
                 continue
-            await self._dispatch_event(pattern, data, raw=message, metadata=metadata, headers=headers)
+            try:
+                await self._dispatch_event(
+                    pattern, data, raw=message, metadata=metadata, headers=headers
+                )
+            except Exception:
+                logger.exception(
+                    "Unhandled error in event handler(s) for pattern %r; listener continuing.",
+                    pattern,
+                )
 
     async def _handle_kafka_request(
         self,
@@ -1286,7 +1349,12 @@ class GrpcTransport(_BrokerTransport):
         serializer: MicroserviceSerializer | None = None,
         deserializer: MicroserviceSerializer | None = None,
     ) -> None:
-        super().__init__(adapter=adapter, serializer=serializer, deserializer=deserializer)
+        super().__init__(
+            adapter=adapter,
+            configured=target is not None or stub is not None,
+            serializer=serializer,
+            deserializer=deserializer,
+        )
         self.target = target
         self.stub = stub
         self._channel: Any | None = None
@@ -1350,7 +1418,12 @@ class MqttTransport(_BrokerTransport):
         serializer: MicroserviceSerializer | None = None,
         deserializer: MicroserviceSerializer | None = None,
     ) -> None:
-        super().__init__(adapter=adapter, serializer=serializer, deserializer=deserializer)
+        super().__init__(
+            adapter=adapter,
+            configured=client is not None,
+            serializer=serializer,
+            deserializer=deserializer,
+        )
         self._client = client
 
     async def connect(self) -> None:

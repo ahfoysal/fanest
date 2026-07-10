@@ -24,7 +24,13 @@ from fanest import (
     UseInterceptors,
     UsePipes,
 )
-from fanest.microservices import EventPattern, MessagePattern, MicroserviceServer, RedisTransport
+from fanest.microservices import (
+    EventPattern,
+    MessagePattern,
+    MicroserviceServer,
+    RedisTransport,
+    TcpTransport,
+)
 from fanest.microservices import (
     ClientProxy,
     ClientProxyFactory,
@@ -1093,3 +1099,166 @@ async def test_hybrid_app_connect_start_and_close_microservices():
     assert server.transport.connected is True
     await app.close_all_microservices()
     assert server.transport.connected is False
+
+
+class BigTcpService:
+    @MessagePattern("big.echo")
+    async def echo(self, data, context):
+        return {"in_len": len(data["payload"]), "payload": "y" * 100_000}
+
+
+@Module(providers=[BigTcpService])
+class BigTcpModule:
+    pass
+
+
+@pytest.mark.anyio
+async def test_tcp_transport_round_trips_payloads_larger_than_64kib():
+    # Regression: asyncio's default StreamReader limit is 64 KiB, so both the
+    # inbound request and the handler response (~100 KB each) must survive the
+    # newline-framed round-trip via an explicit large limit=.
+    server = MicroserviceServer(BigTcpModule, transport=TcpTransport(port=0)).compile()
+    await server.listen()
+    server_transport = server.transport
+    assert isinstance(server_transport, TcpTransport)
+    client_transport = TcpTransport(
+        host=server_transport.bind_host,
+        port=server_transport.port,
+        response_timeout=5,
+    )
+    client = ClientProxy(client_transport)
+    try:
+        result = await client.send("big.echo", {"payload": "x" * 100_000})
+        assert result["in_len"] == 100_000  # large REQUEST reached the server
+        assert len(result["payload"]) == 100_000  # large RESPONSE reached the client
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.anyio
+async def test_nats_client_raises_remote_error_from_reply_envelope():
+    # Regression: NatsTransport.send must raise MicroserviceRemoteError when the
+    # remote handler fails instead of returning the error envelope as success.
+    class FakeMsg:
+        def __init__(self, subject, data, reply=None):
+            self.subject = subject
+            self.data = data
+            self.reply = reply
+
+    class FakeNats:
+        def __init__(self):
+            self._cb = None
+            self._inbox: dict[str, bytes] = {}
+            self._n = 0
+
+        async def subscribe(self, subject, cb=None):
+            self._cb = cb
+            return object()
+
+        async def publish(self, subject, data):
+            self._inbox[subject] = data
+
+        async def request(self, subject, data):
+            assert self._cb is not None
+            self._n += 1
+            reply = f"_INBOX.{self._n}"
+            await self._cb(FakeMsg(subject, data, reply=reply))
+            return FakeMsg(reply, self._inbox.pop(reply))
+
+    fake = FakeNats()
+    server = NatsTransport(client=fake)
+
+    async def boom(data, context):
+        raise ValueError("nope")
+
+    server.register_message("boom", boom)
+    await server.connect()
+    await fake.subscribe(server.listen_subject, cb=server._handle_nats_message)
+
+    client = NatsTransport(client=fake)
+    await client.connect()
+    assert "boom" not in client.message_handlers
+
+    with pytest.raises(MicroserviceRemoteError) as exc_info:
+        await client.send("boom", {"x": 1})
+
+    assert str(exc_info.value) == "nope"
+    assert exc_info.value.error_type == "ValueError"
+
+
+def test_broker_transports_do_not_warn_when_properly_configured():
+    # Regression: configuring a real broker (url/client/bootstrap_servers) must
+    # not spuriously warn about single-process mode; a bare transport still does.
+    import warnings as _warnings
+
+    def single_process_warnings(factory):
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            factory()
+        return [w for w in caught if "single-process" in str(w.message)]
+
+    assert single_process_warnings(lambda: NatsTransport(url="nats://prod:4222")) == []
+    assert single_process_warnings(lambda: NatsTransport(client=FakeNatsClient())) == []
+    assert single_process_warnings(lambda: RabbitMqTransport(url="amqp://guest:guest@prod/")) == []
+    assert single_process_warnings(lambda: KafkaTransport(bootstrap_servers="prod:9092")) == []
+    assert single_process_warnings(lambda: GrpcTransport(stub=FakeGrpcStub())) == []
+    assert single_process_warnings(lambda: MqttTransport(client=object())) == []
+    # Genuine single-process mode (no adapter and no broker config) still warns.
+    assert len(single_process_warnings(lambda: NatsTransport())) == 1
+
+
+class ListenerSurvivalService:
+    good_events: list = []
+
+    @MessagePattern("ping")
+    async def ping(self, data, context):
+        return "pong"
+
+    @EventPattern("boom")
+    async def boom(self, data, context):
+        raise RuntimeError("intentional event handler failure")
+
+    @EventPattern("good.event")
+    async def good(self, data, context):
+        type(self).good_events.append(data)
+
+
+@Module(providers=[ListenerSurvivalService])
+class ListenerSurvivalModule:
+    pass
+
+
+@pytest.mark.anyio
+async def test_broker_event_handler_failure_does_not_kill_listener():
+    # Regression: a raising @EventPattern handler must not tear down the broker
+    # listener loop; subsequent requests and events must keep working.
+    ListenerSurvivalService.good_events = []
+    fake = FakeAsyncRedis()
+    transport = RedisTransport()
+    transport._client = fake
+    MicroserviceServer(ListenerSurvivalModule, transport=transport).compile()
+
+    # 1. Dispatch an event whose handler raises -> listener must NOT propagate.
+    await fake.xadd("fanest:microservice:events", {"pattern": "boom", "data": "1"})
+    last_request_id, last_event_id = await transport.listen_once(last_request_id="0-0")
+
+    # 2. A subsequent request/reply still works (loop survived).
+    await fake.xadd(
+        "fanest:microservice:requests",
+        {
+            "id": "r1",
+            "pattern": "ping",
+            "data": "{}",
+            "reply_to": "fanest:microservice:reply:r1",
+        },
+    )
+    last_request_id, last_event_id = await transport.listen_once(
+        last_request_id=last_request_id, last_event_id=last_event_id
+    )
+    assert fake.streams["fanest:microservice:reply:r1"][0][1]["data"] == '"pong"'
+
+    # 3. A subsequent good event is still consumed.
+    await fake.xadd("fanest:microservice:events", {"pattern": "good.event", "data": "2"})
+    await transport.listen_once(last_request_id=last_request_id, last_event_id=last_event_id)
+    assert ListenerSurvivalService.good_events == [2]

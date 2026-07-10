@@ -356,6 +356,102 @@ async def test_queue_introspection_get_job_waiting_jobs_and_clean():
     assert queue.completed_jobs("reports") == []
 
 
+@pytest.mark.anyio
+async def test_queue_bookkeeping_is_scoped_per_queue_for_shared_job_ids():
+    async def succeeds(job):
+        return None
+
+    queue = QueueService()
+    queue.register_processor("orders", "process", succeeds)
+
+    # Same custom id 'order-42' is completed in 'orders'...
+    await queue.add("orders", {"where": "orders"}, name="process", job_id="order-42")
+    assert queue.completed_jobs("orders")[0].id == "order-42"
+
+    # ...and genuinely waiting in 'notifications' (no processor registered).
+    waiting = await queue.add("notifications", {"where": "notifications"}, name="notify", job_id="order-42")
+
+    # The waiting job in 'notifications' must not be hidden by the 'orders' completion.
+    assert queue.waiting_jobs("notifications") == [waiting]
+    assert queue.stats("notifications").waiting == 1
+    assert queue.waiting_jobs("orders") == []
+    assert queue.stats("orders").waiting == 0
+
+    # get_job must resolve the right job per queue, not a different queue's job.
+    assert queue.get_job("order-42", "notifications").data == {"where": "notifications"}
+    assert queue.get_job("order-42", "notifications").status == "waiting"
+    assert queue.get_job("order-42", "orders").data == {"where": "orders"}
+    assert queue.get_job("order-42", "orders").status == "completed"
+
+
+@pytest.mark.anyio
+async def test_queue_clean_purges_attempts_counts_once_and_leaves_no_phantom():
+    async def always_fails(job):
+        raise RuntimeError("boom")
+
+    queue = QueueService()
+    queue.register_processor("reports", "generate", always_fails)
+
+    await queue.add("reports", {}, name="generate", job_id="rep-1")
+
+    # A permanently-failed job mirrors across failed + dead_letter and records attempts.
+    assert queue.stats("reports").failed == 1
+    assert queue.stats("reports").dead_letter == 1
+    assert queue.attempts("rep-1") != []
+
+    # (b) clean() counts the job once (not once per mirror list).
+    assert queue.clean(queue="reports") == 1
+
+    # (a) attempts records are dropped by clean().
+    assert queue.attempts("rep-1") == []
+    assert queue._attempts == {}
+
+    # (c) no phantom remains in any view after cleaning the mirrored record.
+    assert queue.jobs("reports") == []
+    assert queue.failed_jobs("reports") == []
+    assert queue.dead_letter_jobs("reports") == []
+    assert queue.stats("reports").failed == 0
+    assert queue.stats("reports").dead_letter == 0
+    with pytest.raises(KeyError):
+        queue.get_job("rep-1")
+
+
+@pytest.mark.anyio
+async def test_queue_clean_by_failed_or_dead_letter_status_removes_the_shared_record():
+    async def always_fails(job):
+        raise RuntimeError("boom")
+
+    for status in ("failed", "dead_letter"):
+        queue = QueueService()
+        queue.register_processor("reports", "generate", always_fails)
+        await queue.add("reports", {}, name="generate", job_id="rep-1")
+
+        # Cleaning by either status removes the single shared backend record and
+        # both mirror lists, so no phantom lingers in the opposite view.
+        assert queue.clean(status=status, queue="reports") == 1
+        assert queue.jobs("reports") == []
+        assert queue.failed_jobs("reports") == []
+        assert queue.dead_letter_jobs("reports") == []
+        assert queue.stats("reports").failed == 0
+        assert queue.stats("reports").dead_letter == 0
+        assert queue.attempts("rep-1") == []
+
+
+@pytest.mark.anyio
+async def test_queue_attempts_grows_bounded_across_add_and_clean_cycles():
+    async def always_fails(job):
+        raise RuntimeError("boom")
+
+    queue = QueueService()
+    queue.register_processor("reports", "generate", always_fails)
+
+    for _ in range(5):
+        await queue.add("reports", {}, name="generate", job_id="rep-1")
+        assert queue.clean(queue="reports") == 1
+
+    assert queue._attempts == {}
+
+
 @Controller("mail")
 class MailController:
     def __init__(self, mailer: MailerService):
