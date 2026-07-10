@@ -3,6 +3,43 @@
 All notable changes to FaNest are documented here. This project follows
 [Semantic Versioning](https://semver.org/) (currently in the `0.3.0` beta line).
 
+## [0.3.0b6] - 2026-07-10
+
+Combined release: Inertia v2 beta hardening plus the remaining round-2 bug
+fixes. Full suite green (661 passed, 30 skipped) with ruff and pyright clean.
+
+### Changed
+- **Inertia adapter split into a package** (`fanest.inertia`): the monolithic
+  module is now `context` / `service` / `middleware` / `rendering` / `props` /
+  `ssr` / `vite` / `errors` submodules, with env-gated error pages and safer
+  defaults (beta hardening).
+
+### Added
+- **Inertia infinite-scroll props** (`scrollProps`) — Inertia v2 parity.
+
+### Fixed
+- **SQLAlchemy (3):** transactions are tracked per `SqlAlchemyService` (a
+  ContextVar registry keyed by service), so a transaction on one database no
+  longer leaks its session into another connection; named connections via
+  `for_root(name=...)` / `for_feature(connection=...)` coexist with distinct DI
+  tokens, and two unnamed `for_root` imports fail loudly — including when
+  `SqlAlchemyService` is injected directly; `MigrationManager` numbers new
+  migrations from the highest existing prefix + 1 (deleting one no longer
+  re-issues a duplicate sequence).
+- **Observability (9):** `HttpHealthIndicator` runs its blocking `urllib` call
+  off the event loop and reports an expected non-2xx status as healthy;
+  `HealthModule.register_async` resolves the factory once, not twice;
+  `render_prometheus` groups each metric's `# HELP`/`# TYPE` immediately before
+  its own samples and validates metric/label names as ASCII; the logger applies
+  new stream/structured/handler options on re-registration and maps
+  `level="verbose"` to DEBUG; `MailerService.send()` with an async transport
+  fails fast pointing to `send_async`; `HttpModule` forwards `client_options`
+  to `httpx.AsyncClient`.
+- **CLI (1):** `fanest new` rejects project names with a trailing separator
+  (invalid PEP 508 distribution name).
+
+[0.3.0b6]: https://github.com/ahfoysal/fanest/releases/tag/v0.3.0b6
+
 ## [0.3.0b5] - 2026-07-10
 
 Combined release consolidating the Inertia v2 adapter, a large cross-subsystem
