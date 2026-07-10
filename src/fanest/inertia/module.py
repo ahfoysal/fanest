@@ -83,10 +83,13 @@ class DeferProp(IgnoreOnFirstLoad):
 @dataclass
 class MergeProp:
     """Included normally, but the client merges (instead of replaces) it — its key
-    is advertised under ``mergeProps`` (Inertia v2, e.g. infinite scroll)."""
+    is advertised under ``mergeProps`` (shallow) or ``deepMergeProps`` (deep), for
+    Inertia v2 infinite scroll / append. ``match_on`` fields are advertised under
+    ``matchPropsOn`` so the client matches array items by key instead of index."""
 
     value: Any
     deep: bool = False
+    match_on: list[str] | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -107,6 +110,7 @@ _current: ContextVar[_InertiaState | None] = ContextVar("fanest_inertia_state", 
 @dataclass
 class InertiaConfig:
     root_view: str = "app"
+    root_element: str = "app"
     version: str | Callable[[], str] | None = None
     template: str | Callable[["ViteAssets", str, str], str] | None = None
     share: Callable[[Request], dict[str, Any]] | dict[str, Any] | None = None
@@ -150,6 +154,16 @@ class ViteAssets:
                 manifest = json.loads(Path(self.manifest_path).read_text(encoding="utf-8"))
             self._manifest = manifest
         return manifest
+
+    def version_hash(self) -> str:
+        """A content hash of the Vite manifest, so a rebuild busts the client cache."""
+        if self.manifest_path and Path(self.manifest_path).exists():
+            import hashlib
+
+            return hashlib.md5(Path(self.manifest_path).read_bytes()).hexdigest()[:12]
+        if self.hot_file and Path(self.hot_file).exists():
+            return "dev"
+        return ""
 
     def tags(self) -> str:
         if not self.entrypoints:
@@ -237,39 +251,108 @@ async def _evaluate(value: Any) -> Any:
     return value
 
 
+def _pick_paths(value: Any, subpaths: list[str]) -> Any:
+    """Keep only the given dot-paths within a nested dict (Inertia dot-notation)."""
+    if not isinstance(value, dict):
+        return value
+    groups: dict[str, list[str]] = {}
+    for sub in subpaths:
+        head, _, tail = sub.partition(".")
+        groups.setdefault(head, [])
+        if tail:
+            groups[head].append(tail)
+    result: dict[str, Any] = {}
+    for head, tails in groups.items():
+        if head in value:
+            result[head] = _pick_paths(value[head], tails) if tails else value[head]
+    return result
+
+
+def _apply_only_paths(resolved: dict[str, Any], only: list[str]) -> dict[str, Any]:
+    whole: set[str] = {p for p in only if "." not in p}
+    nested: dict[str, list[str]] = {}
+    for p in only:
+        head, _, tail = p.partition(".")
+        if tail:
+            nested.setdefault(head, []).append(tail)
+    result: dict[str, Any] = {}
+    for key, value in resolved.items():
+        if key in whole:
+            result[key] = value
+        elif key in nested:
+            result[key] = _pick_paths(value, nested[key])
+    return result
+
+
+def _forget_paths(value: dict[str, Any], paths: list[str]) -> dict[str, Any]:
+    result = dict(value)
+    nested: dict[str, list[str]] = {}
+    for p in paths:
+        head, _, tail = p.partition(".")
+        if tail:
+            nested.setdefault(head, []).append(tail)
+        else:
+            result.pop(head, None)
+    for head, tails in nested.items():
+        if isinstance(result.get(head), dict):
+            result[head] = _forget_paths(result[head], tails)
+    return result
+
+
 async def _resolve_props(
     props: dict[str, Any],
     *,
     component: str,
     request: Request,
-) -> tuple[dict[str, Any], dict[str, list[str]], list[str]]:
+) -> tuple[dict[str, Any], dict[str, list[str]], list[str], list[str], list[str]]:
     partial_component = request.headers.get("x-inertia-partial-component")
     is_partial = partial_component == component
     only = _split_header(request.headers.get("x-inertia-partial-data")) if is_partial else None
-    excepted = set(_split_header(request.headers.get("x-inertia-partial-except"))) if is_partial else set()
+    excepted = _split_header(request.headers.get("x-inertia-partial-except")) if is_partial else []
+    reset = set(_split_header(request.headers.get("x-inertia-reset")))
+    only_top = {p.split(".", 1)[0] for p in only} if only is not None else None
+    except_top = {p for p in excepted if "." not in p}
 
     resolved: dict[str, Any] = {}
+    always_props: dict[str, Any] = {}
     deferred: dict[str, list[str]] = {}
     merge_keys: list[str] = []
+    deep_merge_keys: list[str] = []
+    match_on: list[str] = []
 
     for key, value in props.items():
+        # `always` props (and the shared `errors` bag) appear on every response,
+        # so they bypass only/except filtering and are re-merged at the end.
+        if isinstance(value, AlwaysProp) or key == "errors":
+            always_props[key] = await _evaluate(value)
+            continue
         if is_partial:
-            if only is not None and key not in only and not isinstance(value, AlwaysProp):
+            if only_top is not None and key not in only_top:
                 continue
-            if excepted and key in excepted:
+            if key in except_top:
                 continue
-        else:
-            if isinstance(value, IgnoreOnFirstLoad):
-                if isinstance(value, DeferProp):
-                    deferred.setdefault(value.group, []).append(key)
-                    if value.merge:
-                        merge_keys.append(key)
-                continue
-        if isinstance(value, MergeProp) or (isinstance(value, DeferProp) and value.merge):
-            merge_keys.append(key)
+        elif isinstance(value, IgnoreOnFirstLoad):
+            if isinstance(value, DeferProp):
+                deferred.setdefault(value.group, []).append(key)
+            continue
+        if key not in reset:  # X-Inertia-Reset -> client replaces instead of merges
+            if isinstance(value, MergeProp):
+                (deep_merge_keys if value.deep else merge_keys).append(key)
+                for field_name in value.match_on or []:
+                    match_on.append(f"{key}.{field_name}")
+            elif isinstance(value, DeferProp) and value.merge:
+                merge_keys.append(key)
         resolved[key] = await _evaluate(value)
 
-    return resolved, deferred, merge_keys
+    # dot-notation: build the `only` subset, then forget dotted `except` from it
+    if only is not None and any("." in p for p in only):
+        resolved = _apply_only_paths(resolved, only)
+    dotted_except = [p for p in excepted if "." in p]
+    if dotted_except:
+        resolved = _forget_paths(resolved, dotted_except)
+
+    resolved.update(always_props)
+    return resolved, deferred, merge_keys, deep_merge_keys, match_on
 
 
 def _split_header(raw: str | None) -> list[str]:
@@ -287,7 +370,10 @@ def _resolve_version(config: InertiaConfig, state: _InertiaState) -> str:
     version = config.version
     if callable(version):
         version = version()
-    return "" if version is None else str(version)
+    if version is None:
+        # Laravel default: hash the Vite manifest so a rebuild busts the client cache.
+        return ViteAssets(config.vite).version_hash()
+    return str(version)
 
 
 def _default_template(vite: ViteAssets, head: str, body: str) -> str:
@@ -305,22 +391,34 @@ async def _render_response(config: InertiaConfig, state: _InertiaState, componen
     request = state.request
     # shared data is merged under the page props; explicit props win on key clash
     merged = {**state.shared, **props}
-    resolved, deferred, merge_keys = await _resolve_props(merged, component=component, request=request)
+    resolved, deferred, merge_keys, deep_merge_keys, match_on = await _resolve_props(
+        merged, component=component, request=request
+    )
+
+    # `errors` is always present; nest it under the error bag when one is requested
+    errors = resolved.get("errors", {})
+    error_bag = request.headers.get("x-inertia-error-bag")
+    if error_bag and isinstance(errors, dict) and errors and error_bag not in errors:
+        errors = {error_bag: errors}
+    resolved["errors"] = errors
 
     page: dict[str, Any] = {
         "component": component,
         "props": resolved,
         "url": request.url.path + (("?" + request.url.query) if request.url.query else ""),
         "version": _resolve_version(config, state),
+        # history booleans are always emitted (matches inertia-laravel)
+        "clearHistory": state.clear_history,
+        "encryptHistory": state.encrypt_history or config.encrypt_history,
     }
-    if state.encrypt_history or config.encrypt_history:
-        page["encryptHistory"] = True
-    if state.clear_history:
-        page["clearHistory"] = True
     if deferred:
         page["deferredProps"] = deferred
     if merge_keys:
         page["mergeProps"] = merge_keys
+    if deep_merge_keys:
+        page["deepMergeProps"] = deep_merge_keys
+    if match_on:
+        page["matchPropsOn"] = match_on
 
     # X-Inertia visit -> JSON page object
     if request.headers.get("x-inertia"):
@@ -342,7 +440,7 @@ async def _render_response(config: InertiaConfig, state: _InertiaState, componen
     else:
         encoded = html.escape(json.dumps(page, separators=(",", ":"), default=str), quote=True)
         head = ""
-        body = f'<div id="app" data-page="{encoded}"></div>'
+        body = f'<div id="{html.escape(config.root_element, quote=True)}" data-page="{encoded}"></div>'
 
     template = config.template or _default_template
     if callable(template):
@@ -419,8 +517,12 @@ class InertiaService:
         return DeferProp(callback, group=group, merge=merge)
 
     @staticmethod
-    def merge(value: Any, *, deep: bool = False) -> MergeProp:
-        return MergeProp(value, deep=deep)
+    def merge(value: Any, *, deep: bool = False, match_on: list[str] | None = None) -> MergeProp:
+        return MergeProp(value, deep=deep, match_on=match_on)
+
+    @staticmethod
+    def deep_merge(value: Any, *, match_on: list[str] | None = None) -> MergeProp:
+        return MergeProp(value, deep=True, match_on=match_on)
 
 
 # --------------------------------------------------------------------------- #
@@ -491,6 +593,7 @@ class InertiaModule:
     def for_root(
         *,
         root_view: str = "app",
+        root_element: str = "app",
         version: str | Callable[[], str] | None = None,
         template: str | Callable[..., str] | None = None,
         share: Callable[[Request], dict[str, Any]] | dict[str, Any] | None = None,
@@ -501,6 +604,7 @@ class InertiaModule:
     ) -> type:
         options = {
             "root_view": root_view,
+            "root_element": root_element,
             "version": version,
             "template": template,
             "share": share,
