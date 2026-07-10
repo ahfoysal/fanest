@@ -172,6 +172,93 @@ class RolesGuard:
         raise ForbiddenException("Insufficient role")
 
 
+class SecurityScopes:
+    """The OAuth2 scopes required by the current route — FastAPI's
+    ``SecurityScopes`` analog. Inject with ``CurrentSecurityScopes()``."""
+
+    def __init__(self, scopes: list[str] | None = None):
+        self.scopes = list(scopes or [])
+
+    @property
+    def scope_str(self) -> str:
+        return " ".join(self.scopes)
+
+
+class ScopesGuard:
+    """Enforces ``@Scopes(...)`` requirements against the authenticated user's
+    granted scopes (``scope`` space-delimited claim per RFC 6749, or a
+    list-valued ``scope``/``scopes``/``scp`` claim). Every required scope must
+    be granted, matching FastAPI's ``SecurityScopes`` semantics."""
+
+    def can_activate(self, context):
+        if is_public(context.handler, context.controller.__class__):
+            return True
+        required = scopes_for(context.handler, context.controller.__class__)
+        if not required:
+            return True
+        user = getattr(context.request.state, "user", None)
+        if user is None:
+            raise UnauthorizedException("Missing bearer token")
+        granted = granted_scopes(user)
+        if all(scope in granted for scope in required):
+            return True
+        raise ForbiddenException(f"Insufficient scope: requires '{' '.join(required)}'")
+
+
+def Scopes(*scopes: str, security_scheme: str = "oauth2"):
+    """Require OAuth2 scopes on a handler or controller. Also records the
+    OpenAPI security requirement for ``security_scheme`` so Swagger documents
+    the scopes (pair with ``DocumentBuilder.add_oauth2``)."""
+
+    def decorator(target):
+        setattr(target, "__fanest_scopes__", list(scopes))
+        metadata = dict(getattr(target, "__fanest_metadata__", {}))
+        metadata["scopes"] = list(scopes)
+        setattr(target, "__fanest_metadata__", metadata)
+        securities = list(getattr(target, "__fanest_security__", []))
+        securities.append({security_scheme: list(scopes)})
+        setattr(target, "__fanest_security__", securities)
+        return target
+
+    return decorator
+
+
+def scopes_for(handler: Any, controller: type | None = None) -> list[str]:
+    scopes = _metadata_value(handler, "__fanest_scopes__", "scopes", None)
+    if scopes is not None:
+        return list(scopes)
+    if controller is not None:
+        scopes = _metadata_value(controller, "__fanest_scopes__", "scopes", None)
+        if scopes is not None:
+            return list(scopes)
+    return []
+
+
+def granted_scopes(user: Any) -> list[str]:
+    """Extract the granted scopes from a decoded token payload."""
+    if not isinstance(user, dict):
+        return []
+    for claim_name in ("scope", "scopes", "scp"):
+        claim = user.get(claim_name)
+        if claim is None:
+            continue
+        if isinstance(claim, str):
+            return claim.split()
+        if isinstance(claim, (list, tuple, set)):
+            return [str(scope) for scope in claim]
+    return []
+
+
+def _security_scopes_factory(data: Any, context: Any) -> SecurityScopes:
+    return SecurityScopes(scopes_for(context.handler, context.controller.__class__))
+
+
+def CurrentSecurityScopes() -> Any:
+    from fanest.common.decorators import create_param_decorator
+
+    return create_param_decorator(_security_scopes_factory)(None)
+
+
 def Roles(*roles: str):
     def decorator(target):
         setattr(target, "__fanest_roles__", list(roles))
@@ -257,7 +344,11 @@ class AuthModule:
 
         providers = [use_value(JWT_OPTIONS, options), JwtService]
         if global_guard:
-            providers.extend([use_class(APP_GUARD, JwtAuthGuard), use_class(APP_GUARD, RolesGuard)])
+            providers.extend([
+                use_class(APP_GUARD, JwtAuthGuard),
+                use_class(APP_GUARD, RolesGuard),
+                use_class(APP_GUARD, ScopesGuard),
+            ])
 
         @Module(
             providers=providers,
@@ -285,7 +376,11 @@ class AuthModule:
 
         providers = [provider_factory(JWT_OPTIONS, load_options, inject=inject or []), JwtService]
         if global_guard:
-            providers.extend([use_class(APP_GUARD, JwtAuthGuard), use_class(APP_GUARD, RolesGuard)])
+            providers.extend([
+                use_class(APP_GUARD, JwtAuthGuard),
+                use_class(APP_GUARD, RolesGuard),
+                use_class(APP_GUARD, ScopesGuard),
+            ])
 
         @Module(
             providers=providers,

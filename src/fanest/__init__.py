@@ -104,7 +104,10 @@ from fanest.core.metadata import DynamicModule
 from fanest.core.module import Global, Module, dynamic_module
 from fanest.core.module_ref import ModuleRef
 from fanest.core.reflector import Reflector
+from fanest.core.router import RouterModule
 from fanest.core.providers import (
+    INQUIRER,
+    REQUEST,
     Inject,
     Optional,
     Self,
@@ -173,6 +176,9 @@ __all__ = [
     "Injectable",
     "LazyModuleLoader",
     "MessageBody",
+    "RouterModule",
+    "INQUIRER",
+    "REQUEST",
     "Inject",
     "IntersectionType",
     "Module",

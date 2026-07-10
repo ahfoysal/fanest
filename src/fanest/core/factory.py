@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
+import os
+import signal as signal_module
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
@@ -323,6 +326,11 @@ class FaNestFactory:
                 middleware=middleware,
                 container=container,
             )
+        module_route_prefixes = {
+            module_key: scanner.router_paths[record.module_type]
+            for module_key, record in scanner.records.items()
+            if record.module_type in scanner.router_paths
+        }
         adapter = FastApiAdapter(
             app=app,
             container=container,
@@ -334,6 +342,7 @@ class FaNestFactory:
             versioning=normalize_versioning_options(versioning),
             controller_modules=scanner.controller_modules,
             gateway_modules=scanner.gateway_modules,
+            module_route_prefixes=module_route_prefixes,
         )
         app.state.fanest_http_adapter = adapter
         adapter.register_controllers(scanner.controllers)
@@ -459,13 +468,95 @@ class FaNestFactory:
                     *resolved_filters,
                 ],
             )
-            yield
-            close_all_microservices = getattr(app, "close_all_microservices", None)
-            if close_all_microservices is not None:
-                await close_all_microservices()
-            await FaNestFactory._shutdown_instances(instances, schedule_runner)
+            shutdown_state: dict[str, Any] = {"signal": None, "done": False}
+
+            async def shutdown_once() -> None:
+                if shutdown_state["done"]:
+                    return
+                shutdown_state["done"] = True
+                close_all_microservices = getattr(app, "close_all_microservices", None)
+                if close_all_microservices is not None:
+                    await close_all_microservices()
+                await FaNestFactory._shutdown_instances(
+                    instances,
+                    schedule_runner,
+                    signal_name=shutdown_state["signal"],
+                )
+
+            previous_handlers = FaNestFactory._install_shutdown_signal_handlers(
+                getattr(app.state, "fanest_shutdown_hooks", None),
+                shutdown_state,
+                shutdown_once,
+            )
+            try:
+                yield
+            finally:
+                FaNestFactory._restore_signal_handlers(previous_handlers)
+                await shutdown_once()
 
         return lifespan
+
+    @staticmethod
+    def _install_shutdown_signal_handlers(
+        shutdown_signals: Any,
+        shutdown_state: dict[str, Any],
+        shutdown_once: Any,
+    ) -> dict[Any, Any]:
+        """Chain graceful-shutdown handlers onto the requested signals.
+
+        When the previous handler is callable (e.g. uvicorn's), it is invoked
+        after recording the signal so the server drives lifespan shutdown and
+        the hooks receive the signal name. When there is no meaningful previous
+        handler, the hooks run on the event loop and the default disposition is
+        re-raised afterwards, mirroring Nest's ``enableShutdownHooks``.
+        """
+        if not shutdown_signals:
+            return {}
+        loop = asyncio.get_running_loop()
+        requested = (
+            shutdown_signals
+            if isinstance(shutdown_signals, (list, tuple, set))
+            else ("SIGTERM", "SIGINT")
+        )
+        previous_handlers: dict[Any, Any] = {}
+
+        def _handler(received_signum: int, frame: Any) -> None:
+            shutdown_state["signal"] = signal_module.Signals(received_signum).name
+            previous = previous_handlers.get(received_signum)
+            if callable(previous):
+                previous(received_signum, frame)
+                return
+
+            async def _shutdown_and_exit() -> None:
+                await shutdown_once()
+                signal_module.signal(received_signum, signal_module.SIG_DFL)
+                os.kill(os.getpid(), received_signum)
+
+            asyncio.run_coroutine_threadsafe(_shutdown_and_exit(), loop)
+
+        for requested_signal in requested:
+            signum = (
+                signal_module.Signals[requested_signal]
+                if isinstance(requested_signal, str)
+                else signal_module.Signals(requested_signal)
+            )
+            try:
+                previous = signal_module.getsignal(signum)
+                signal_module.signal(signum, _handler)
+            except (ValueError, OSError):
+                # Not on the main thread (e.g. TestClient portals) or an
+                # uncatchable signal: shutdown hooks still run via lifespan.
+                continue
+            previous_handlers[signum] = previous
+        return previous_handlers
+
+    @staticmethod
+    def _restore_signal_handlers(previous_handlers: dict[Any, Any]) -> None:
+        for signum, previous in previous_handlers.items():
+            try:
+                signal_module.signal(signum, previous)
+            except (ValueError, OSError, TypeError):
+                continue
 
     @staticmethod
     async def _bootstrap_instances(
@@ -548,15 +639,22 @@ class FaNestFactory:
         return instances, schedule_runner
 
     @staticmethod
-    async def _shutdown_instances(instances: list[Any], schedule_runner: Any) -> None:
+    async def _shutdown_instances(
+        instances: list[Any],
+        schedule_runner: Any,
+        signal_name: str | None = None,
+    ) -> None:
         """Stop the schedule runner and run ``before_application_shutdown``,
         ``on_module_destroy`` and ``on_application_shutdown`` hooks in reverse
-        registration order. Shared by the HTTP lifespan and the context."""
+        registration order. Shared by the HTTP lifespan and the context.
+        ``before_application_shutdown`` and ``on_application_shutdown`` hooks
+        that accept a positional parameter receive the triggering signal name
+        (or ``None``), matching Nest."""
         await schedule_runner.stop()
         for instance in reversed(instances):
             hook = getattr(instance, "before_application_shutdown", None)
             if hook is not None:
-                await FaNestFactory._call_lifecycle_hook(hook)
+                await FaNestFactory._call_lifecycle_hook(hook, signal_name)
         for instance in reversed(instances):
             hook = getattr(instance, "on_module_destroy", None)
             if hook is not None:
@@ -564,13 +662,32 @@ class FaNestFactory:
         for instance in reversed(instances):
             hook = getattr(instance, "on_application_shutdown", None)
             if hook is not None:
-                await FaNestFactory._call_lifecycle_hook(hook)
+                await FaNestFactory._call_lifecycle_hook(hook, signal_name)
 
     @staticmethod
-    async def _call_lifecycle_hook(hook):
-        result = hook()
+    async def _call_lifecycle_hook(hook, *args):
+        if args and not FaNestFactory._hook_accepts_arguments(hook, len(args)):
+            args = ()
+        result = hook(*args)
         if hasattr(result, "__await__"):
             await result
+
+    @staticmethod
+    def _hook_accepts_arguments(hook: Any, count: int) -> bool:
+        try:
+            parameters = inspect.signature(hook).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        positional = 0
+        for parameter in parameters:
+            if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+                return True
+            if parameter.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                positional += 1
+        return positional >= count
 
     @staticmethod
     def _lifecycle_records(records: dict[Any, Any]) -> list[tuple[Any, Any]]:

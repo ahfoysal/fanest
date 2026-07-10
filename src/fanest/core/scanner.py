@@ -5,6 +5,8 @@ from typing import Any, get_type_hints
 
 from fanest.common.middleware import MiddlewareConsumer, MiddlewareRoute
 from fanest.core.metadata import (
+    INQUIRER,
+    REQUEST,
     DynamicModule,
     ExistingProvider,
     FactoryProvider,
@@ -30,6 +32,8 @@ FRAMEWORK_PROVIDER_TOKENS = {
     SchedulerRegistry,
     SocketIoServer,
     WebSocketManager,
+    REQUEST,
+    INQUIRER,
 }
 
 
@@ -76,6 +80,7 @@ class ModuleScanner:
         self.middlewares: list[type] = []
         self.app_middlewares: list[dict[str, Any]] = []
         self.static_assets: list[dict[str, str]] = []
+        self.router_paths: dict[type, str] = {}
         self.records: dict[Any, ModuleRecord] = {}
         self.controller_modules: dict[type, Any] = {}
         self.gateway_modules: dict[type, Any] = {}
@@ -132,6 +137,8 @@ class ModuleScanner:
         self.middlewares.extend(self._configured_middlewares(module_type))
         self.app_middlewares.extend(getattr(module_type, "__fanest_app_middlewares__", []))
         self.static_assets.extend(getattr(module_type, "__fanest_static_assets__", []))
+        if isinstance(module_ref, DynamicModule) and module_ref.router_paths:
+            self.router_paths.update(module_ref.router_paths)
 
     async def _scan_module_async(self, module: Any) -> None:
         module_ref = await self._normalize_module_ref_async(module)
@@ -180,6 +187,8 @@ class ModuleScanner:
         self.middlewares.extend(self._configured_middlewares(module_type))
         self.app_middlewares.extend(getattr(module_type, "__fanest_app_middlewares__", []))
         self.static_assets.extend(getattr(module_type, "__fanest_static_assets__", []))
+        if isinstance(module_ref, DynamicModule) and module_ref.router_paths:
+            self.router_paths.update(module_ref.router_paths)
 
     def _validate_module_boundaries(self) -> None:
         for record in self.records.values():
@@ -427,6 +436,7 @@ class ModuleScanner:
             tuple(self._object_fingerprint(middleware) for middleware in metadata.middlewares),
             tuple(self._object_fingerprint(export) for export in metadata.exports),
             metadata.global_module,
+            self._object_fingerprint(module.router_paths) if module.router_paths else None,
         )
 
     def _import_fingerprint(self, imported: Any) -> Any:

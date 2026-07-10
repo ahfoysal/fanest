@@ -82,6 +82,7 @@ class FastApiAdapter:
         versioning: VersioningOptions | None = None,
         controller_modules: dict[type, Any] | None = None,
         gateway_modules: dict[type, Any] | None = None,
+        module_route_prefixes: dict[Any, str] | None = None,
     ) -> None:
         self.app = app
         self.container = container
@@ -93,6 +94,7 @@ class FastApiAdapter:
         self.versioning = versioning
         self.controller_modules = controller_modules or {}
         self.gateway_modules = gateway_modules or {}
+        self.module_route_prefixes = module_route_prefixes or {}
         self._parameter_cache: dict[Any, dict[str, inspect.Parameter]] = {}
         self._non_uri_versioned_routes: set[tuple[str, str]] = set()
 
@@ -186,12 +188,16 @@ class FastApiAdapter:
                 extra = dict(route_options.get("openapi_extra", {}))
                 extra["security"] = [*extra.get("security", []), *securities]
                 route_options["openapi_extra"] = extra
+            module_prefix = self.module_route_prefixes.get(
+                self.controller_modules.get(controller), ""
+            )
             for version in path_versions:
                 path = self._versioned_path(
                     controller_metadata.prefix,
                     route_metadata.path,
                     version,
                     versioning,
+                    module_prefix=module_prefix,
                 )
                 methods = self._route_methods(route_metadata.method)
                 self._ensure_supported_versioned_route(path, methods, versioning, route_version)
@@ -226,6 +232,7 @@ class FastApiAdapter:
         route_path: str,
         version: str | None,
         versioning: VersioningOptions | None,
+        module_prefix: str = "",
     ) -> str:
         version_prefix = ""
         if version and (versioning is None or versioning.type == VersioningType.URI):
@@ -234,6 +241,7 @@ class FastApiAdapter:
         return self._join_paths(
             self.global_prefix,
             version_prefix,
+            module_prefix,
             controller_prefix,
             route_path,
         )
@@ -537,6 +545,7 @@ class FastApiAdapter:
         ) -> Any:
             kwargs = self._restore_reserved_user_parameter_names(handler_function, kwargs)
             request_scope = self.container.begin_request()
+            current_request_token = self.container.set_current_request(request)
             end_request_on_return = True
             self._attach_raw_body(request)
             controller = await self.container.resolve_async(controller_class, module_key=module_key)
@@ -638,6 +647,7 @@ class FastApiAdapter:
                     return handled
                 raise
             finally:
+                self.container.reset_current_request(current_request_token)
                 if end_request_on_return:
                     self.container.end_request(request_scope)
 
@@ -1412,12 +1422,14 @@ class FastApiAdapter:
         if controller_class is None or handler_name is None:
             return None
         request_scope = self.container.begin_request()
+        current_request_token = self.container.set_current_request(request)
         try:
             controller = await self.container.resolve_async(controller_class, module_key=module_key)
             handler = getattr(controller, handler_name)
             context = ExecutionContext(handler=handler, controller=controller, request=request, kwargs={})
             return await self._run_filters(controller, handler, context, exc)
         finally:
+            self.container.reset_current_request(current_request_token)
             self.container.end_request(request_scope)
 
     def _collect(self, controller: Any, handler: Callable[..., Any], key: str) -> list[Any]:

@@ -307,7 +307,10 @@ async def _resolve_props(
 ) -> tuple[dict[str, Any], dict[str, list[str]], list[str], list[str], list[str]]:
     partial_component = request.headers.get("x-inertia-partial-component")
     is_partial = partial_component == component
-    only = _split_header(request.headers.get("x-inertia-partial-data")) if is_partial else None
+    # An absent/empty Partial-Data header means "no only-filter" (Laravel only
+    # applies the filter when the list is non-empty), so except-only partial
+    # reloads still receive every non-excepted prop.
+    only = (_split_header(request.headers.get("x-inertia-partial-data")) or None) if is_partial else None
     excepted = _split_header(request.headers.get("x-inertia-partial-except")) if is_partial else []
     reset = set(_split_header(request.headers.get("x-inertia-reset")))
     only_top = {p.split(".", 1)[0] for p in only} if only is not None else None
@@ -422,10 +425,7 @@ async def _render_response(config: InertiaConfig, state: _InertiaState, componen
 
     # X-Inertia visit -> JSON page object
     if request.headers.get("x-inertia"):
-        return JSONResponse(
-            page,
-            headers={"X-Inertia": "true", "Vary": "X-Inertia", "X-Inertia-Version": page["version"]},
-        )
+        return JSONResponse(page, headers={"X-Inertia": "true", "Vary": "X-Inertia"})
 
     # First visit -> full HTML document (optionally server-side rendered)
     vite = ViteAssets(config.vite)
@@ -435,7 +435,8 @@ async def _render_response(config: InertiaConfig, state: _InertiaState, componen
         ssr_result = await ssr.render(page)
 
     if ssr_result is not None:
-        head = "".join(ssr_result.get("head", []))
+        head_fragments = ssr_result.get("head", [])
+        head = "\n".join(head_fragments) if isinstance(head_fragments, list) else str(head_fragments)
         body = ssr_result.get("body", "")
     else:
         encoded = html.escape(json.dumps(page, separators=(",", ":"), default=str), quote=True)
@@ -569,11 +570,12 @@ class InertiaMiddleware:
                 if not any(k.lower() == b"vary" for k, _ in headers):
                     headers.append((b"vary", b"X-Inertia"))
                 # redirect after PUT/PATCH/DELETE must be 303 so the browser
-                # re-issues the follow-up as GET (Inertia requirement)
+                # re-issues the follow-up as GET. Only 302 is converted —
+                # Laravel leaves explicit 301/307/308 choices untouched.
                 if (
                     is_inertia
                     and request.method in {"PUT", "PATCH", "DELETE"}
-                    and message.get("status") in {301, 302, 303, 307, 308}
+                    and message.get("status") == 302
                 ):
                     message["status"] = 303
                 message["headers"] = headers

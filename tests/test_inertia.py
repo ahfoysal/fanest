@@ -197,3 +197,35 @@ def test_v2_configurable_root_element():
     with _v2_client() as client:
         html_text = client.get("/v2/page").text
     assert 'id="root" data-page=' in html_text
+
+
+def test_except_only_partial_keeps_all_other_props():
+    with _client() as client:
+        page = client.get(
+            "/users",
+            headers={
+                "X-Inertia": "true",
+                "X-Inertia-Version": "v1",
+                "X-Inertia-Partial-Component": "Users/Index",
+                "X-Inertia-Partial-Except": "users",
+            },
+        ).json()
+    props = page["props"]
+    # No Partial-Data header: everything except the excepted key is returned,
+    # including previously ignored-on-first-load props requested by partials.
+    assert "users" not in props
+    assert "stats" in props
+    assert "app_name" in props
+    assert "auth" in props
+
+
+def test_only_302_is_upgraded_to_303_for_put():
+    with _client() as client:
+        response = client.put(
+            "/u/1", headers={"X-Inertia": "true", "X-Inertia-Version": "v1"}, follow_redirects=False
+        )
+    assert response.status_code == 303
+    # And the version header is not leaked on JSON responses (Laravel parity).
+    with _client() as client:
+        json_response = client.get("/users", headers={"X-Inertia": "true", "X-Inertia-Version": "v1"})
+    assert "x-inertia-version" not in json_response.headers
