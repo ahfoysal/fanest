@@ -3,7 +3,7 @@ import hashlib
 import hmac
 import json
 import time
-from http.cookies import SimpleCookie
+from http.cookies import CookieError, SimpleCookie
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -131,14 +131,19 @@ class FaNestSessionMiddleware:
         session_id, session, had_cookie = self._load_session(scope)
         scope["session_id"] = session_id
         scope["session"] = session
+        # Snapshot to detect whether the handler modified the session; with
+        # rolling=False an unmodified existing session is not re-issued.
+        initial_session = json.loads(json.dumps(session)) if session else {}
 
         async def send_with_cookie(message):
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
+                changed = scope["session"] != initial_session
                 cookie = self._cookie(
                     scope["session"],
                     session_id=scope.get("session_id"),
                     had_cookie=had_cookie,
+                    changed=changed,
                 )
                 if cookie is not None:
                     headers.append((b"set-cookie", cookie.encode()))
@@ -154,7 +159,13 @@ class FaNestSessionMiddleware:
         raw_cookie = headers.get(b"cookie")
         if raw_cookie is None:
             return ((str(uuid4()), {}, False) if self.store is not None else (None, {}, False))
-        cookies = SimpleCookie(raw_cookie.decode())
+        try:
+            cookies = SimpleCookie()
+            cookies.load(raw_cookie.decode())
+        except CookieError:
+            # A malformed neighbour cookie (illegal key char) must not 500 every
+            # request — treat the session cookie as simply absent.
+            cookies = SimpleCookie()
         morsel = cookies.get(self.session_cookie)
         if morsel is None:
             return ((str(uuid4()), {}, False) if self.store is not None else (None, {}, False))
@@ -169,8 +180,21 @@ class FaNestSessionMiddleware:
         except Exception:
             return ((str(uuid4()), {}, True) if self.store is not None else (None, {}, True))
 
-    def _cookie(self, session: dict[str, Any], *, session_id: str | None = None, had_cookie: bool = False) -> str | None:
+    def _cookie(
+        self,
+        session: dict[str, Any],
+        *,
+        session_id: str | None = None,
+        had_cookie: bool = False,
+        changed: bool = True,
+    ) -> str | None:
         if not session and not had_cookie:
+            return None
+        # rolling=False: an existing, unmodified session is not refreshed on
+        # every response — no sliding expiry, no re-issued Set-Cookie / re-save
+        # (express-session / NestJS rolling semantics). rolling=True keeps the
+        # sliding behaviour.
+        if not self.rolling and had_cookie and session and not changed:
             return None
         if self.store is not None:
             session_id = session_id or str(uuid4())

@@ -130,7 +130,11 @@ class I18nService:
             replacement = _lookup_arg(args, name)
             if replacement is not None:
                 pattern = r"\{\s*" + re.escape(name) + r"\s*\}"
-                rendered = re.sub(pattern, str(replacement), rendered)
+                # Use a function replacement so backslashes / group-reference
+                # sequences in the value ('C:\Users', r'a\1b', r'\g<0>') are
+                # inserted literally instead of being interpreted by re.sub.
+                text = str(replacement)
+                rendered = re.sub(pattern, lambda _match, text=text: text, rendered)
         return rendered
 
 

@@ -76,9 +76,12 @@ class Ability:
                 continue
             if rule_subject not in (ALL, name):
                 continue
-            if condition is not None:
-                if instance is None or not condition(instance):
-                    continue
+            # A conditional rule is only evaluated against a concrete instance.
+            # For a type/class-level check (no instance), the rule still matches
+            # — the permission is potentially available, exactly like CASL's
+            # ability.can(action, SubjectClass).
+            if condition is not None and instance is not None and not condition(instance):
+                continue
             allowed = permit
         return allowed
 

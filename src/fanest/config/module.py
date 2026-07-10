@@ -217,10 +217,18 @@ def _parse_env_value(raw_value: str) -> str:
     value = raw_value.strip()
     if not value:
         return ""
-    if value[0] in {"'", '"'} and value[-1:] == value[0]:
-        return value[1:-1]
+    quote = value[0]
+    if quote in {"'", '"'}:
+        # A quoted value ends at its closing quote; a '#' inside the quotes is
+        # literal, and anything after the closing quote (e.g. an inline comment)
+        # is discarded — matching python-dotenv / @nestjs/config.
+        closing = value.find(quote, 1)
+        if closing != -1:
+            return value[1:closing]
     if " #" in value:
         value = value.split(" #", 1)[0].rstrip()
+    if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
+        return value[1:-1]
     return value
 
 
