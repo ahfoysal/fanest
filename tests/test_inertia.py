@@ -1229,3 +1229,208 @@ def test_scroll_prop_default_metadata():
         "currentPage": 1,
         "reset": False,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Stabilization regressions: concurrency isolation, serialization, hardening
+# --------------------------------------------------------------------------- #
+def test_concurrent_requests_isolate_shared_state():
+    import asyncio
+
+    import httpx
+
+    @Controller("iso")
+    class IsoPages:
+        def __init__(self, inertia: InertiaService):
+            self.inertia = inertia
+
+        @Get("/who")
+        async def who(self):
+            await asyncio.sleep(0)  # yield to force request interleaving
+            return await self.inertia.render("Who", {})
+
+    @Module(
+        imports=[InertiaModule.for_root(version="1", share=lambda r: {"tenant": r.headers.get("x-tenant")})],
+        controllers=[IsoPages],
+    )
+    class IsoApp:
+        pass
+
+    app = FaNestFactory.create(IsoApp)
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            async def one(i):
+                r = await client.get(
+                    "/iso/who",
+                    headers={"X-Inertia": "true", "X-Inertia-Version": "1", "X-Tenant": f"t{i}"},
+                )
+                return i, r.json()["props"]["tenant"]
+
+            return await asyncio.gather(*(one(i) for i in range(300)))
+
+    results = asyncio.run(run())
+    leaks = [(i, t) for i, t in results if t != f"t{i}"]
+    assert leaks == [], f"per-request shared state leaked across concurrent requests: {leaks[:5]}"
+
+
+def test_set_root_view_is_per_request_not_global():
+    @Controller("rv")
+    class RvPages:
+        def __init__(self, inertia: InertiaService):
+            self.inertia = inertia
+
+        @Get("/admin")
+        async def admin(self):
+            self.inertia.set_root_view("admin")  # must NOT leak to the /home request
+            return await self.inertia.render("Admin", {})
+
+        @Get("/home")
+        async def home(self):
+            return await self.inertia.render("Home", {})
+
+    tmpl = {
+        "app": lambda v, h, b: f"<!doctype html>APP:{b}",
+        "admin": lambda v, h, b: f"<!doctype html>ADMIN:{b}",
+    }
+
+    @Module(imports=[InertiaModule.for_root(version="1", template=tmpl)], controllers=[RvPages])
+    class RvApp:
+        pass
+
+    with TestClient(FaNestFactory.create(RvApp)) as client:
+        admin = client.get("/rv/admin").text
+        home = client.get("/rv/home").text  # requested AFTER /admin called set_root_view
+    assert "ADMIN:" in admin
+    assert "APP:" in home and "ADMIN:" not in home  # the singleton config was not poisoned
+
+
+def test_datetime_prop_serializes_on_inertia_visit():
+    from datetime import datetime
+
+    @Controller("dt")
+    class DtPages:
+        def __init__(self, inertia: InertiaService):
+            self.inertia = inertia
+
+        @Get("/now")
+        async def now(self):
+            return await self.inertia.render("Now", {"at": datetime(2020, 1, 2, 3, 4, 5)})
+
+    @Module(imports=[InertiaModule.for_root(version="1")], controllers=[DtPages])
+    class DtApp:
+        pass
+
+    with TestClient(FaNestFactory.create(DtApp), raise_server_exceptions=False) as client:
+        r = client.get("/dt/now", headers={"X-Inertia": "true", "X-Inertia-Version": "1"})
+    # the JSON path must tolerate non-native types (default=str), like the HTML path
+    assert r.status_code == 200
+    assert "2020-01-02" in r.json()["props"]["at"]
+
+
+def test_stale_version_409_with_non_latin1_url_does_not_crash():
+    @Controller("")
+    class UPages:
+        def __init__(self, inertia: InertiaService):
+            self.inertia = inertia
+
+        @Get("/{slug}")
+        async def page(self, slug: str):
+            return await self.inertia.render("P", {})
+
+    @Module(imports=[InertiaModule.for_root(version="v2")], controllers=[UPages])
+    class UApp:
+        pass
+
+    with TestClient(FaNestFactory.create(UApp), raise_server_exceptions=False) as client:
+        r = client.get("/€uro", headers={"X-Inertia": "true", "X-Inertia-Version": "OLD"})
+    # a non-latin-1 slug must not crash the latin-1 header encoding on the 409
+    assert r.status_code == 409
+    assert r.headers["x-inertia-location"]
+
+
+def test_csrf_token_compare_handles_non_ascii():
+    # A browser can send a latin-1 (non-ASCII) X-XSRF-TOKEN header; Starlette
+    # decodes it to a str with codepoints > 127, which makes secrets.compare_digest
+    # raise TypeError. _tokens_match must turn that into a clean mismatch, not a 500.
+    from fanest.inertia.middleware import _tokens_match
+
+    assert _tokens_match("abc123", "abc123") is True
+    assert _tokens_match("abc123", "xyz789") is False
+    assert _tokens_match(None, "abc") is False
+    assert _tokens_match("abc", None) is False
+    assert _tokens_match("café", "abc") is False  # non-ASCII -> mismatch, no TypeError
+    assert _tokens_match("abc", "café") is False
+
+
+def test_component_name_rejects_path_traversal(tmp_path):
+    from fanest.inertia import InertiaComponentNotFoundError, InertiaConfig
+    from fanest.inertia.module import _ensure_component_exists
+
+    cfg = InertiaConfig(ensure_pages_exist=True, page_paths=[str(tmp_path)])
+    for bad in ["../secret", "../../etc/passwd", "/etc/passwd"]:
+        try:
+            _ensure_component_exists(cfg, bad)
+        except InertiaComponentNotFoundError as exc:
+            assert "Invalid" in str(exc)
+        else:
+            raise AssertionError(f"path traversal {bad!r} was not rejected")
+
+
+def test_vite_tolerates_malformed_and_partial_manifest(tmp_path):
+    from fanest.inertia import ViteAssets
+
+    manifest = tmp_path / "manifest.json"
+    # half-written / corrupt manifest (rolling-deploy race) -> no crash, no tags
+    manifest.write_text('{ "src/main.jsx": {"file": ')
+    v = ViteAssets({"manifest": str(manifest), "entrypoints": ["src/main.jsx"], "build_directory": "dist"})
+    assert v.tags() == ""
+    assert v.version_hash()  # md5 of the raw bytes still works
+
+    # entry present but missing "file" (CSS-only chunk) -> emit css, skip script
+    manifest.write_text('{"src/main.jsx": {"css": ["a.css"]}}')
+    v2 = ViteAssets({"manifest": str(manifest), "entrypoints": ["src/main.jsx"], "build_directory": "dist"})
+    tags = v2.tags()
+    assert "a.css" in tags and "<script" not in tags
+
+
+def test_scroll_metadata_callable_returning_nondict_is_safe():
+    @Controller("sm")
+    class SmPages:
+        def __init__(self, inertia: InertiaService):
+            self.inertia = inertia
+
+        @Get("/f")
+        async def f(self):
+            return await self.inertia.render("F", {"items": self.inertia.scroll({"data": []}, metadata=lambda: None)})
+
+    @Module(imports=[InertiaModule.for_root(version="1")], controllers=[SmPages])
+    class SmApp:
+        pass
+
+    with TestClient(FaNestFactory.create(SmApp), raise_server_exceptions=False) as client:
+        r = client.get("/sm/f", headers={"X-Inertia": "true", "X-Inertia-Version": "1"})
+    assert r.status_code == 200
+    assert r.json()["scrollProps"]["items"]["pageName"] == "page"  # defaults applied, no crash
+
+
+def test_vary_header_merged_not_dropped():
+    from starlette.responses import PlainTextResponse
+
+    @Controller("vary")
+    class VPages:
+        def __init__(self, inertia: InertiaService):
+            self.inertia = inertia
+
+        @Get("/x")
+        async def x(self):
+            return PlainTextResponse("hi", headers={"Vary": "Accept-Encoding"})
+
+    @Module(imports=[InertiaModule.for_root(version="1")], controllers=[VPages])
+    class VApp:
+        pass
+
+    with TestClient(FaNestFactory.create(VApp)) as client:
+        vary = client.get("/vary/x").headers.get("vary", "")
+    assert "Accept-Encoding" in vary and "X-Inertia" in vary  # merged, not overwritten or dropped

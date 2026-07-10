@@ -180,7 +180,8 @@ class _ResolvedProps:
 def _scroll_metadata(prop: "ScrollProp") -> dict[str, Any]:
     """The four pagination fields inertia-laravel emits per scroll prop."""
     meta = prop.metadata() if callable(prop.metadata) else prop.metadata
-    meta = meta or {}
+    if not isinstance(meta, dict):  # a callable may return None/a non-dict
+        meta = {}
     return {
         "pageName": meta.get("pageName", "page"),
         "previousPage": meta.get("previousPage"),

@@ -27,26 +27,37 @@ class ViteAssets:
         return bool(self.dev_server)
 
     def _dev_url(self) -> str:
-        if self.hot_file and Path(self.hot_file).exists():
-            return Path(self.hot_file).read_text(encoding="utf-8").strip().rstrip("/")
+        if self.hot_file:
+            try:
+                return Path(self.hot_file).read_text(encoding="utf-8").strip().rstrip("/")
+            except OSError:  # vanished between is_dev() and here
+                pass
         return (self.dev_server or "http://localhost:5173").rstrip("/")
 
     def _manifest_data(self) -> dict[str, Any]:
         manifest = self._manifest
         if manifest is None:
-            if not self.manifest_path or not Path(self.manifest_path).exists():
+            manifest = {}
+            if self.manifest_path:
+                try:
+                    manifest = json.loads(Path(self.manifest_path).read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    # missing (deploy swap) or half-written during a rolling deploy
+                    manifest = {}
+            if not isinstance(manifest, dict):
                 manifest = {}
-            else:
-                manifest = json.loads(Path(self.manifest_path).read_text(encoding="utf-8"))
             self._manifest = manifest
         return manifest
 
     def version_hash(self) -> str:
         """A content hash of the Vite manifest, so a rebuild busts the client cache."""
-        if self.manifest_path and Path(self.manifest_path).exists():
+        if self.manifest_path:
             import hashlib
 
-            return hashlib.md5(Path(self.manifest_path).read_bytes()).hexdigest()[:12]
+            try:
+                return hashlib.md5(Path(self.manifest_path).read_bytes()).hexdigest()[:12]
+            except OSError:
+                pass
         if self.hot_file and Path(self.hot_file).exists():
             return "dev"
         return ""
@@ -87,5 +98,7 @@ class ViteAssets:
                     if css not in seen_css:
                         seen_css.add(css)
                         tags.append(f'<link rel="stylesheet" href="{base}/{css}">')
-            tags.append(f'<script type="module" src="{base}/{chunk["file"]}"></script>')
+            file = chunk.get("file")
+            if file:  # a CSS-only / malformed chunk may lack "file"
+                tags.append(f'<script type="module" src="{base}/{file}"></script>')
         return "\n".join(tags)

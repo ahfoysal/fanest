@@ -39,7 +39,9 @@ class ExceptionResponse:
         return self
 
     async def render(self) -> Response:
-        builder = self._inertia.render(self._component, dict(self._props))
+        # Disable SSR for the error page: we must not let an SSR failure (e.g.
+        # ssr throw_on_error) double-fault while handling the original exception.
+        builder = self._inertia.render(self._component, dict(self._props)).disable_ssr()
         if self._shared:
             builder.with_(dict(self._shared))
         response = await builder
@@ -73,9 +75,11 @@ class InertiaExceptionFilter(BaseExceptionFilter):
         if _current.get() is None:
             return None
         status = getattr(exc, "status_code", None)
-        if status is None:
-            status = 500
-        if int(status) not in config.error_statuses:
+        try:
+            status = int(status) if status is not None else 500
+        except (TypeError, ValueError):
+            status = 500  # a non-numeric status_code must not crash the handler
+        if status not in config.error_statuses:
             return None  # not an error-page status -> re-raise the original exception
-        response = ExceptionResponse(self.inertia, int(status), config.error_component, {"status": int(status)})
+        response = ExceptionResponse(self.inertia, status, config.error_component, {"status": status})
         return await response.render()
