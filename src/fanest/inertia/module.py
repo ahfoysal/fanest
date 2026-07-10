@@ -44,6 +44,9 @@ from fanest.core.providers import token
 
 INERTIA_OPTIONS = token("INERTIA_OPTIONS")
 
+#: Session key holding data flashed for exactly one follow-up request.
+_FLASH_KEY = "_inertia_flash"
+
 
 # --------------------------------------------------------------------------- #
 # Prop wrappers (mirror Inertia::lazy / always / defer / merge / optional)
@@ -102,6 +105,24 @@ class _InertiaState:
     version: str | None = None
     encrypt_history: bool = False
     clear_history: bool = False
+    flash: dict[str, Any] = field(default_factory=dict)
+    flash_consumed: bool = False
+
+
+def _consume_flash(state: "_InertiaState") -> None:
+    """Pop session flash data once per request. Lazy so it works no matter how
+    the session middleware is ordered relative to InertiaMiddleware."""
+    if state.flash_consumed:
+        return
+    session = state.request.scope.get("session")
+    if not isinstance(session, dict):
+        return
+    state.flash_consumed = True
+    popped = session.pop(_FLASH_KEY, None)
+    if isinstance(popped, dict):
+        state.flash = popped
+        if popped.get("errors"):
+            state.shared["errors"] = popped["errors"]
 
 
 _current: ContextVar[_InertiaState | None] = ContextVar("fanest_inertia_state", default=None)
@@ -392,6 +413,7 @@ def _default_template(vite: ViteAssets, head: str, body: str) -> str:
 
 async def _render_response(config: InertiaConfig, state: _InertiaState, component: str, props: dict[str, Any]) -> Response:
     request = state.request
+    _consume_flash(state)
     # shared data is merged under the page props; explicit props win on key clash
     merged = {**state.shared, **props}
     resolved, deferred, merge_keys, deep_merge_keys, match_on = await _resolve_props(
@@ -490,6 +512,59 @@ class InertiaService:
             return Response(status_code=409, headers={"X-Inertia-Location": url})
         return Response(status_code=302, headers={"Location": url})
 
+    def back(self, fallback: str = "/", status: int | None = None) -> Response:
+        """Redirect to the Referer (Laravel ``back()``). PUT/PATCH/DELETE get a
+        303 so the browser re-issues the follow-up visit as GET."""
+        request = _state().request
+        url = request.headers.get("referer") or fallback
+        if status is None:
+            status = 303 if request.method in {"PUT", "PATCH", "DELETE"} else 302
+        return Response(status_code=status, headers={"Location": url, "Vary": "X-Inertia"})
+
+    def flash(self, key: str | dict[str, Any], value: Any = None) -> "InertiaService":
+        """Stash data in the session for exactly the next request (Laravel
+        session flash). Requires SessionModule."""
+        # Consume the incoming flash first so it cannot swallow what we are
+        # about to stash for the next request.
+        _consume_flash(_state())
+        session = self._session()
+        bucket = session.setdefault(_FLASH_KEY, {})
+        if isinstance(key, dict):
+            bucket.update(key)
+        else:
+            bucket[key] = value
+        return self
+
+    def get_flash(self, key: str | None = None, default: Any = None) -> Any:
+        """Read data flashed by the previous request."""
+        state = _state()
+        _consume_flash(state)
+        return state.flash if key is None else state.flash.get(key, default)
+
+    def with_errors(
+        self,
+        errors: dict[str, Any],
+        *,
+        error_bag: str | None = None,
+        fallback: str = "/",
+    ) -> Response:
+        """Flash validation errors and redirect back — the Laravel
+        redirect-back-with-errors flow. On the next request the errors are
+        automatically shared as the ``errors`` prop (nested under the bag when
+        one is given)."""
+        payload: dict[str, Any] = {error_bag: errors} if error_bag else errors
+        self.flash("errors", payload)
+        return self.back(fallback=fallback)
+
+    def _session(self) -> dict[str, Any]:
+        session = _state().request.scope.get("session")
+        if not isinstance(session, dict):
+            raise RuntimeError(
+                "Session-backed Inertia features (flash / with_errors) require "
+                "SessionModule.for_root(...) to be imported."
+            )
+        return session
+
     def set_version(self, version: str) -> "InertiaService":
         _state().version = version
         return self
@@ -548,6 +623,9 @@ class InertiaMiddleware:
             state.shared.update(share(request) or {})
         elif isinstance(share, dict):
             state.shared.update(share)
+        # consume session flash data (validation errors from the previous
+        # request become the auto-shared `errors` prop, Laravel-style)
+        _consume_flash(state)
         token_reset = _current.set(state)
 
         # asset version check: stale GET -> force a full reload (409 + Location)
@@ -555,6 +633,11 @@ class InertiaMiddleware:
             client_version = request.headers.get("x-inertia-version", "")
             current_version = _resolve_version(self.config, state)
             if current_version and client_version != current_version:
+                # reflash so flashed data (e.g. errors) survives the forced
+                # full reload, matching Laravel's session reflash on 409
+                session = scope.get("session")
+                if state.flash_consumed and state.flash and isinstance(session, dict):
+                    session[_FLASH_KEY] = state.flash
                 _current.reset(token_reset)
                 response = Response(
                     status_code=409,
@@ -563,7 +646,10 @@ class InertiaMiddleware:
                 await response(scope, receive, send)
                 return
 
+        pending_start: dict[str, Any] | None = None
+
         async def send_wrapper(message: dict[str, Any]) -> None:
+            nonlocal pending_start
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
                 # always advertise Vary: X-Inertia
@@ -579,6 +665,31 @@ class InertiaMiddleware:
                 ):
                     message["status"] = 303
                 message["headers"] = headers
+                # An Inertia request that produced a bare 200 with no content
+                # is redirected back (Laravel's onEmptyResponse); hold the
+                # start message until the body reveals whether it is empty.
+                if is_inertia and message.get("status") == 200:
+                    pending_start = message
+                    return
+            elif message["type"] == "http.response.body" and pending_start is not None:
+                start, pending_start = pending_start, None
+                body = message.get("body", b"")
+                if not message.get("more_body") and body in (b"", b"null"):
+                    referer = request.headers.get("referer") or "/"
+                    status = 303 if request.method in {"PUT", "PATCH", "DELETE"} else 302
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": status,
+                            "headers": [
+                                (b"location", referer.encode("latin-1")),
+                                (b"vary", b"X-Inertia"),
+                            ],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": b""})
+                    return
+                await send(start)
             await send(message)
 
         try:

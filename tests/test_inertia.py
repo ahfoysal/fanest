@@ -229,3 +229,126 @@ def test_only_302_is_upgraded_to_303_for_put():
     with _client() as client:
         json_response = client.get("/users", headers={"X-Inertia": "true", "X-Inertia-Version": "v1"})
     assert "x-inertia-version" not in json_response.headers
+
+
+# --------------------------------------------------------------------------- #
+# Session integration: flash, validation errors, back(), empty responses
+# --------------------------------------------------------------------------- #
+from fanest import Post  # noqa: E402
+from fanest.session import SessionModule  # noqa: E402
+
+
+@Controller("forms")
+class FormPages:
+    def __init__(self, inertia: InertiaService):
+        self.inertia = inertia
+
+    @Get("/edit")
+    async def edit(self):
+        return await self.inertia.render("Forms/Edit", {"values": {"name": ""}})
+
+    @Post("/submit")
+    async def submit(self):
+        return self.inertia.with_errors({"name": "Name is required."})
+
+    @Post("/submit-bagged")
+    async def submit_bagged(self):
+        return self.inertia.with_errors({"email": "Invalid."}, error_bag="newsletter")
+
+    @Post("/flash")
+    async def flash(self):
+        self.inertia.flash("status", "Saved!")
+        return self.inertia.back(fallback="/forms/edit")
+
+    @Get("/status")
+    async def status(self):
+        return await self.inertia.render(
+            "Forms/Status", {"status": self.inertia.get_flash("status")}
+        )
+
+    @Post("/empty")
+    async def empty(self):
+        return None
+
+
+@Module(
+    imports=[
+        SessionModule.for_root(secret_key="inertia-session-secret"),
+        InertiaModule.for_root(version="v1"),
+    ],
+    controllers=[FormPages],
+)
+class FormApp:
+    pass
+
+
+def _form_client():
+    return TestClient(FaNestFactory.create(FormApp), raise_server_exceptions=False)
+
+
+def test_validation_errors_flash_and_share_on_next_request():
+    with _form_client() as client:
+        response = client.post(
+            "/forms/submit",
+            headers={"X-Inertia": "true", "Referer": "http://testserver/forms/edit"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert response.headers["location"] == "http://testserver/forms/edit"
+
+        page = client.get("/forms/edit", headers={"X-Inertia": "true", "X-Inertia-Version": "v1"}).json()
+        assert page["props"]["errors"] == {"name": "Name is required."}
+
+        # flash is consumed: errors are gone on the request after
+        page = client.get("/forms/edit", headers={"X-Inertia": "true", "X-Inertia-Version": "v1"}).json()
+        assert page["props"]["errors"] == {}
+
+
+def test_error_bags_nest_flashed_errors():
+    with _form_client() as client:
+        client.post("/forms/submit-bagged", headers={"X-Inertia": "true"}, follow_redirects=False)
+        page = client.get(
+            "/forms/edit",
+            headers={
+                "X-Inertia": "true",
+                "X-Inertia-Version": "v1",
+                "X-Inertia-Error-Bag": "newsletter",
+            },
+        ).json()
+    assert page["props"]["errors"] == {"newsletter": {"email": "Invalid."}}
+
+
+def test_flash_data_available_exactly_once():
+    with _form_client() as client:
+        client.post("/forms/flash", headers={"X-Inertia": "true"}, follow_redirects=False)
+        first = client.get("/forms/status", headers={"X-Inertia": "true", "X-Inertia-Version": "v1"}).json()
+        second = client.get("/forms/status", headers={"X-Inertia": "true", "X-Inertia-Version": "v1"}).json()
+    assert first["props"]["status"] == "Saved!"
+    assert second["props"]["status"] is None
+
+
+def test_flashed_errors_survive_a_version_mismatch_reload():
+    with _form_client() as client:
+        client.post("/forms/submit", headers={"X-Inertia": "true"}, follow_redirects=False)
+        # stale version -> 409 forced reload; errors must be reflashed
+        stale = client.get("/forms/edit", headers={"X-Inertia": "true", "X-Inertia-Version": "OLD"})
+        assert stale.status_code == 409
+        page = client.get("/forms/edit", headers={"X-Inertia": "true", "X-Inertia-Version": "v1"}).json()
+    assert page["props"]["errors"] == {"name": "Name is required."}
+
+
+def test_empty_inertia_response_redirects_back():
+    with _form_client() as client:
+        response = client.post(
+            "/forms/empty",
+            headers={"X-Inertia": "true", "Referer": "http://testserver/forms/edit"},
+            follow_redirects=False,
+        )
+    assert response.status_code == 302
+    assert response.headers["location"] == "http://testserver/forms/edit"
+
+
+def test_non_inertia_empty_response_is_untouched():
+    with _form_client() as client:
+        response = client.post("/forms/empty", follow_redirects=False)
+    assert response.status_code == 200
