@@ -68,6 +68,23 @@ class OnceProp:
     expires_at: int | None = None
 
 
+@dataclass
+class ScrollProp:
+    """Infinite-scroll prop (Inertia::scroll). The array under ``wrapper`` (default
+    ``"data"``) is *merged* into the existing list — appended by default, or
+    prepended when the client sends ``X-Inertia-Infinite-Scroll-Merge-Intent:
+    prepend`` (scrolling up). Advertised under ``scrollProps`` with pagination
+    metadata, and — unless the key is reset — under ``mergeProps`` (append) or
+    ``prependProps`` (prepend) as ``"{key}.{wrapper}"``. ``metadata`` supplies the
+    ``pageName``/``previousPage``/``nextPage``/``currentPage`` the client paginates
+    with (a dict or a no-arg callable)."""
+
+    value: Any
+    wrapper: str = "data"
+    metadata: dict[str, Any] | Callable[[], dict[str, Any]] | None = None
+    match_on: list[str] | None = None
+
+
 # --------------------------------------------------------------------------- #
 # Prop resolution (partial reloads, lazy/always/defer/merge)
 # --------------------------------------------------------------------------- #
@@ -76,7 +93,7 @@ async def _evaluate(value: Any, request: Request | None = None) -> Any:
         value = value.callback
     elif isinstance(value, AlwaysProp):
         value = value.value
-    elif isinstance(value, MergeProp):
+    elif isinstance(value, (MergeProp, ScrollProp)):
         value = value.value
     if callable(value) and not isinstance(value, type):
         # Laravel closures receive the Request: pass it when the callable accepts an arg.
@@ -157,6 +174,19 @@ class _ResolvedProps:
     prepend_keys: list[str] = field(default_factory=list)
     match_on: list[str] = field(default_factory=list)
     once: dict[str, dict[str, Any]] = field(default_factory=dict)
+    scroll: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+def _scroll_metadata(prop: "ScrollProp") -> dict[str, Any]:
+    """The four pagination fields inertia-laravel emits per scroll prop."""
+    meta = prop.metadata() if callable(prop.metadata) else prop.metadata
+    meta = meta or {}
+    return {
+        "pageName": meta.get("pageName", "page"),
+        "previousPage": meta.get("previousPage"),
+        "nextPage": meta.get("nextPage"),
+        "currentPage": meta.get("currentPage", 1),
+    }
 
 
 async def _resolve_props(
@@ -175,6 +205,8 @@ async def _resolve_props(
     reset = set(_split_header(request.headers.get("x-inertia-reset")))
     # Once props the client already cached — advertised back so we skip re-sending them.
     except_once = set(_split_header(request.headers.get("x-inertia-except-once-props")))
+    # Infinite-scroll merge intent: "prepend" (scrolling up) else append.
+    scroll_intent = request.headers.get("x-inertia-infinite-scroll-merge-intent")
     only_top = {p.split(".", 1)[0] for p in only} if only is not None else None
     except_top = {p for p in excepted if "." not in p}
 
@@ -200,6 +232,22 @@ async def _resolve_props(
         elif isinstance(value, IgnoreOnFirstLoad):
             if isinstance(value, DeferProp):
                 out.deferred.setdefault(value.group, []).append(key)
+            continue
+        if isinstance(value, ScrollProp):
+            # Advertised under scrollProps (always, with a `reset` flag) and — unless
+            # reset — under mergeProps (append) / prependProps (prepend) as
+            # "{key}.{wrapper}", per the infinite-scroll merge-intent header.
+            merge_path = f"{key}.{value.wrapper}"
+            is_reset = key in reset
+            if not is_reset:
+                if scroll_intent == "prepend":
+                    out.prepend_keys.append(merge_path)
+                else:
+                    out.merge_keys.append(merge_path)
+                for field_name in value.match_on or []:
+                    out.match_on.append(f"{key}.{value.wrapper}.{field_name}")
+            out.scroll[key] = {**_scroll_metadata(value), "reset": is_reset}
+            resolved[key] = await _evaluate(value, request)
             continue
         if key not in reset:  # X-Inertia-Reset -> client replaces instead of merges
             if isinstance(value, MergeProp):

@@ -51,6 +51,7 @@ from fanest.inertia.props import (
     MergeProp,
     OnceProp,
     OptionalProp,
+    ScrollProp,
 )
 from fanest.inertia.rendering import InertiaComponentNotFoundError, _ensure_component_exists
 from fanest.inertia.service import InertiaResponseBuilder, InertiaService
@@ -77,6 +78,7 @@ __all__ = [
     "MethodOverrideMiddleware",
     "OnceProp",
     "OptionalProp",
+    "ScrollProp",
     "ViteAssets",
     "inertia_route",
     "_ensure_component_exists",

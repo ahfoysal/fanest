@@ -1137,3 +1137,95 @@ def test_conformance_minimal_page_omits_all_empty_keys():
     # a plain render emits ONLY the six always-present base keys
     assert set(page) == _BASE_KEYS
     assert set(page["props"]) == {"x", "errors"}
+
+
+# --------------------------------------------------------------------------- #
+# scrollProps / infinite scroll (Inertia v2)
+# --------------------------------------------------------------------------- #
+@Controller("scroll")
+class ScrollPages:
+    def __init__(self, inertia: InertiaService):
+        self.inertia = inertia
+
+    @Get("/feed")
+    async def feed(self):
+        return await self.inertia.render(
+            "Feed",
+            {
+                "users": self.inertia.scroll(
+                    {"data": [{"id": 1}], "meta": {"total": 1}},
+                    metadata={"pageName": "page", "previousPage": None, "nextPage": 2, "currentPage": 1},
+                    match_on=["id"],
+                ),
+            },
+        )
+
+    @Get("/auto")
+    async def auto(self):
+        # metadata=None -> pageName defaults to "page", currentPage to 1
+        return await self.inertia.render("Feed", {"items": self.inertia.scroll({"data": []})})
+
+
+@Module(imports=[InertiaModule.for_root(version="s1")], controllers=[ScrollPages])
+class ScrollApp:
+    pass
+
+
+def _scroll_client():
+    return TestClient(FaNestFactory.create(ScrollApp))
+
+
+def test_scroll_prop_append_default():
+    with _scroll_client() as client:
+        page = client.get("/scroll/feed", headers={"X-Inertia": "true", "X-Inertia-Version": "s1"}).json()
+    # default (no intent header) -> append: the "{key}.{wrapper}" path lands in mergeProps
+    assert page["mergeProps"] == ["users.data"]
+    assert "prependProps" not in page
+    assert page["matchPropsOn"] == ["users.data.id"]
+    assert page["scrollProps"] == {
+        "users": {"pageName": "page", "previousPage": None, "nextPage": 2, "currentPage": 1, "reset": False}
+    }
+    # the value itself is still sent under the prop
+    assert page["props"]["users"] == {"data": [{"id": 1}], "meta": {"total": 1}}
+
+
+def test_scroll_prop_prepend_intent():
+    with _scroll_client() as client:
+        page = client.get(
+            "/scroll/feed",
+            headers={
+                "X-Inertia": "true",
+                "X-Inertia-Version": "s1",
+                "X-Inertia-Infinite-Scroll-Merge-Intent": "prepend",
+            },
+        ).json()
+    # scrolling up -> the merge path moves to prependProps, mergeProps drops out
+    assert page["prependProps"] == ["users.data"]
+    assert "mergeProps" not in page
+    assert page["scrollProps"]["users"]["reset"] is False
+
+
+def test_scroll_prop_reset_keeps_scrollprops_but_drops_merge():
+    with _scroll_client() as client:
+        page = client.get(
+            "/scroll/feed",
+            headers={"X-Inertia": "true", "X-Inertia-Version": "s1", "X-Inertia-Reset": "users"},
+        ).json()
+    # reset -> no longer advertised as a merge/prepend prop, but STILL in scrollProps (reset=true)
+    assert "mergeProps" not in page
+    assert "prependProps" not in page
+    assert page["scrollProps"]["users"]["reset"] is True
+    assert page["props"]["users"]["data"] == [{"id": 1}]  # value still sent
+
+
+def test_scroll_prop_default_metadata():
+    with _scroll_client() as client:
+        page = client.get("/scroll/auto", headers={"X-Inertia": "true", "X-Inertia-Version": "s1"}).json()
+    assert page["mergeProps"] == ["items.data"]
+    assert page["scrollProps"]["items"] == {
+        "pageName": "page",
+        "previousPage": None,
+        "nextPage": None,
+        "currentPage": 1,
+        "reset": False,
+    }

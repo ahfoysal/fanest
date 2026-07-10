@@ -6,7 +6,7 @@ from starlette.responses import Response
 
 from fanest import Inject, Injectable
 from fanest.inertia.context import INERTIA_OPTIONS, InertiaConfig, _consume_flash, _current, _FLASH_KEY, _InertiaState
-from fanest.inertia.props import AlwaysProp, DeferProp, LazyProp, MergeProp, OnceProp
+from fanest.inertia.props import AlwaysProp, DeferProp, LazyProp, MergeProp, OnceProp, ScrollProp
 from fanest.inertia.rendering import _render_response, _with_fragment
 from fanest.inertia.ssr import InertiaSSR
 
@@ -246,6 +246,19 @@ class InertiaService:
     def once(callback: Callable[[], Any], expires_at: int | None = None) -> OnceProp:
         """A prop sent once, then cached client-side (Inertia::once)."""
         return OnceProp(callback, expires_at=expires_at)
+
+    @staticmethod
+    def scroll(
+        value: Any,
+        *,
+        wrapper: str = "data",
+        metadata: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
+        match_on: list[str] | None = None,
+    ) -> ScrollProp:
+        """An infinite-scroll prop (Inertia::scroll): the array under ``wrapper`` is
+        merged (append, or prepend on scroll-up) and advertised under ``scrollProps``
+        with pagination ``metadata``."""
+        return ScrollProp(value, wrapper=wrapper, metadata=metadata, match_on=match_on)
 
     def share_once(
         self, key: str, callback: Callable[[], Any], expires_at: int | None = None

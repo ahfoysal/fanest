@@ -170,6 +170,8 @@ async def _render_response(
         page["matchPropsOn"] = resolved_props.match_on
     if resolved_props.deferred:
         page["deferredProps"] = resolved_props.deferred
+    if resolved_props.scroll:
+        page["scrollProps"] = resolved_props.scroll
     if resolved_props.once:
         page["onceProps"] = resolved_props.once
     if cache is not None:
