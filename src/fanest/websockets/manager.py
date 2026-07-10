@@ -77,6 +77,12 @@ class WebSocketManager:
 
     def leave_namespace(self, namespace: str, websocket: WebSocket) -> None:
         namespace = self._normalize_namespace(namespace)
+        # Leaving a namespace also removes the socket from every room scoped to
+        # it, otherwise room broadcasts within that namespace would still reach
+        # the departed socket (socket.io parity).
+        for room_namespace, room in list(self._socket_rooms.get(websocket, set())):
+            if room_namespace == namespace:
+                self.leave(room, websocket, namespace=namespace)
         self._namespaces.get(namespace, set()).discard(websocket)
         if not self._namespaces.get(namespace):
             self._namespaces.pop(namespace, None)

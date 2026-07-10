@@ -290,14 +290,30 @@ class CacheInterceptor:
         if cached is not None:
             return cached
         result = await call_next()
-        ttl = getattr(context.handler, "__fanest_cache_ttl__", None)
+        ttl = self._cache_metadata(context, "__fanest_cache_ttl__")
         if ttl is None:
             ttl = self.cache_service.default_ttl
         await self.cache_service.set_async(key, result, ttl)
         return result
 
+    @staticmethod
+    def _cache_metadata(context, key: str) -> Any:
+        # Method-level metadata wins; a controller-class-level @CacheTTL /
+        # @CacheKey applies to every handler (previously a silent no-op).
+        handler = context.handler
+        if hasattr(handler, key):
+            return getattr(handler, key)
+        func = getattr(handler, "__func__", None)
+        if func is not None and hasattr(func, key):
+            return getattr(func, key)
+        controller = getattr(context, "controller", None)
+        controller_class = getattr(controller, "__class__", None)
+        if controller_class is not None and hasattr(controller_class, key):
+            return getattr(controller_class, key)
+        return None
+
     def _cache_key(self, context) -> str:
-        custom_key = getattr(context.handler, "__fanest_cache_key__", None)
+        custom_key = self._cache_metadata(context, "__fanest_cache_key__")
         request = context.request
         identity = self._identity_fragment(request)
         if custom_key is not None:
