@@ -38,7 +38,7 @@ def test_production_style_example_imports_and_exercises_core_flows():
     assert users_response.json()["data"][0]["email"] == "admin@fanest.dev"
     assert login_response.status_code == 200
     assert admin_response.json()["users"] == 2
-    assert create_response.status_code == 200
+    assert create_response.status_code == 201
     assert create_response.json()["email"] == "katherine@fanest.dev"
     assert graphql_response.status_code == 200
     assert graphql_response.json()["data"]["users"]

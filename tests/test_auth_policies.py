@@ -74,7 +74,7 @@ def test_policies_guard_allows_and_denies_by_ability():
         assert client.get("/articles/", headers={"x-role": "user"}).status_code == 200
         assert client.get("/articles/").status_code == 403  # no user -> empty ability
         assert client.post("/articles/", headers={"x-role": "user"}).status_code == 403
-        assert client.post("/articles/", headers={"x-role": "admin"}).status_code == 200
+        assert client.post("/articles/", headers={"x-role": "admin"}).status_code == 201
 
 
 def test_check_policies_noop_when_no_policies():

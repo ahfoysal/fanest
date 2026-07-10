@@ -10,6 +10,7 @@ from fanest import (
     Body,
     ConnectedSocket,
     Controller,
+    HttpCode,
     Injectable,
     MessageBody,
     Module,
@@ -2480,6 +2481,7 @@ class GraphQLModule:
                 self.schema = schema
 
             @Post("/")
+            @HttpCode(200)
             async def execute(self, payload: dict[str, Any] = Body()):  # type: ignore[assignment]
                 return await self.schema.execute(
                     payload.get("query", ""),

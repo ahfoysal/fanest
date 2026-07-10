@@ -103,7 +103,7 @@ def test_queue_module_registers_processors_and_runs_jobs():
     with TestClient(FaNestFactory.create(QueueAppModule)) as client:
         response = client.post("/queues")
 
-    assert response.status_code == 200
+    assert response.status_code == 201
     assert response.json()["handled"] == ["ada@example.com"]
 
 
@@ -115,7 +115,7 @@ def test_queue_module_accepts_custom_backend_for_durable_adapters():
     with TestClient(FaNestFactory.create(QueueBackendAppModule)) as client:
         response = client.post("/queues")
 
-    assert response.status_code == 200
+    assert response.status_code == 201
     assert response.json()["handled"] == ["ada@example.com"]
     assert len(RECORDING_QUEUE_BACKEND.added) == 1
     assert [job.queue for job in RECORDING_QUEUE_BACKEND.jobs()] == ["emails"]
@@ -204,9 +204,9 @@ def test_queue_processors_are_not_duplicated_across_repeated_lifespan_startups()
     app = FaNestFactory.create(QueueAppModule)
 
     with TestClient(app) as client:
-        assert client.post("/queues").status_code == 200
+        assert client.post("/queues").status_code == 201
     with TestClient(app) as client:
-        assert client.post("/queues").status_code == 200
+        assert client.post("/queues").status_code == 201
 
     assert EmailProcessor.handled == ["ada@example.com", "ada@example.com"]
 

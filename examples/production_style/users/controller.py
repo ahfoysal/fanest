@@ -4,6 +4,7 @@ from fanest import (
     Body,
     Controller,
     Get,
+    HttpCode,
     Param,
     ParseBoolPipe,
     ParseIntPipe,
@@ -33,6 +34,7 @@ class AuthController:
         self.users = users
 
     @Post("login")
+    @HttpCode(200)
     @UsePipes(ValidationPipe())
     async def login(self, dto: LoginDto = cast(Any, Body())):
         return self.users.login(dto)
